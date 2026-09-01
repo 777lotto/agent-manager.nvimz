@@ -1,12 +1,15 @@
 # agent-manager.nvimz
 
-`agent-manager` is the proposed standalone Neovim plugin for managing Codex
+`agent-manager` is a standalone Neovim plugin for managing Codex
 and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-This repository currently contains the specification only. No plugin or broker
-implementation has been started here.
+Implementation is under way. The M0 contract spike now owns the versioned
+public broker schema, the private Rust/Python worker schema, a Rust broker core,
+the native Codex App Server process boundary, and the private Claude Agent SDK
+worker. The editor UI intentionally begins in M1 after these contracts pass
+their acceptance gates.
 
 ## Selected architecture
 
@@ -37,6 +40,32 @@ See the complete [Agent Manager specification](docs/spec.md), including the
 broker/worker protocol, security model, delivery milestones, and UX
 Foundation/Styling/Chrome integration plan.
 
+## M0 development
+
+Toolchains are pinned by Mise and Python dependencies are locked by uv. The
+ordinary test suite uses fake provider runtimes; it never consumes provider
+quota or requires authentication.
+
+```sh
+mise install
+mise run setup
+mise run verify
+```
+
+Useful diagnostic commands after a build:
+
+```sh
+cargo run -p agent-manager-broker -- contract-info
+cargo run -p agent-manager-broker -- codex-probe --cwd "$PWD"
+```
+
+`codex-probe` performs only App Server initialization and thread discovery.
+The live `codex-trace` command requires an explicit `--allow-live-provider`
+flag and is never part of verification.
+
+See [M0 contract decisions](docs/architecture/m0-contract-decisions.md) for the
+frozen runtime versions, framing differences, and upgrade procedure.
+
 ## UX direction
 
 The functional plugin will support native Neovim presentation without the UX
@@ -54,6 +83,17 @@ suite. Once those repositories are mature and their contracts are promoted:
 Agent Manager remains a separate repository and will not be added to
 `nvim-config` until its implementation acceptance gates pass.
 
+## Repository layout
+
+```text
+crates/agent-manager-broker/       Rust protocol core and Codex/worker clients
+python/                            private Claude Agent SDK worker package
+protocol/broker/v1/                public Neovim/broker contract and fixtures
+protocol/claude-worker/v1/         private Rust/Python contract and fixtures
+protocol/vendor/codex/0.151.0/     generated provider schema baseline
+docs/                              specification and architecture decisions
+```
+
 ## Repository workflow
 
 - `bet` is production/default.
@@ -61,5 +101,5 @@ Agent Manager remains a separate repository and will not be added to
 - focused branches merge into `bluff`; verified milestones promote from
   `bluff` to `bet`.
 
-Future Git remotes must use SSH. Commits and annotated release tags preserve
-the configured OpenPGP signing behavior.
+Agent work uses broker-managed `agent/**` branches and pull requests into
+`bluff`. Verified milestones promote from `bluff` to `bet`.

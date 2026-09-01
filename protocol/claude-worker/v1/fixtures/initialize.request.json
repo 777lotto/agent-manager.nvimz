@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": "broker-1",
+  "method": "worker/initialize",
+  "params": {
+    "protocol_version": 1,
+    "broker_version": "0.1.0",
+    "nonce": "cc38847223814be19e015bf3219f394b"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": "worker:4a49fc4e-e773-4e26-bd71-bcdd01d6be09",
+  "method": "approval/request",
+  "params": {
+    "callback_id": "4a49fc4e-e773-4e26-bd71-bcdd01d6be09",
+    "agent_id": "a4e9d943-2310-42fd-b470-6f63c83f0181",
+    "provider_session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "tool_name": "Bash",
+    "input": {
+      "command": "cargo test",
+      "description": "Run repository tests"
+    },
+    "context": {
+      "suggestions": []
+    }
+  }
+}

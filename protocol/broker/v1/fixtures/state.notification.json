@@ -1,0 +1,28 @@
+{
+  "jsonrpc": "2.0",
+  "method": "broker/state",
+  "params": {
+    "agents": [
+      {
+        "id": "a4e9d943-2310-42fd-b470-6f63c83f0181",
+        "provider": "claude",
+        "provider_session_id": "550e8400-e29b-41d4-a716-446655440000",
+        "cwd": "/workspace/project",
+        "workspace_strategy": "worktree",
+        "worktree_path": "/workspace/project",
+        "title": "Contract review",
+        "state": "waiting_approval",
+        "active_turn_id": "turn-7",
+        "pending_approvals": 1,
+        "unread_events": 3,
+        "capabilities": [
+          { "name": "streaming", "available": true, "reason": null },
+          { "name": "steer", "available": true, "reason": null },
+          { "name": "replay", "available": false, "reason": "embedded mode" }
+        ],
+        "created_at": "2026-08-31T17:00:00Z",
+        "updated_at": "2026-08-31T18:00:00Z"
+      }
+    ]
+  }
+}

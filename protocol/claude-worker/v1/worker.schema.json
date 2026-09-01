@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-manager.nvimz/protocol/claude-worker/v1/worker.schema.json",
+  "title": "Agent Manager Claude worker protocol v1",
+  "description": "Private JSON-RPC 2.0 contract between the Rust broker and Python worker.",
+  "$ref": "#/$defs/message",
+  "$defs": {
+    "id": {
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "string", "minLength": 1, "maxLength": 256 }
+      ]
+    },
+    "responseId": {
+      "oneOf": [
+        { "$ref": "#/$defs/id" },
+        { "type": "null" }
+      ]
+    },
+    "errorObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "data": true
+      }
+    },
+    "emptyParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "initializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "broker_version", "nonce"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "broker_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nonce": { "type": "string", "minLength": 16, "maxLength": 256 }
+      }
+    },
+    "pageParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "directory": { "type": ["string", "null"], "maxLength": 8192 },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+    "historyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "directory": { "type": ["string", "null"], "maxLength": 8192 },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 },
+        "offset": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+    "startParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "cwd"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
+    "resumeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "cwd", "session_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "turnParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "text"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 524288 }
+      }
+    },
+    "agentParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "brokerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": {
+          "enum": [
+            "worker/initialize",
+            "session/list",
+            "session/history",
+            "session/start",
+            "session/resume",
+            "session/fork",
+            "turn/prompt",
+            "turn/steer",
+            "turn/interrupt",
+            "session/close",
+            "worker/shutdown"
+          ]
+        },
+        "params": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "worker/initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
+        { "if": { "properties": { "method": { "const": "session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/pageParams" } } } },
+        { "if": { "properties": { "method": { "const": "session/history" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/historyParams" } } } },
+        { "if": { "properties": { "method": { "const": "session/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["session/resume", "session/fork"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/resumeParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["turn/prompt", "turn/steer"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/turnParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["turn/interrupt", "session/close"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/agentParams" } } } },
+        { "if": { "properties": { "method": { "const": "worker/shutdown" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } }
+      ]
+    },
+    "callbackBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callback_id", "agent_id", "provider_session_id", "tool_name", "input", "context"],
+      "properties": {
+        "callback_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "provider_session_id": { "type": ["string", "null"], "maxLength": 1024 },
+        "tool_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "input": { "type": "object" },
+        "context": { "type": "object" }
+      }
+    },
+    "approvalCallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "approval/request" },
+        "params": { "$ref": "#/$defs/callbackBase" }
+      }
+    },
+    "questionCallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "question/request" },
+        "params": {
+          "allOf": [
+            { "$ref": "#/$defs/callbackBase" },
+            {
+              "properties": {
+                "tool_name": { "const": "AskUserQuestion" },
+                "input": {
+                  "type": "object",
+                  "required": ["questions"],
+                  "properties": {
+                    "questions": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 4,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["question", "header", "options", "multiSelect"],
+                        "properties": {
+                          "question": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                          "header": { "type": "string", "minLength": 1, "maxLength": 12 },
+                          "options": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 4,
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": ["label", "description"],
+                              "properties": {
+                                "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+                                "description": { "type": "string", "maxLength": 2048 }
+                              }
+                            }
+                          },
+                          "multiSelect": { "type": "boolean" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/responseId" },
+        "result": true,
+        "error": { "$ref": "#/$defs/errorObject" }
+      },
+      "oneOf": [
+        { "required": ["result"], "not": { "required": ["error"] } },
+        { "required": ["error"], "not": { "required": ["result"] } }
+      ]
+    },
+    "eventNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "session/event" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent_id", "provider_session_id", "worker_sequence", "event_type", "payload"],
+          "properties": {
+            "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "provider_session_id": { "type": ["string", "null"], "maxLength": 1024 },
+            "worker_sequence": { "type": "integer", "minimum": 1 },
+            "event_type": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+              "maxLength": 128
+            },
+            "payload": { "type": "object" }
+          }
+        }
+      }
+    },
+    "message": {
+      "oneOf": [
+        { "$ref": "#/$defs/brokerRequest" },
+        { "$ref": "#/$defs/approvalCallback" },
+        { "$ref": "#/$defs/questionCallback" },
+        { "$ref": "#/$defs/response" },
+        { "$ref": "#/$defs/eventNotification" }
+      ]
+    }
+  }
+}

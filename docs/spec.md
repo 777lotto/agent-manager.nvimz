@@ -2,8 +2,8 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: architecture selected; implementation not started
-- Last reviewed: 2026-08-26
+- Status: M0 contract spike in progress
+- Last reviewed: 2026-09-01
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
 - Foundation plugin ID: `agent.manager`
