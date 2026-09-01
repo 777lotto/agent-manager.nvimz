@@ -4,13 +4,13 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-test "$(codex --version)" = "codex-cli 0.151.0"
+test "$(codex --version)" = "codex-cli 0.152.0"
 
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 
 (
-  cd protocol/vendor/codex/0.151.0
+  cd protocol/vendor/codex/0.152.0
   sha256sum --check --quiet SHA256SUMS
 )
 

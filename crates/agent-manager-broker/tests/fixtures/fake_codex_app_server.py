@@ -39,7 +39,7 @@ def main() -> None:
     respond(
         initialize,
         {
-            "userAgent": "codex_cli_rs/0.151.0",
+            "userAgent": "codex_cli_rs/0.152.0",
             "platformFamily": "unix",
             "platformOs": "linux",
             "codexHome": "/tmp/fake-codex-home",

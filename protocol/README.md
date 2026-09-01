@@ -15,8 +15,8 @@ request ID. The public connection completes its handshake with an `initialized`
 notification after a successful `initialize` response.
 
 Codex App Server is a provider protocol, not either Agent Manager contract.
-Codex 0.151.0 deliberately omits the JSON-RPC header on its wire. The curated
-generated schemas under `vendor/codex/0.151.0/` capture that exact release, and
+Codex 0.152.0 deliberately omits the JSON-RPC header on its wire. The curated
+generated schemas under `vendor/codex/0.152.0/` capture that exact release, and
 the Rust adapter translates it at the provider boundary.
 
 ## Compatibility rules

@@ -90,7 +90,7 @@ crates/agent-manager-broker/       Rust protocol core and Codex/worker clients
 python/                            private Claude Agent SDK worker package
 protocol/broker/v1/                public Neovim/broker contract and fixtures
 protocol/claude-worker/v1/         private Rust/Python contract and fixtures
-protocol/vendor/codex/0.151.0/     generated provider schema baseline
+protocol/vendor/codex/0.152.0/     generated provider schema baseline
 docs/                              specification and architecture decisions
 ```
 
