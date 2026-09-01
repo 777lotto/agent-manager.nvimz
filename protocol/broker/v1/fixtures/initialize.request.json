@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocol_version": 1,
+    "client": {
+      "name": "agent-manager.nvim",
+      "title": "Agent Manager for Neovim",
+      "version": "0.1.0"
+    },
+    "last_sequence": 41
+  }
+}
