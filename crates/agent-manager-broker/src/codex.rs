@@ -159,12 +159,37 @@ impl CodexAppServer {
         .await
     }
 
-    pub async fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<(), CodexError> {
+    pub async fn steer(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        prompt: &str,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{ "type": "text", "text": prompt }]
+            }),
+        )
+        .await
+    }
+
+    pub async fn interrupt_with_events(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "turn/interrupt",
             json!({ "threadId": thread_id, "turnId": turn_id }),
         )
-        .await?;
+        .await
+    }
+
+    pub async fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<(), CodexError> {
+        self.interrupt_with_events(thread_id, turn_id).await?;
         Ok(())
     }
 
@@ -313,6 +338,11 @@ pub fn normalize_event(
 #[must_use]
 pub fn thread_id(result: &Value) -> Option<&str> {
     result.get("thread")?.get("id")?.as_str()
+}
+
+#[must_use]
+pub fn turn_id(result: &Value) -> Option<&str> {
+    result.get("turn")?.get("id")?.as_str()
 }
 
 fn normalized_event_type(method: &str, params: &Value) -> &'static str {

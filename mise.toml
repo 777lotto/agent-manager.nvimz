@@ -3,6 +3,7 @@ python = "3.13.15"
 rust = { version = "1.98.0", profile = "minimal", components = "clippy,rustfmt" }
 shellcheck = "0.11.0"
 uv = "0.12.7"
+neovim = "0.12.4"
 
 [tasks.setup]
 description = "Install the locked Python worker environment"
@@ -27,16 +28,17 @@ run = [
 ]
 
 [tasks.test]
-description = "Run Rust, Python, and cross-language contract tests"
+description = "Run Rust, Python, Lua, and cross-language contract tests"
 depends = ["setup"]
 run = [
   "cargo test --workspace --all-features",
   "cd python && uv run python -m unittest discover -s tests -v",
   "cd python && uv run python ../scripts/validate_protocol.py",
+  "scripts/test-lua.sh",
 ]
 
 [tasks.verify]
-description = "Run the complete M0 handoff gate"
+description = "Run the complete M1 handoff gate"
 run = "scripts/verify.sh"
 
 [tasks."codex-schema"]
