@@ -2,7 +2,7 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M0 contract spike in progress
+- Status: M1 embedded vertical slice implemented
 - Last reviewed: 2026-09-01
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
@@ -1052,6 +1052,12 @@ provider runtime, Python, and SDK versions gate ordinary CI.
 - Start one Codex or Claude agent, stream a conversation, show tool activity,
   send a follow-up, and interrupt.
 - Native Neovim styling only.
+
+Implementation status: complete on 2026-09-01. The slice deliberately supports
+one broker-owned agent, keeps approvals fail-closed until M2, and does not claim
+durability across a Neovim disconnect. Rust pipe-level integration tests cover
+both provider adapters; a headless Neovim test covers the public stdio client,
+model projection, native buffers, rendering, controls, and teardown.
 
 ### M2: safe interactive workflow
 

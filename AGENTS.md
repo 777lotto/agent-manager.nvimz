@@ -9,8 +9,10 @@
   never expose a listener or write non-protocol data to standard output.
 - Provider-specific payloads stay namespaced. Do not erase capabilities merely
   to make Codex and Claude appear identical.
-- M0 has no editor UI. Keep Lua and Neovim runtime work out of the contract
-  spike unless the milestone document is explicitly revised.
+- M1 owns the embedded stdio broker and native Lua workspace. Keep durable
+  sockets, multiple agents, interactive approvals/questions, resume/fork, and
+  UX ecosystem integration within their later milestones unless the
+  specification is explicitly revised.
 
 ## Safety boundaries
 
@@ -26,6 +28,8 @@
 
 - Tool versions are pinned in `mise.toml`; Python dependencies are locked in
   `python/uv.lock`.
+- Neovim is pinned in `mise.toml`; headless Lua tests use only fake provider
+  processes and must leave user configuration out of the runtime path.
 - Run `mise run verify` before handoff. It is the repository's required gate.
 - Rust formatting and linting use `cargo fmt` and `cargo clippy`.
 - Python formatting and linting use the versions locked by uv.

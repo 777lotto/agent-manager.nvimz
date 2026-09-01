@@ -1,0 +1,94 @@
+*agent-manager.txt*          Native Codex and Claude workspace for Neovim
+
+==============================================================================
+CONTENTS                                                   *agent-manager*
+
+1. Introduction                                      |agent-manager-intro|
+2. Setup                                              |agent-manager-setup|
+3. Commands                                        |agent-manager-commands|
+4. Workspace                                      |agent-manager-workspace|
+5. Safety                                            |agent-manager-safety|
+
+==============================================================================
+1. Introduction                                      *agent-manager-intro*
+
+Agent Manager starts an embedded Rust broker and presents one Codex or Claude
+agent in native Neovim buffers. M1 streams conversation and tool activity and
+supports follow-up prompts, steering, and interrupt.
+
+==============================================================================
+2. Setup                                              *agent-manager-setup*
+
+>lua
+    require("agent_manager").setup({
+      broker = {
+        command = { "/path/to/agent-manager-broker", "serve" },
+      },
+      providers = {
+        claude = {
+          python = "/path/to/worker-venv/bin/python",
+        },
+      },
+    })
+<
+
+A source checkout discovers target/release or target/debug broker artifacts
+and python/.venv/bin/python relative to the plugin root when present. Startup
+never builds or installs dependencies.
+
+==============================================================================
+3. Commands                                        *agent-manager-commands*
+
+                                                   *:AgentManager*
+:AgentManager              Open or focus the dedicated workspace tab.
+
+                                                   *:AgentManagerStart*
+:AgentManagerStart [codex|claude]
+                           Start the one agent supported by M1.
+
+                                                   *:AgentManagerSend*
+:AgentManagerSend [text]   Send a prompt, or open native input without text.
+
+                                                   *:AgentManagerSteer*
+:AgentManagerSteer [text]  Add input to the selected active turn.
+
+                                                   *:AgentManagerInterrupt*
+:AgentManagerInterrupt     Confirm and interrupt the selected active turn.
+
+                                                   *:AgentManagerHealth*
+:AgentManagerHealth        Run |:checkhealth| for Agent Manager.
+
+                                                   *:AgentManagerClose*
+:AgentManagerClose         Close the view without interrupting the agent.
+
+==============================================================================
+4. Workspace                                      *agent-manager-workspace*
+
+The native workspace uses agents, conversation, and activity buffers. Wide
+displays show all three. Medium and narrow displays use <Tab> and <S-Tab> to
+cycle panes.
+
+    n       start an agent
+    p       prompt the selected agent
+    s       steer an active turn
+    x       confirm an interrupt
+    r       refresh broker state
+    <CR>    select the agent under the cursor
+    ?       show mapping help
+    q       close the workspace view
+
+Mappings are buffer-local. Closing the view does not approve, interrupt, or
+delete provider state.
+
+==============================================================================
+5. Safety                                            *agent-manager-safety*
+
+Live prompts may consume provider quota. Credentials stay in the installed
+provider runtimes and never enter Agent Manager configuration. M1 has no
+approval or question UI, so provider callbacks are denied automatically.
+
+Embedded state ends when the broker exits. Durable reconnect, multiple agents,
+approvals, questions, resume, fork, history, diffs, and editor context belong
+to later milestones.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

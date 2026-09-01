@@ -1,0 +1,14 @@
+:AgentManager	agent-manager.txt	/*:AgentManager*
+:AgentManagerClose	agent-manager.txt	/*:AgentManagerClose*
+:AgentManagerHealth	agent-manager.txt	/*:AgentManagerHealth*
+:AgentManagerInterrupt	agent-manager.txt	/*:AgentManagerInterrupt*
+:AgentManagerSend	agent-manager.txt	/*:AgentManagerSend*
+:AgentManagerStart	agent-manager.txt	/*:AgentManagerStart*
+:AgentManagerSteer	agent-manager.txt	/*:AgentManagerSteer*
+agent-manager	agent-manager.txt	/*agent-manager*
+agent-manager-commands	agent-manager.txt	/*agent-manager-commands*
+agent-manager-intro	agent-manager.txt	/*agent-manager-intro*
+agent-manager-safety	agent-manager.txt	/*agent-manager-safety*
+agent-manager-setup	agent-manager.txt	/*agent-manager-setup*
+agent-manager-workspace	agent-manager.txt	/*agent-manager-workspace*
+agent-manager.txt	agent-manager.txt	/*agent-manager.txt*
