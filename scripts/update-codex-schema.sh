@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-expected_version="codex-cli 0.151.0"
+expected_version="codex-cli 0.152.0"
 actual_version="$(codex --version)"
 if [[ "$actual_version" != "$expected_version" ]]; then
   echo "expected $expected_version, found $actual_version" >&2
@@ -9,7 +9,7 @@ if [[ "$actual_version" != "$expected_version" ]]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-destination="$repo_root/protocol/vendor/codex/0.151.0"
+destination="$repo_root/protocol/vendor/codex/0.152.0"
 generated="$(mktemp -d)"
 trap 'rm -rf -- "$generated"' EXIT
 
@@ -42,4 +42,4 @@ done
   sha256sum "${files[@]}" > SHA256SUMS
 )
 
-echo "updated Codex App Server schemas for 0.151.0"
+echo "updated Codex App Server schemas for 0.152.0"

@@ -5,11 +5,11 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-Implementation is under way. The M0 contract spike now owns the versioned
-public broker schema, the private Rust/Python worker schema, a Rust broker core,
-the native Codex App Server process boundary, and the private Claude Agent SDK
-worker. The editor UI intentionally begins in M1 after these contracts pass
-their acceptance gates.
+The M1 embedded slice is usable now. Neovim starts the Rust broker over stdio,
+the broker owns one Codex or Claude session, and the native workspace streams
+conversation and tool activity. It supports follow-up prompts, mid-turn
+steering, interrupt, state projection, and bounded in-process replay. Ordinary
+verification uses fake provider processes and never consumes provider quota.
 
 ## Selected architecture
 
@@ -40,7 +40,7 @@ See the complete [Agent Manager specification](docs/spec.md), including the
 broker/worker protocol, security model, delivery milestones, and UX
 Foundation/Styling/Chrome integration plan.
 
-## M0 development
+## Install and verify
 
 Toolchains are pinned by Mise and Python dependencies are locked by uv. The
 ordinary test suite uses fake provider runtimes; it never consumes provider
@@ -48,6 +48,62 @@ quota or requires authentication.
 
 ```sh
 mise install
+mise run setup
+mise run verify
+cargo build --release -p agent-manager-broker
+```
+
+For a source checkout, Agent Manager discovers the release/debug broker and the
+locked Python worker environment relative to the plugin root. A packaged
+installation should put `agent-manager-broker` on `PATH` and configure the
+installed worker Python explicitly:
+
+```lua
+require("agent_manager").setup({
+  broker = {
+    mode = "embedded",
+    command = { "/absolute/path/to/agent-manager-broker", "serve" },
+  },
+  providers = {
+    claude = {
+      python = "/absolute/path/to/agent-manager-worker-venv/bin/python",
+    },
+  },
+})
+```
+
+Then open Neovim and use:
+
+```vim
+:AgentManager
+:AgentManagerStart codex
+:AgentManagerSend explain the current repository
+:AgentManagerSteer focus on the failing tests
+:AgentManagerInterrupt
+:AgentManagerHealth
+```
+
+The workspace also maps `n` to start, `p` to prompt, `s` to steer, `x` to
+confirm an interrupt, `<Tab>` to cycle panes, and `q` to close only the view.
+Wide displays show agents, conversation, and activity together; medium and
+narrow displays cycle the same buffers without losing model state.
+
+### M1 safety boundary
+
+Live prompts use the provider account already configured for Codex or Claude
+and can consume quota. Agent Manager never reads, prints, stores, or passes
+provider credentials in arguments. M1 has no approval UI, so provider tool and
+question callbacks fail closed automatically. That makes the embedded slice
+suitable for conversation, observation, and tools that do not require a human
+approval; interactive allow/deny handling arrives in M2.
+
+Opening the workspace and running the default test suite are non-spending. The
+diagnostic `codex-probe` performs only initialization and thread discovery;
+`codex-trace` starts a paid/live turn and therefore requires an explicit flag.
+
+## Development
+
+```sh
 mise run setup
 mise run verify
 ```
@@ -65,6 +121,8 @@ flag and is never part of verification.
 
 See [M0 contract decisions](docs/architecture/m0-contract-decisions.md) for the
 frozen runtime versions, framing differences, and upgrade procedure.
+See [M1 embedded slice](docs/architecture/m1-embedded-slice.md) for the current
+runtime, editor surface, limitations, and acceptance evidence.
 
 ## UX direction
 
@@ -87,10 +145,13 @@ Agent Manager remains a separate repository and will not be added to
 
 ```text
 crates/agent-manager-broker/       Rust protocol core and Codex/worker clients
+lua/agent_manager/                  Neovim client, model, facade, and views
+plugin/                             guarded Neovim command bootstrap
 python/                            private Claude Agent SDK worker package
 protocol/broker/v1/                public Neovim/broker contract and fixtures
 protocol/claude-worker/v1/         private Rust/Python contract and fixtures
-protocol/vendor/codex/0.151.0/     generated provider schema baseline
+protocol/vendor/codex/0.152.0/     generated provider schema baseline
+tests/                              headless Lua tests and fake public broker
 docs/                              specification and architecture decisions
 ```
 

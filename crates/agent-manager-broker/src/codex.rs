@@ -13,7 +13,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::framing::{BoundedFrame, read_bounded_line};
 use crate::protocol::{EventEnvelope, Provider};
 
-pub const PINNED_CODEX_VERSION: &str = "0.151.0";
+pub const PINNED_CODEX_VERSION: &str = "0.152.0";
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,12 +159,37 @@ impl CodexAppServer {
         .await
     }
 
-    pub async fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<(), CodexError> {
+    pub async fn steer(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        prompt: &str,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{ "type": "text", "text": prompt }]
+            }),
+        )
+        .await
+    }
+
+    pub async fn interrupt_with_events(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "turn/interrupt",
             json!({ "threadId": thread_id, "turnId": turn_id }),
         )
-        .await?;
+        .await
+    }
+
+    pub async fn interrupt(&mut self, thread_id: &str, turn_id: &str) -> Result<(), CodexError> {
+        self.interrupt_with_events(thread_id, turn_id).await?;
         Ok(())
     }
 
@@ -315,6 +340,11 @@ pub fn thread_id(result: &Value) -> Option<&str> {
     result.get("thread")?.get("id")?.as_str()
 }
 
+#[must_use]
+pub fn turn_id(result: &Value) -> Option<&str> {
+    result.get("turn")?.get("id")?.as_str()
+}
+
 fn normalized_event_type(method: &str, params: &Value) -> &'static str {
     match method {
         "thread/started"
@@ -446,7 +476,7 @@ fn response_error(error: &Value) -> CodexError {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ProviderEvent, ProviderEventKind, normalize_event};
+    use super::{ProviderEvent, ProviderEventKind, normalize_event, safe_server_request_response};
 
     fn event(method: &str, params: Value) -> ProviderEvent {
         ProviderEvent {
@@ -500,5 +530,37 @@ mod tests {
         assert_eq!(unknown.event_type, "provider.notice");
         assert_eq!(unknown.provider_event["method"], "future/event");
         assert_eq!(unknown.provider_event["params"]["opaque"], true);
+    }
+
+    #[test]
+    fn preserves_auth_recovery_notifications_as_provider_notices() {
+        let recovery = normalize_event(
+            "agent-1",
+            &event(
+                "modelProvider/authRecoveryStarted",
+                json!({
+                    "message": "provider authentication is recovering",
+                    "provider": "openai",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }),
+            ),
+        )
+        .expect("normalize auth recovery notification");
+
+        assert_eq!(recovery.event_type, "provider.notice");
+        assert_eq!(
+            recovery.provider_event["method"],
+            "modelProvider/authRecoveryStarted"
+        );
+        assert_eq!(recovery.provider_event["params"]["threadId"], "thread-1");
+    }
+
+    #[test]
+    fn unsupported_mcp_elicitation_remains_fail_closed() {
+        assert_eq!(
+            safe_server_request_response("mcpServer/elicitation/request"),
+            Err("unsupported server request denied by Agent Manager")
+        );
     }
 }

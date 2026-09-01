@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use agent_manager_broker::codex::{
     CodexAppServer, CommandSpec, PINNED_CODEX_VERSION, normalize_event, thread_id,
 };
+use agent_manager_broker::embedded::{self, EmbeddedConfig};
 use agent_manager_broker::protocol::PROTOCOL_VERSION;
 use agent_manager_broker::worker::{
     PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use agent_manager_broker::{BROKER_VERSION, codex};
 use serde_json::{Value, json};
+use tokio::io::BufReader;
 
 const LIVE_CONFIRMATION: &str = "--allow-live-provider";
 
@@ -43,10 +45,40 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             Ok(())
         }
+        Some("serve") => serve_embedded(&args[1..]).await,
         Some("codex-probe") => probe_codex(parse_cwd(&args[1..])?).await,
         Some("codex-trace") => trace_codex(&args[1..]).await,
         Some(command) => Err(invalid_input(format!("unknown command: {command}")).into()),
     }
+}
+
+async fn serve_embedded(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = EmbeddedConfig::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--claude-python" => {
+                let python = args
+                    .get(index + 1)
+                    .ok_or_else(|| invalid_input("--claude-python requires an absolute path"))?;
+                if !Path::new(python).is_absolute() {
+                    return Err(invalid_input("--claude-python requires an absolute path").into());
+                }
+                config = config.with_claude_python(python);
+                index += 2;
+            }
+            option => {
+                return Err(invalid_input(format!("unknown serve option: {option}")).into());
+            }
+        }
+    }
+    embedded::serve(
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+        config,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn probe_codex(cwd: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -166,9 +198,11 @@ fn print_help() {
          \n\
          Commands:\n\
            contract-info\n\
+           serve [--claude-python ABSOLUTE_PATH]\n\
            codex-probe --cwd ABSOLUTE_PATH\n\
            codex-trace --cwd ABSOLUTE_PATH --prompt TEXT {LIVE_CONFIRMATION}\n\
          \n\
+         serve runs the embedded Neovim JSON-RPC broker over stdio.\n\
          codex-probe performs initialization and history discovery only.\n\
          codex-trace invokes the live provider and is never run by verification."
     );
