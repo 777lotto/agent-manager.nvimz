@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-manager.nvimz/protocol/broker/v1/broker.schema.json",
+  "title": "Agent Manager broker protocol v1",
+  "description": "Public JSON-RPC 2.0 contract shared by Neovim and the Rust broker.",
+  "$ref": "#/$defs/message",
+  "$defs": {
+    "id": {
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "string", "minLength": 1, "maxLength": 256 }
+      ]
+    },
+    "responseId": {
+      "oneOf": [
+        { "$ref": "#/$defs/id" },
+        { "type": "null" }
+      ]
+    },
+    "provider": {
+      "enum": ["codex", "claude"]
+    },
+    "workspaceStrategy": {
+      "enum": ["shared", "worktree"]
+    },
+    "agentState": {
+      "enum": [
+        "starting",
+        "idle",
+        "running",
+        "waiting_input",
+        "waiting_approval",
+        "completed",
+        "interrupted",
+        "failed",
+        "disconnected"
+      ]
+    },
+    "capabilityName": {
+      "enum": [
+        "streaming",
+        "multi_turn",
+        "history",
+        "resume",
+        "fork",
+        "interrupt",
+        "steer",
+        "approvals",
+        "questions",
+        "usage",
+        "file_changes",
+        "diff",
+        "replay"
+      ]
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "available"],
+      "properties": {
+        "name": { "$ref": "#/$defs/capabilityName" },
+        "available": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "maxLength": 1024 }
+      }
+    },
+    "agentSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "provider_session_id",
+        "cwd",
+        "workspace_strategy",
+        "worktree_path",
+        "title",
+        "state",
+        "active_turn_id",
+        "pending_approvals",
+        "unread_events",
+        "capabilities",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "provider": { "$ref": "#/$defs/provider" },
+        "provider_session_id": { "type": ["string", "null"], "maxLength": 1024 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "workspace_strategy": { "$ref": "#/$defs/workspaceStrategy" },
+        "worktree_path": { "type": ["string", "null"], "maxLength": 8192 },
+        "title": { "type": "string", "maxLength": 4096 },
+        "state": { "$ref": "#/$defs/agentState" },
+        "active_turn_id": { "type": ["string", "null"], "maxLength": 1024 },
+        "pending_approvals": { "type": "integer", "minimum": 0 },
+        "unread_events": { "type": "integer", "minimum": 0 },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability" },
+          "uniqueItems": true
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "sequence",
+        "timestamp",
+        "agent_id",
+        "provider",
+        "type",
+        "payload",
+        "provider_event"
+      ],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "provider": { "$ref": "#/$defs/provider" },
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+          "maxLength": 128,
+          "description": "Known families are documented, but unknown provider notices remain representable."
+        },
+        "payload": { "type": "object" },
+        "provider_event": { "type": "object" }
+      }
+    },
+    "errorObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "data": true
+      }
+    },
+    "initializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "client"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "title": { "type": ["string", "null"], "maxLength": 256 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        },
+        "last_sequence": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "emptyParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "agentIdParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "startParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cwd", "workspace_strategy"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "workspace_strategy": { "$ref": "#/$defs/workspaceStrategy" },
+        "worktree_path": { "type": ["string", "null"], "maxLength": 8192 },
+        "provider_options": { "type": "object" }
+      }
+    },
+    "historyParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "cursor": { "type": ["string", "null"], "maxLength": 4096 },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "attachments"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 524288 },
+        "attachments": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "required": ["kind", "payload"],
+            "properties": {
+              "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "payload": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "turnInputParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "input"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "input": { "$ref": "#/$defs/input" }
+      }
+    },
+    "resumeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "provider_session_id", "cwd", "workspace_strategy"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "provider_session_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "workspace_strategy": { "$ref": "#/$defs/workspaceStrategy" },
+        "worktree_path": { "type": ["string", "null"], "maxLength": 8192 },
+        "provider_options": { "type": "object" }
+      }
+    },
+    "approvalResponseParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "approval_id", "decision"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "approval_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "decision": { "enum": ["allow", "deny", "defer"] },
+        "updated_input": { "type": "object" },
+        "message": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "answer": {
+      "oneOf": [
+        { "type": "string", "maxLength": 16384 },
+        {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "maxLength": 4096 }
+        }
+      ]
+    },
+    "questionResponseParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "question_id", "answers"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "question_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "answers": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/answer" }
+        }
+      }
+    },
+    "contextParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "context"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "context": {
+          "type": "object",
+          "required": ["kind", "payload"],
+          "properties": {
+            "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "payload": { "type": "object" }
+          }
+        }
+      }
+    },
+    "replayParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["after_sequence"],
+      "properties": {
+        "after_sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": {
+          "enum": [
+            "initialize",
+            "agent/list",
+            "agent/start",
+            "agent/attach",
+            "agent/history",
+            "agent/prompt",
+            "agent/steer",
+            "agent/interrupt",
+            "agent/resume",
+            "agent/fork",
+            "agent/archive",
+            "agent/approval/respond",
+            "agent/question/respond",
+            "agent/context/add",
+            "agent/diff",
+            "agent/replay",
+            "broker/shutdown"
+          ]
+        },
+        "params": { "type": "object" }
+      },
+      "allOf": [
+        { "if": { "properties": { "method": { "const": "initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["agent/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["agent/attach", "agent/interrupt", "agent/fork", "agent/archive", "agent/diff"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/agentIdParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/history" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/historyParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["agent/prompt", "agent/steer"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/turnInputParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/resume" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/resumeParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/approval/respond" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/approvalResponseParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/question/respond" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/questionResponseParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/context/add" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/contextParams" } } } },
+        { "if": { "properties": { "method": { "const": "agent/replay" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/replayParams" } } } }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/responseId" },
+        "result": true,
+        "error": { "$ref": "#/$defs/errorObject" }
+      },
+      "oneOf": [
+        { "required": ["result"], "not": { "required": ["error"] } },
+        { "required": ["error"], "not": { "required": ["result"] } }
+      ]
+    },
+    "notification": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jsonrpc", "method", "params"],
+          "properties": {
+            "jsonrpc": { "const": "2.0" },
+            "method": { "const": "initialized" },
+            "params": { "$ref": "#/$defs/emptyParams" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jsonrpc", "method", "params"],
+          "properties": {
+            "jsonrpc": { "const": "2.0" },
+            "method": { "const": "agent/event" },
+            "params": { "$ref": "#/$defs/eventEnvelope" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jsonrpc", "method", "params"],
+          "properties": {
+            "jsonrpc": { "const": "2.0" },
+            "method": { "const": "broker/state" },
+            "params": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["agents"],
+              "properties": {
+                "agents": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/agentSummary" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "message": {
+      "oneOf": [
+        { "$ref": "#/$defs/request" },
+        { "$ref": "#/$defs/response" },
+        { "$ref": "#/$defs/notification" }
+      ]
+    }
+  }
+}

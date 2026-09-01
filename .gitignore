@@ -1,0 +1,10 @@
+/target/
+/python/.venv/
+/.mise.local.toml
+/.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
