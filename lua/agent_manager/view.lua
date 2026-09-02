@@ -203,6 +203,11 @@ function View:_map_buffer(buffer)
       self.actions.fork()
     end
   end, map_opts("Agent Manager: fork selected session"))
+  vim.keymap.set("n", "A", function()
+    if self.actions.archive then
+      self.actions.archive()
+    end
+  end, map_opts("Agent Manager: archive selected agent"))
   vim.keymap.set("n", "c", function()
     if self.actions.context then
       self.actions.context()
@@ -683,6 +688,7 @@ function View:show_help()
     " x       interrupt active turn",
     " a / d   allow or deny focused request",
     " f       fork selected session",
+    " A       archive selected inactive agent",
     " c       add explicit editor context",
     " D       show workspace diff or dirty-buffer conflict",
     " r       refresh agent state",

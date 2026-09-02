@@ -156,7 +156,10 @@ function M.setup(opts)
     end,
   })
   client = Client.new({
+    mode = config.broker.mode,
     command = config.broker.command,
+    socket = config.broker.socket,
+    reconnect = config.broker.reconnect,
     claude_python = config.providers.claude.python,
     on_notification = function(method, params)
       local changed = model:apply_notification(method, params)
@@ -172,6 +175,24 @@ function M.setup(opts)
       if view then
         view:schedule_render()
       end
+    end,
+    on_resync = function(replay)
+      model:begin_resync(replay.latest)
+      vim.schedule(function()
+        if not runtime or runtime.client ~= client then
+          return
+        end
+        M.refresh(function(result, refresh_err)
+          if refresh_err then
+            return
+          end
+          for _, agent in ipairs((result and result.agents) or {}) do
+            if agent.state ~= "disconnected" and agent.provider_session_id then
+              M.history(agent.id)
+            end
+          end
+        end)
+      end)
     end,
   })
   local actions = {
@@ -192,6 +213,9 @@ function M.setup(opts)
     end,
     fork = function()
       M.fork()
+    end,
+    archive = function()
+      M.confirm_archive()
     end,
     allow = function(action)
       M.respond_approval(action.agent_id, action.id, "allow")
@@ -237,7 +261,7 @@ function M.open()
   local started, start_err = runtime.client:start(function(ready_err)
     if ready_err then
       report(ready_err)
-    else
+    elseif not runtime.client.resync_required then
       M.refresh()
     end
   end)
@@ -286,6 +310,20 @@ function M.start(opts, callback)
     finish(callback, nil, err)
     return nil, err
   end
+  local worktree_path = nil
+  if strategy == "worktree" then
+    if type(opts.worktree_path) ~= "string" then
+      local err = structured_error("input", "worktree strategy requires worktree_path")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    worktree_path = vim.uv.fs_realpath(vim.fs.normalize(opts.worktree_path))
+    if worktree_path ~= cwd then
+      local err = structured_error("input", "worktree_path must identify the agent cwd")
+      finish(callback, nil, err)
+      return nil, err
+    end
+  end
   return with_client(function()
     local _, request_err = runtime.client:request(
       "agent/start",
@@ -293,7 +331,7 @@ function M.start(opts, callback)
         provider = provider,
         cwd = cwd,
         workspace_strategy = strategy,
-        worktree_path = opts.worktree_path,
+        worktree_path = worktree_path,
       },
       function(result, rpc_err)
         if rpc_err then
@@ -521,6 +559,20 @@ function M.resume(opts, callback)
     finish(callback, nil, err)
     return nil, err
   end
+  local worktree_path = nil
+  if strategy == "worktree" then
+    if type(opts.worktree_path) ~= "string" then
+      local err = structured_error("input", "worktree strategy requires worktree_path")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    worktree_path = vim.uv.fs_realpath(vim.fs.normalize(opts.worktree_path))
+    if worktree_path ~= cwd then
+      local err = structured_error("input", "worktree_path must identify the agent cwd")
+      finish(callback, nil, err)
+      return nil, err
+    end
+  end
   return with_client(function()
     local _, request_err = runtime.client:request(
       "agent/resume",
@@ -529,7 +581,7 @@ function M.resume(opts, callback)
         provider_session_id = session_id,
         cwd = cwd,
         workspace_strategy = strategy,
-        worktree_path = opts.worktree_path,
+        worktree_path = worktree_path,
       },
       function(result, rpc_err)
         if rpc_err then
@@ -580,6 +632,36 @@ function M.fork(agent_id, callback)
           runtime.view:schedule_render()
         end
         finish(callback, result, nil)
+      end
+    )
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
+function M.archive(agent_id, callback)
+  if not ensure_setup() then
+    local err = structured_error("configuration", "Agent Manager setup failed")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  agent_id = selected_id(agent_id)
+  if not agent_id then
+    local err = structured_error("input", "no agent is selected")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  return with_client(function()
+    local _, request_err = runtime.client:request(
+      "agent/archive",
+      { agent_id = agent_id },
+      function(result, rpc_err)
+        if rpc_err then
+          report(rpc_err)
+        end
+        finish(callback, result, rpc_err)
       end
     )
     if request_err then
@@ -821,14 +903,34 @@ function M.start_ui()
   if not ensure_setup() then
     return
   end
-  if has_live_agent() then
-    vim.notify("Agent Manager embedded mode supports one live agent before M4", vim.log.levels.WARN)
+  if runtime.config.broker.mode == "embedded" and has_live_agent() then
+    vim.notify("Agent Manager embedded mode supports one live agent", vim.log.levels.WARN)
     return
   end
   vim.ui.select({ "codex", "claude" }, { prompt = "Agent provider" }, function(provider)
-    if provider then
-      M.start({ provider = provider, cwd = project_root(), workspace_strategy = "shared" })
+    if not provider then
+      return
     end
+    vim.ui.select({ "shared", "worktree" }, { prompt = "Workspace strategy" }, function(strategy)
+      if strategy == "shared" then
+        M.start({ provider = provider, cwd = project_root(), workspace_strategy = "shared" })
+      elseif strategy == "worktree" then
+        vim.ui.input({
+          prompt = "Existing linked worktree path: ",
+          default = project_root(),
+          completion = "dir",
+        }, function(path)
+          if path and path ~= "" then
+            M.start({
+              provider = provider,
+              cwd = path,
+              workspace_strategy = "worktree",
+              worktree_path = path,
+            })
+          end
+        end)
+      end
+    end)
   end)
 end
 
@@ -939,6 +1041,21 @@ function M.confirm_interrupt()
   vim.ui.select({ "Cancel", "Interrupt" }, { prompt = "Interrupt active turn?" }, function(choice)
     if choice == "Interrupt" then
       M.interrupt()
+    end
+  end)
+end
+
+function M.confirm_archive()
+  local agent = selected_agent()
+  if not agent then
+    report(structured_error("input", "no agent is selected"))
+    return
+  end
+  vim.ui.select({ "Cancel", "Archive" }, {
+    prompt = "Archive " .. tostring(agent.title or agent.id) .. " from Agent Manager?",
+  }, function(choice)
+    if choice == "Archive" then
+      M.archive(agent.id)
     end
   end)
 end

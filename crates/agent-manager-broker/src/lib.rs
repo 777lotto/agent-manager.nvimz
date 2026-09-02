@@ -4,13 +4,16 @@
 //! boundaries established in M0.
 
 pub mod codex;
+pub mod durable;
 pub mod embedded;
 mod framing;
 mod human;
 mod projection;
 pub mod protocol;
+mod registry;
 pub mod replay;
 mod runtime;
+mod status;
 pub mod worker;
 
 pub const BROKER_VERSION: &str = env!("CARGO_PKG_VERSION");

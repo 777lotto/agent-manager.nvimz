@@ -26,6 +26,38 @@ local function buffer_contains(buffer, needle)
   return table.concat(lines, "\n"):find(needle, 1, true) ~= nil
 end
 
+local function pure_client_resync_test()
+  local Client = require("agent_manager.client")
+  local observed_resync = nil
+  local client = Client.new({
+    mode = "durable",
+    command = { "/fixture/agent-manager-broker", "serve-durable" },
+    socket = "/fixture/broker.sock",
+    on_resync = function(replay)
+      observed_resync = replay
+    end,
+  })
+  client.last_sequence = 3
+  client.request = function(_, method, params, callback)
+    assert_equal(method, "initialize", "resync handshake method")
+    assert_equal(params.last_sequence, 3, "resync request cursor")
+    callback({
+      protocol_version = 1,
+      mode = "durable",
+      replay = { resync_required = true, oldest = 40, latest = 41 },
+    }, nil)
+    return 1
+  end
+  client.notify = function(_, method)
+    assert_equal(method, "initialized", "resync initialized notification")
+    return true
+  end
+  client:_begin_initialize()
+  assert_equal(client.last_sequence, 41, "resync advances the reconnect cursor")
+  assert_equal(observed_resync.latest, 41, "resync callback receives the baseline")
+  assert_equal(client.state, "connected", "resync handshake reaches connected state")
+end
+
 local function pure_model_test()
   local Model = require("agent_manager.model")
   local model = Model.new({ max_events = 8 })
@@ -98,6 +130,17 @@ local function pure_model_test()
   local snapshot = model:snapshot()
   snapshot.agents[1].state = "corrupted"
   assert_equal(model:list()[1].state, "idle", "snapshots must be defensive")
+  assert(model:begin_resync(41))
+  assert_equal(model:snapshot().last_sequence, 41, "history resync cursor")
+  assert_equal(model:conversation(), {}, "history resync clears stale projection")
+  assert(model:apply_event({
+    sequence = 42,
+    agent_id = "agent-1",
+    provider = "codex",
+    type = "message.completed",
+    payload = { text = "resynced" },
+  }))
+  assert_equal(model:snapshot().sequence_gap, nil, "history resync closes sequence gap")
   model:set_client_state("disconnected", { message = "fixture disconnect" })
   assert_equal(model:list()[1].state, "disconnected", "disconnect projection")
   assert_equal(model:pending(), {}, "disconnect clears unactionable requests")
@@ -204,6 +247,79 @@ local function real_broker_handshake_test()
     return client.state == "stopped" or client.state == "disconnected"
   end)
   assert_equal(client.state, "stopped", "real broker shutdown state: " .. vim.inspect(client:status()))
+end
+
+local function durable_reconnect_test()
+  local manager = require("agent_manager")
+  local broker_path = root .. "/target/debug/agent-manager-broker"
+  local directory = vim.fn.tempname() .. "-agent-manager-m4"
+  assert_equal(vim.fn.mkdir(directory, "p"), 1, "durable test directory creation")
+  assert(vim.uv.fs_chmod(directory, 448), "durable test directory permissions")
+  local socket = directory .. "/broker.sock"
+  local registry = directory .. "/registry.json"
+
+  local function start_broker()
+    local job = vim.fn.jobstart({
+      broker_path,
+      "serve-durable",
+      "--socket",
+      socket,
+      "--registry",
+      registry,
+    }, {
+      stdout_buffered = false,
+      stderr_buffered = false,
+    })
+    assert(job > 0, "durable broker process must start")
+    await("durable socket", function()
+      local stat = vim.uv.fs_stat(socket)
+      return stat and stat.type == "socket" and (stat.mode or 0) % 64 == 0
+    end)
+    return job
+  end
+
+  local broker_job = start_broker()
+  local ok, setup_err = manager.setup({
+    broker = {
+      mode = "durable",
+      command = { broker_path, "serve-durable" },
+      socket = socket,
+      reconnect = {
+        initial_delay = 20,
+        max_delay = 100,
+        max_attempts = 20,
+        jitter = 0,
+      },
+    },
+    providers = { claude = { python = false } },
+  })
+  assert(ok, vim.inspect(setup_err))
+  assert(manager.open())
+  await("durable client handshake", function()
+    return manager.status().client.state == "connected"
+  end)
+  assert_equal(manager.health().mode, "durable", "durable health mode")
+
+  vim.fn.jobstop(broker_job)
+  vim.fn.jobwait({ broker_job }, 5000)
+  await("durable disconnect", function()
+    local state = manager.status().client.state
+    return state == "disconnected" or state == "reconnecting" or state == "connecting"
+  end)
+  await("durable socket cleanup", function()
+    return vim.uv.fs_stat(socket) == nil
+  end)
+
+  broker_job = start_broker()
+  await("durable automatic reconnect", function()
+    return manager.status().client.state == "connected"
+  end)
+  assert(manager.status().client.reconnect_attempt == 0, "reconnect counter must reset")
+  assert(manager.teardown())
+  assert_equal(vim.fn.jobwait({ broker_job }, 0)[1], -1, "teardown must not stop durable broker")
+  vim.fn.jobstop(broker_job)
+  vim.fn.jobwait({ broker_job }, 5000)
+  vim.fn.delete(directory, "rf")
 end
 
 local function configure_fake(manager)
@@ -484,14 +600,16 @@ local function resume_test()
 end
 
 local function run()
+  pure_client_resync_test()
   pure_model_test()
   layout_test()
   native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()
+  durable_reconnect_test()
   integration_test()
   resume_test()
-  print("Agent Manager Lua M3 tests passed")
+  print("Agent Manager Lua M4 tests passed")
 end
 
 local ok, err = xpcall(run, debug.traceback)

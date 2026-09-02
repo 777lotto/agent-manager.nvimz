@@ -5,13 +5,13 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-The M3 UX ecosystem integration is usable now. The safe embedded workflow still
-owns one live Codex or Claude session and now publishes the immutable
-`agent.manager` Foundation schema-v1 catalog, deterministic fixtures, and a
-pure Styling discovery adapter. Native presentation remains dependency-free;
-when Foundation is present it owns the semantic groups and profile replay.
-Chrome coexistence uses ordinary buffer/window metadata and a scheduled cached
-status event without writing Chrome-owned surfaces. Ordinary verification uses
+M4 is complete. Durable mode keeps multiple Codex and Claude agents alive
+across SSH and Neovim restarts through an owner-only Unix socket, bounded
+replay, provider-backed history resync, and an archivable metadata-only
+registry. Shared checkouts allow one writable agent; additional writers require
+explicit, pre-existing linked worktrees. Embedded mode remains available as the
+single-agent, Neovim-owned fallback. The M3 Foundation, Styling, Chrome, and
+native presentation contracts remain unchanged. Ordinary verification uses
 fake provider processes and never consumes provider quota.
 
 ## Selected architecture
@@ -75,6 +75,29 @@ require("agent_manager").setup({
 })
 ```
 
+Durable mode connects to a broker already owned by the container lifecycle
+manager. Its executable and socket paths must be absolute:
+
+```lua
+require("agent_manager").setup({
+  broker = {
+    mode = "durable",
+    command = { "/home/ai/.local/bin/agent-manager-broker", "serve-durable" },
+    socket = "/run/user/1000/agent-manager/broker.sock",
+  },
+  providers = {
+    claude = {
+      python = "/home/ai/.local/share/agent-manager/venv/bin/python",
+    },
+  },
+})
+```
+
+The resumable unit installation, verification, and rollback phase is documented
+in [ops/m4-durable-service](ops/m4-durable-service/README.md). Stable artifact
+installation remains M5 work; the lifecycle phase intentionally refuses to
+start until those reviewed paths exist.
+
 Then open Neovim and use:
 
 ```vim
@@ -87,16 +110,17 @@ Then open Neovim and use:
 :AgentManagerContext
 :AgentManagerDiff
 :AgentManagerFork
+:AgentManagerArchive
 :AgentManagerHealth
 ```
 
 The workspace also maps `n` to start, `h` to attach or resume, `p` to prompt,
 `s` to steer, `x` to confirm an interrupt, `a`/`d` to decide only a focused
 human request, `<CR>` to answer a focused question, `c` to queue explicit
-context, `f` to fork, `D` to inspect diffs/conflicts, `<Tab>` to cycle panes,
-and `q` to close only the view. Wide displays show agents, conversation, and
-activity together; medium and narrow displays cycle the same buffers without
-losing model state.
+context, `f` to fork, `A` to archive an inactive agent, `D` to inspect
+diffs/conflicts, `<Tab>` to cycle panes, and `q` to close only the view. Wide
+displays show agents, conversation, and activity together; medium and narrow
+displays cycle the same buffers without losing model state.
 
 ### Runtime safety boundary
 
@@ -113,10 +137,12 @@ reports a change to a loaded dirty buffer, Neovim never reloads it
 automatically. The workspace records the divergence and offers inspect, diff,
 explicit reload with confirmation, or keep-buffer actions.
 
-Embedded mode still owns one live runtime and ends when its broker process
-exits. A fork retires the source runtime, preserves its disconnected summary,
-and opens the provider fork. Durable reconnect, multiple concurrent live
-agents, and writer isolation remain M4 work.
+Embedded mode owns one live runtime and ends when its broker process exits. In
+durable mode, closing Neovim disconnects only the editor client; provider tasks
+continue under the lifecycle manager. Reconnect replays the retained event
+suffix or reloads summaries and provider history when the cursor is too old.
+Prompt input is never replayed. A fork retires its source runtime before opening
+the provider fork so writer ownership remains unambiguous.
 
 Opening the workspace and running the default test suite are non-spending. The
 diagnostic `codex-probe` performs only initialization and thread discovery;
@@ -130,7 +156,7 @@ mise run verify
 mise run ux-test
 ```
 
-The M3 gate resolves registered workstation checkouts automatically. Elsewhere,
+The M4 gate resolves registered UX checkouts automatically. Elsewhere,
 set `UX_FOUNDATION_ROOT`, `UX_STYLING_ROOT`, and `UX_CHROME_ROOT` to checkouts
 containing the promoted commits recorded in `tests/ux-pins.env`.
 
@@ -154,7 +180,10 @@ for human callbacks, session lifecycle, editor context, filesystem safety, and
 acceptance evidence. See
 [M3 UX ecosystem integration](docs/architecture/m3-ux-ecosystem-integration.md)
 for the immutable manifest, Styling discovery, Chrome cache, compatibility
-pins, and acceptance evidence.
+pins, and acceptance evidence. See
+[M4 durable multi-agent runtime](docs/architecture/m4-durable-multi-agent-runtime.md)
+for socket lifecycle, replay/resync, registry privacy, writer isolation, and
+acceptance evidence.
 
 ## UX integration
 
@@ -192,6 +221,7 @@ protocol/claude-worker/v1/         private Rust/Python contract and fixtures
 protocol/vendor/codex/0.152.0/     generated provider schema baseline
 tests/                              headless Lua tests and fake public broker
 docs/                              specification and architecture decisions
+ops/m4-durable-service/            supervised lifecycle apply/undo/verify phase
 ```
 
 ## Repository workflow

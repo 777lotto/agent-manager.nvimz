@@ -1,0 +1,32 @@
+# managed by agent-manager M4 durable-service phase
+[Unit]
+Description=Agent Manager durable broker
+Documentation=https://github.com/777lotto/agent-manager.nvimz
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/home/ai/.local/bin/agent-manager-broker
+ConditionFileIsExecutable=/home/ai/.local/share/agent-manager/venv/bin/python
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=/home/ai/.local/bin/agent-manager-broker serve-durable --socket %t/agent-manager/broker.sock --registry %h/.local/state/agent-manager/registry.json --status /var/lib/zemrip/status/agent-manager.json --claude-python /home/ai/.local/share/agent-manager/venv/bin/python
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=%h %t /var/lib/zemrip/status
+
+[Install]
+WantedBy=default.target

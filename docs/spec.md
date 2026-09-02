@@ -2,7 +2,7 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M3 UX ecosystem integration implemented
+- Status: M4 durable multi-agent runtime implemented
 - Last reviewed: 2026-09-02
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
@@ -1112,6 +1112,17 @@ the native backend explicitly.
 - Multiple agents with serialized per-agent input.
 - Enforce shared-checkout writer policy and add explicit worktree strategy.
 
+Implementation status: complete on 2026-09-02. Durable mode uses an owner-only
+Unix socket, metadata-only atomic registry, bounded automatic replay, explicit
+history resync, and generation-scoped provider responses. The Neovim client
+reconnects with capped exponential backoff without stopping the supervised
+broker. Multiple provider tasks run concurrently while each agent's input is
+serialized independently. Shared writer ownership resolves to the canonical
+Git checkout root; additional writable agents require distinct, pre-existing
+linked worktrees validated by the broker. The resumable lifecycle package
+ships a systemd user unit, paired undo, behavioral verification, and stable
+non-sensitive service status.
+
 ### M5: release and configuration adoption
 
 - Complete provider/runtime CI, signed release artifacts, and the production
@@ -1152,17 +1163,14 @@ The first production release is complete when:
   explicit opt-in.
 - Whether release binaries remain repository assets or become a separately
   versioned package with a compatibility lock.
-- The exact Python floor and locked-environment tool selected during M0.
 - Whether one Python worker continues to host all Claude clients or a bounded
   worker pool is justified by measured isolation or throughput needs after M1.
-- The container supervisor/user-service mechanism and upgrade procedure.
-- Whether worktree creation belongs in this plugin or delegates to a separate
-  Git/worktree authority.
 - The exact public Chrome extension contract, if any; cached status APIs work
   without one.
 - Provider-specific model, reasoning, sandbox, and permission selectors that
   are safe to expose without pretending they are common settings.
-- Retention limits for in-memory replay and archived registry metadata.
+- Retention and archival policy for registry metadata; in-memory replay is
+  bounded to 2,000 events.
 - Public distribution, branding, and authentication review for each provider.
 
 ## Upstream contracts reviewed

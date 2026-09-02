@@ -28,6 +28,26 @@ function M.check()
   end
   vim.health.info("broker mode: " .. tostring(health.mode or "unknown"))
   vim.health.info("broker state: " .. tostring(broker.state or "stopped"))
+  if health.mode == "durable" then
+    local socket = broker.socket
+    local stat = type(socket) == "string" and vim.uv.fs_stat(socket) or nil
+    if stat and stat.type == "socket" and (stat.mode or 0) % 64 == 0 then
+      vim.health.ok("owner-only durable socket: " .. socket)
+    elseif stat then
+      vim.health.error("durable socket is not owner-only", { tostring(socket) })
+    else
+      vim.health.warn("durable socket is unavailable", { tostring(socket) })
+    end
+    if broker.reconnect_attempt and broker.reconnect_attempt > 0 then
+      vim.health.info(
+        "durable reconnect attempt "
+          .. tostring(broker.reconnect_attempt)
+          .. ", next delay "
+          .. tostring(broker.reconnect_delay or 0)
+          .. "ms"
+      )
+    end
+  end
   if broker.initialized then
     vim.health.ok(
       "public protocol "
@@ -50,6 +70,15 @@ function M.check()
   if broker.last_error then
     vim.health.warn("last client error: " .. tostring(broker.last_error.message))
   end
+  local disconnected = 0
+  for _, agent in ipairs(health.agents or {}) do
+    if agent.state == "disconnected" then
+      disconnected = disconnected + 1
+    end
+  end
+  vim.health.info(
+    "known agents: " .. tostring(#(health.agents or {})) .. ", disconnected/stale: " .. tostring(disconnected)
+  )
 
   local ux = health.ux or {}
   local foundation = ux.foundation or {}

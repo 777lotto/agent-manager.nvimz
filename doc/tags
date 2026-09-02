@@ -1,4 +1,5 @@
 :AgentManager	agent-manager.txt	/*:AgentManager*
+:AgentManagerArchive	agent-manager.txt	/*:AgentManagerArchive*
 :AgentManagerAttach	agent-manager.txt	/*:AgentManagerAttach*
 :AgentManagerClose	agent-manager.txt	/*:AgentManagerClose*
 :AgentManagerContext	agent-manager.txt	/*:AgentManagerContext*

@@ -1,8 +1,10 @@
-//! Embedded public JSON-RPC broker served over stdio.
+//! Public JSON-RPC broker core and embedded stdio transport.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -22,10 +24,12 @@ use crate::protocol::{
     AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, PROTOCOL_VERSION,
     Provider, RequestId, WorkspaceStrategy,
 };
+use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
 use crate::runtime::{
     AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, discover_sessions, spawn_agent,
 };
+use crate::status::StatusStore;
 use crate::worker::{PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WorkerCommandSpec};
 
 const MAX_PUBLIC_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -79,6 +83,14 @@ impl EmbeddedConfig {
         self.runtime.callback_timeout = timeout;
         self
     }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_replay_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "replay capacity must be positive");
+        self.replay_capacity = capacity;
+        self
+    }
 }
 
 #[derive(Debug, Error)]
@@ -97,15 +109,27 @@ where
     W: AsyncWrite + Send + Unpin + 'static,
 {
     let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let input_handle = tokio::spawn(read_client(reader, input_tx));
+    let generation = 1;
     let (output_tx, output_rx) = mpsc::unbounded_channel();
+    let _ = input_tx.send(ClientInput::Connected {
+        generation,
+        output: output_tx,
+    });
+    let input_handle = tokio::spawn(read_client(reader, input_tx, generation));
     let output_handle = tokio::spawn(write_client(writer, output_rx));
     let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
 
-    let mut broker = Broker::new(config, output_tx, runtime_tx);
+    let mut broker = Broker::new(
+        config,
+        BrokerMode::Embedded,
+        runtime_tx,
+        None,
+        Vec::new(),
+        None,
+    );
     let broker_result = broker.run(input_rx, runtime_rx).await;
     broker.shutdown_agents().await;
-    drop(broker.output);
+    drop(broker.output.take());
 
     input_handle.abort();
     let _ = input_handle.await;
@@ -114,33 +138,52 @@ where
 }
 
 #[derive(Debug)]
-enum ClientInput {
-    Frame(Value),
-    ParseError,
-    FrameTooLarge,
-    Io(io::Error),
-    Closed,
+pub(crate) enum ClientInput {
+    Connected {
+        generation: u64,
+        output: mpsc::UnboundedSender<Value>,
+    },
+    Frame {
+        generation: u64,
+        value: Value,
+    },
+    ParseError {
+        generation: u64,
+    },
+    FrameTooLarge {
+        generation: u64,
+    },
+    Io {
+        generation: u64,
+        error: io::Error,
+    },
+    Closed {
+        generation: u64,
+    },
 }
 
-async fn read_client<R>(mut reader: R, input: mpsc::UnboundedSender<ClientInput>)
-where
+pub(crate) async fn read_client<R>(
+    mut reader: R,
+    input: mpsc::UnboundedSender<ClientInput>,
+    generation: u64,
+) where
     R: AsyncBufRead + Unpin,
 {
     loop {
         let frame = match read_bounded_line(&mut reader, MAX_PUBLIC_FRAME_BYTES).await {
             Ok(frame) => frame,
             Err(error) => {
-                let _ = input.send(ClientInput::Io(error));
+                let _ = input.send(ClientInput::Io { generation, error });
                 return;
             }
         };
         match frame {
             BoundedFrame::Closed => {
-                let _ = input.send(ClientInput::Closed);
+                let _ = input.send(ClientInput::Closed { generation });
                 return;
             }
             BoundedFrame::TooLarge => {
-                let _ = input.send(ClientInput::FrameTooLarge);
+                let _ = input.send(ClientInput::FrameTooLarge { generation });
                 return;
             }
             BoundedFrame::Data(mut data) => {
@@ -149,12 +192,15 @@ where
                 }
                 match serde_json::from_slice(&data) {
                     Ok(value) => {
-                        if input.send(ClientInput::Frame(value)).is_err() {
+                        if input
+                            .send(ClientInput::Frame { generation, value })
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     Err(_) => {
-                        if input.send(ClientInput::ParseError).is_err() {
+                        if input.send(ClientInput::ParseError { generation }).is_err() {
                             return;
                         }
                     }
@@ -164,7 +210,7 @@ where
     }
 }
 
-async fn write_client<W>(
+pub(crate) async fn write_client<W>(
     mut writer: W,
     mut output: mpsc::UnboundedReceiver<Value>,
 ) -> Result<(), EmbeddedError>
@@ -187,42 +233,102 @@ enum ConnectionPhase {
     Ready,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrokerMode {
+    Embedded,
+    Durable,
+}
+
+impl BrokerMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Durable => "durable",
+        }
+    }
+}
+
+struct PendingRuntimeRequest {
+    generation: u64,
+    public_id: RequestId,
+}
+
 struct ManagedAgent {
     summary: AgentSummary,
+    workspace_identity: PathBuf,
     commands: mpsc::Sender<AgentCommand>,
     task: Option<JoinHandle<()>>,
     pending_contexts: Vec<Value>,
     pending_questions: u64,
 }
 
-struct Broker {
+pub(crate) struct Broker {
     phase: ConnectionPhase,
+    mode: BrokerMode,
+    connection_generation: u64,
+    reconnect_cursor: u64,
     config: EmbeddedConfig,
     agents: HashMap<String, ManagedAgent>,
     agent_order: Vec<String>,
     replay: ReplayBuffer,
-    output: mpsc::UnboundedSender<Value>,
+    output: Option<mpsc::UnboundedSender<Value>>,
     runtime: mpsc::UnboundedSender<RuntimeEvent>,
+    next_runtime_request: u64,
+    pending_runtime_requests: HashMap<RequestId, PendingRuntimeRequest>,
+    registry: Option<RegistryStore>,
+    status: Option<StatusStore>,
 }
 
 impl Broker {
-    fn new(
+    pub(crate) fn new(
         config: EmbeddedConfig,
-        output: mpsc::UnboundedSender<Value>,
+        mode: BrokerMode,
         runtime: mpsc::UnboundedSender<RuntimeEvent>,
+        registry: Option<RegistryStore>,
+        restored_agents: Vec<AgentSummary>,
+        status: Option<StatusStore>,
     ) -> Self {
+        let mut agents = HashMap::new();
+        let mut agent_order = Vec::new();
+        for mut summary in restored_agents {
+            summary.capabilities = capabilities(summary.provider);
+            let (commands, commands_rx) = mpsc::channel(1);
+            drop(commands_rx);
+            agent_order.push(summary.id.clone());
+            agents.insert(
+                summary.id.clone(),
+                ManagedAgent {
+                    workspace_identity: checkout_identity(
+                        summary.workspace_strategy,
+                        Path::new(&summary.cwd),
+                    ),
+                    summary,
+                    commands,
+                    task: None,
+                    pending_contexts: Vec::new(),
+                    pending_questions: 0,
+                },
+            );
+        }
         Self {
             phase: ConnectionPhase::AwaitInitialize,
+            mode,
+            connection_generation: 0,
+            reconnect_cursor: 0,
             replay: ReplayBuffer::new(config.replay_capacity),
             config,
-            agents: HashMap::new(),
-            agent_order: Vec::new(),
-            output,
+            agents,
+            agent_order,
+            output: None,
             runtime,
+            next_runtime_request: 1,
+            pending_runtime_requests: HashMap::new(),
+            registry,
+            status,
         }
     }
 
-    async fn run(
+    pub(crate) async fn run(
         &mut self,
         mut input: mpsc::UnboundedReceiver<ClientInput>,
         mut runtime: mpsc::UnboundedReceiver<RuntimeEvent>,
@@ -234,28 +340,55 @@ impl Broker {
                         return Ok(());
                     };
                     match client {
-                        ClientInput::Frame(frame) => {
-                            if self.handle_client_frame(frame).await? {
+                        ClientInput::Connected { generation, output } => {
+                            self.connect(generation, output);
+                        }
+                        ClientInput::Frame { generation, value } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.handle_client_frame(value).await? {
                                 return Ok(());
                             }
                         }
-                        ClientInput::ParseError => self.send(error_response(
-                            None,
-                            -32_700,
-                            "Parse error",
-                            None,
-                        )),
-                        ClientInput::FrameTooLarge => {
+                        ClientInput::ParseError { generation } => {
+                            if generation == self.connection_generation {
+                                self.send(error_response(None, -32_700, "Parse error", None));
+                            }
+                        }
+                        ClientInput::FrameTooLarge { generation } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
                             self.send(error_response(
                                 None,
                                 -32_600,
                                 "Invalid Request",
                                 Some(json!({ "reason": "frame_too_large" })),
                             ));
-                            return Ok(());
+                            if self.mode == BrokerMode::Embedded {
+                                return Ok(());
+                            }
+                            self.disconnect(generation);
                         }
-                        ClientInput::Io(error) => return Err(EmbeddedError::Io(error)),
-                        ClientInput::Closed => return Ok(()),
+                        ClientInput::Io { generation, error } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.mode == BrokerMode::Embedded {
+                                return Err(EmbeddedError::Io(error));
+                            }
+                            self.disconnect(generation);
+                        }
+                        ClientInput::Closed { generation } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.mode == BrokerMode::Embedded {
+                                return Ok(());
+                            }
+                            self.disconnect(generation);
+                        }
                     }
                 }
                 provider = runtime.recv() => {
@@ -265,6 +398,30 @@ impl Broker {
                     self.handle_runtime_event(provider);
                 }
             }
+        }
+    }
+
+    fn connect(&mut self, generation: u64, output: mpsc::UnboundedSender<Value>) {
+        if generation <= self.connection_generation {
+            return;
+        }
+        self.connection_generation = generation;
+        self.phase = ConnectionPhase::AwaitInitialize;
+        self.reconnect_cursor = 0;
+        self.output = Some(output);
+    }
+
+    fn disconnect(&mut self, generation: u64) {
+        if generation != self.connection_generation {
+            return;
+        }
+        self.output = None;
+        self.phase = ConnectionPhase::AwaitInitialize;
+        self.reconnect_cursor = 0;
+        self.pending_runtime_requests
+            .retain(|_, pending| pending.generation != generation);
+        for agent in self.agents.values() {
+            queue_client_disconnect(&agent.commands);
         }
     }
 
@@ -308,6 +465,18 @@ impl Broker {
             && params.as_object().is_some_and(serde_json::Map::is_empty)
         {
             self.phase = ConnectionPhase::Ready;
+            if self.mode == BrokerMode::Durable
+                && let ReplayResult::Events(events) =
+                    self.replay.replay_after(self.reconnect_cursor)
+            {
+                for event in events {
+                    self.send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "agent/event",
+                        "params": event,
+                    }));
+                }
+            }
             self.notify_state();
         }
     }
@@ -366,6 +535,7 @@ impl Broker {
             "agent/interrupt" => self.interrupt_agent(request_id, params).await,
             "agent/resume" => self.resume_agent(request_id, params),
             "agent/fork" => self.fork_agent(request_id, params).await,
+            "agent/archive" => self.archive_agent(request_id, params).await,
             "agent/approval/respond" => self.respond_approval(request_id, params).await,
             "agent/question/respond" => self.respond_question(request_id, params).await,
             "agent/context/add" => self.add_context(request_id, params),
@@ -376,15 +546,18 @@ impl Broker {
                     self.send(invalid_params(request_id, "params must be empty"));
                     return Ok(false);
                 }
+                if self.mode == BrokerMode::Durable {
+                    self.send(error_response(
+                        Some(request_id),
+                        -32_010,
+                        "Durable broker shutdown is owned by the lifecycle manager",
+                        None,
+                    ));
+                    return Ok(false);
+                }
                 self.send(success_response(request_id, json!({ "shutdown": true })));
                 return Ok(true);
             }
-            "agent/archive" => self.send(error_response(
-                Some(request_id),
-                -32_010,
-                "Method is planned for a later milestone",
-                None,
-            )),
             _ => self.send(error_response(
                 Some(request_id),
                 -32_601,
@@ -411,12 +584,27 @@ impl Broker {
             return false;
         }
         self.phase = ConnectionPhase::AwaitInitialized;
+        self.reconnect_cursor = parsed.last_sequence.unwrap_or(0);
+        let (oldest, latest) = self
+            .replay
+            .bounds()
+            .map_or((None, None), |(oldest, latest)| {
+                (Some(oldest), Some(latest))
+            });
+        let resync_required = self.mode == BrokerMode::Durable
+            && matches!(
+                self.replay.replay_after(self.reconnect_cursor),
+                ReplayResult::ResyncRequired { .. }
+            );
+        if resync_required {
+            self.reconnect_cursor = latest.unwrap_or(self.reconnect_cursor);
+        }
         self.send(success_response(
             request_id,
             json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "broker_version": BROKER_VERSION,
-                "mode": "embedded",
+                "mode": self.mode.name(),
                 "providers": {
                     "codex": { "app_server_version": PINNED_CODEX_VERSION },
                     "claude": {
@@ -424,7 +612,16 @@ impl Broker {
                         "claude_code_version": PINNED_CLAUDE_CODE_VERSION,
                     }
                 },
-                "replay": { "capacity": self.config.replay_capacity },
+                "replay": {
+                    "capacity": self.config.replay_capacity,
+                    "oldest": oldest,
+                    "latest": latest,
+                    "resync_required": resync_required,
+                },
+                "registry": {
+                    "path": self.registry.as_ref().map(RegistryStore::path),
+                    "metadata_only": true,
+                },
             }),
         ));
         false
@@ -487,6 +684,7 @@ impl Broker {
             parsed.workspace_strategy,
             parsed.worktree_path.as_deref(),
             &cwd,
+            self.mode,
         ) {
             Ok(path) => path,
             Err(message) => {
@@ -514,12 +712,35 @@ impl Broker {
         worktree_path: Option<String>,
         launch: SessionLaunch,
     ) -> Option<String> {
-        if self.agents.values().any(|agent| agent.task.is_some()) {
+        if self.mode == BrokerMode::Embedded
+            && self.agents.values().any(|agent| agent.task.is_some())
+        {
             self.send(error_response(
                 Some(request_id),
                 -32_011,
                 "M2 embedded mode supports one live agent",
                 None,
+            ));
+            return None;
+        }
+        let workspace_identity = checkout_identity(workspace_strategy, &cwd);
+        if self.agents.values().any(|agent| {
+            agent.task.is_some()
+                && !matches!(
+                    agent.summary.state,
+                    AgentState::Disconnected | AgentState::Failed
+                )
+                && agent.workspace_identity == workspace_identity
+        }) {
+            self.send(error_response(
+                Some(request_id),
+                -32_012,
+                "A writable agent already owns this checkout; select an isolated worktree",
+                Some(json!({
+                    "reason": "shared_checkout_writer_conflict",
+                    "cwd": cwd,
+                    "workspace_strategy": workspace_strategy,
+                })),
             ));
             return None;
         }
@@ -545,11 +766,12 @@ impl Broker {
             created_at: now.clone(),
             updated_at: now,
         };
+        let runtime_request_id = self.runtime_request(request_id);
         let (commands, task) = spawn_agent(
             provider,
             agent_id.clone(),
             cwd,
-            request_id,
+            runtime_request_id,
             launch,
             self.config.runtime.clone(),
             self.runtime.clone(),
@@ -559,6 +781,7 @@ impl Broker {
             agent_id.clone(),
             ManagedAgent {
                 summary,
+                workspace_identity,
                 commands,
                 task: Some(task),
                 pending_contexts: Vec::new(),
@@ -589,7 +812,7 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid history parameters"));
             return;
         };
-        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
@@ -602,16 +825,21 @@ impl Broker {
             ));
             return;
         }
-        if agent
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        let command_failed = self
+            .agents
+            .get_mut(&parsed.agent_id)
+            .expect("validated agent must remain present")
             .commands
             .send(AgentCommand::History {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
                 cursor: parsed.cursor,
                 limit: parsed.limit,
             })
             .await
-            .is_err()
-        {
+            .is_err();
+        if command_failed {
+            self.pending_runtime_requests.remove(&runtime_request_id);
             self.command_channel_failed(&parsed.agent_id, request_id);
         }
     }
@@ -650,6 +878,7 @@ impl Broker {
             parsed.workspace_strategy,
             parsed.worktree_path.as_deref(),
             &cwd,
+            self.mode,
         ) {
             Ok(path) => path,
             Err(message) => {
@@ -741,6 +970,44 @@ impl Broker {
         self.notify_state();
     }
 
+    async fn archive_agent(&mut self, request_id: RequestId, params: Value) {
+        let Some(agent_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get(&agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if matches!(
+            agent.summary.state,
+            AgentState::Starting
+                | AgentState::Running
+                | AgentState::WaitingInput
+                | AgentState::WaitingApproval
+        ) || agent.summary.pending_approvals > 0
+            || agent.pending_questions > 0
+        {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Only an inactive agent with no pending human request can be archived",
+                None,
+            ));
+            return;
+        }
+        if agent.task.is_some() {
+            self.retire_agent(&agent_id).await;
+        }
+        self.agents.remove(&agent_id);
+        self.agent_order.retain(|candidate| candidate != &agent_id);
+        self.send(success_response(
+            request_id,
+            json!({ "archived": true, "agent_id": agent_id }),
+        ));
+        self.notify_state();
+    }
+
     async fn send_agent_input(&mut self, request_id: RequestId, params: Value, kind: InputKind) {
         let Ok(parsed) = serde_json::from_value::<TurnInputParams>(params) else {
             self.send(invalid_params(request_id, "invalid turn input parameters"));
@@ -786,19 +1053,31 @@ impl Broker {
             self.send(invalid_params(request_id, message));
             return;
         }
+        let commands = agent.commands.clone();
+        agent.pending_contexts.clear();
+        if kind == InputKind::Prompt {
+            agent.summary.state = AgentState::Running;
+            agent.summary.updated_at = timestamp();
+        }
+        let runtime_request_id = self.runtime_request(request_id.clone());
         let command = match kind {
             InputKind::Prompt => AgentCommand::Prompt {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
                 text: parsed.input.text,
                 attachments,
             },
             InputKind::Steer => AgentCommand::Steer {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
                 text: parsed.input.text,
                 attachments,
             },
         };
-        if agent.commands.send(command).await.is_err() {
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            let agent = self
+                .agents
+                .get_mut(&parsed.agent_id)
+                .expect("validated agent must remain present");
             agent.summary.state = AgentState::Disconnected;
             agent.summary.updated_at = timestamp();
             self.send(error_response(
@@ -810,10 +1089,7 @@ impl Broker {
             self.notify_state();
             return;
         }
-        agent.pending_contexts.clear();
         if kind == InputKind::Prompt {
-            agent.summary.state = AgentState::Running;
-            agent.summary.updated_at = timestamp();
             self.notify_state();
         }
     }
@@ -823,18 +1099,24 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid agent id parameters"));
             return;
         };
-        let Some(agent) = self.agents.get_mut(&agent_id) else {
+        let Some(agent) = self.agents.get(&agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
-        if agent
-            .commands
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        if commands
             .send(AgentCommand::Interrupt {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
             })
             .await
             .is_err()
         {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            let agent = self
+                .agents
+                .get_mut(&agent_id)
+                .expect("validated agent must remain present");
             agent.summary.state = AgentState::Disconnected;
             agent.summary.updated_at = timestamp();
             self.send(error_response(
@@ -870,18 +1152,21 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid approval response"));
             return;
         }
-        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
         let command = AgentCommand::Approval {
-            request_id: request_id.clone(),
+            request_id: runtime_request_id.clone(),
             action_id: parsed.approval_id,
             decision: parsed.decision,
             updated_input: parsed.updated_input,
             message: parsed.message,
         };
-        if agent.commands.send(command).await.is_err() {
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
             self.command_channel_failed(&parsed.agent_id, request_id);
         }
     }
@@ -906,18 +1191,21 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid question response"));
             return;
         }
-        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
         let command = AgentCommand::Question {
-            request_id: request_id.clone(),
+            request_id: runtime_request_id.clone(),
             action_id: parsed.question_id,
             decision: parsed.decision,
             answers: parsed.answers,
             message: parsed.message,
         };
-        if agent.commands.send(command).await.is_err() {
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
             self.command_channel_failed(&parsed.agent_id, request_id);
         }
     }
@@ -1056,11 +1344,15 @@ impl Broker {
                     agent.summary.updated_at = timestamp();
                     agent.summary.clone()
                 };
-                self.send(success_response(request_id, json!({ "agent": summary })));
+                self.send_runtime_response(&request_id, |public_id| {
+                    success_response(public_id, json!({ "agent": summary }))
+                });
                 self.notify_state();
             }
             RuntimeEvent::Response { request_id, result } => {
-                self.send(success_response(request_id, result));
+                self.send_runtime_response(&request_id, |public_id| {
+                    success_response(public_id, result)
+                });
             }
             RuntimeEvent::RequestFailed {
                 request_id,
@@ -1075,49 +1367,16 @@ impl Broker {
                     agent.summary.updated_at = timestamp();
                     let _ = agent.commands.try_send(AgentCommand::Shutdown);
                 }
-                self.send(error_response(Some(request_id), code, &message, None));
+                self.send_runtime_response(&request_id, |public_id| {
+                    error_response(Some(public_id), code, &message, None)
+                });
                 if fail_agent {
                     self.notify_state();
                 }
             }
-            RuntimeEvent::ProviderEvent(mut event) => {
-                let sequence = self.replay.push(event.clone());
-                event.sequence = sequence;
-                let state_changed = self.apply_event_state(&event);
-                self.send(json!({
-                    "jsonrpc": "2.0",
-                    "method": "agent/event",
-                    "params": event,
-                }));
-                if state_changed {
-                    self.notify_state();
-                }
-            }
+            RuntimeEvent::ProviderEvent(event) => self.handle_provider_event(event),
             RuntimeEvent::ProviderFailed { agent_id, message } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
-                    agent.summary.state = AgentState::Disconnected;
-                    agent.summary.active_turn_id = None;
-                    agent.summary.pending_approvals = 0;
-                    agent.pending_questions = 0;
-                    agent.summary.updated_at = timestamp();
-                    agent.pending_contexts.clear();
-                    let mut event = EventEnvelope::new(
-                        timestamp(),
-                        agent_id,
-                        agent.summary.provider,
-                        "broker.error".to_owned(),
-                        json!({ "message": message }),
-                        json!({ "kind": "broker", "redacted": true }),
-                    );
-                    let sequence = self.replay.push(event.clone());
-                    event.sequence = sequence;
-                    self.send(json!({
-                        "jsonrpc": "2.0",
-                        "method": "agent/event",
-                        "params": event,
-                    }));
-                    self.notify_state();
-                }
+                self.handle_provider_failure(agent_id, message);
             }
             RuntimeEvent::Stopped { agent_id } => {
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
@@ -1132,6 +1391,62 @@ impl Broker {
                 }
             }
         }
+    }
+
+    fn handle_provider_event(&mut self, mut event: EventEnvelope) {
+        if self.mode == BrokerMode::Durable
+            && self.phase != ConnectionPhase::Ready
+            && matches!(
+                event.event_type.as_str(),
+                "approval.requested" | "question.requested"
+            )
+            && let Some(agent) = self.agents.get(&event.agent_id)
+        {
+            queue_client_disconnect(&agent.commands);
+        }
+        let sequence = self.replay.push(event.clone());
+        event.sequence = sequence;
+        let state_changed = self.apply_event_state(&event);
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "agent/event",
+                "params": event,
+            }));
+        }
+        if state_changed {
+            self.notify_state();
+        }
+    }
+
+    fn handle_provider_failure(&mut self, agent_id: String, message: &'static str) {
+        let Some(agent) = self.agents.get_mut(&agent_id) else {
+            return;
+        };
+        agent.summary.state = AgentState::Disconnected;
+        agent.summary.active_turn_id = None;
+        agent.summary.pending_approvals = 0;
+        agent.pending_questions = 0;
+        agent.summary.updated_at = timestamp();
+        agent.pending_contexts.clear();
+        let mut event = EventEnvelope::new(
+            timestamp(),
+            agent_id,
+            agent.summary.provider,
+            "broker.error".to_owned(),
+            json!({ "message": message }),
+            json!({ "kind": "broker", "redacted": true }),
+        );
+        let sequence = self.replay.push(event.clone());
+        event.sequence = sequence;
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "agent/event",
+                "params": event,
+            }));
+        }
+        self.notify_state();
     }
 
     fn apply_event_state(&mut self, event: &EventEnvelope) -> bool {
@@ -1206,18 +1521,79 @@ impl Broker {
     }
 
     fn notify_state(&self) {
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "method": "broker/state",
-            "params": { "agents": self.summaries() },
-        }));
+        let summaries = self.summaries();
+        let mut registry_failed = false;
+        let registry_bytes = if let Some(registry) = &self.registry {
+            if registry.persist(&summaries).is_err() {
+                registry_failed = true;
+                eprintln!("agent-manager-broker: durable registry persistence failed");
+            }
+            registry.bytes()
+        } else {
+            0
+        };
+        if let Some(status) = &self.status {
+            let result = if registry_failed {
+                status.failure(
+                    "registry_persistence_failed",
+                    summaries.len() as u64,
+                    registry_bytes,
+                )
+            } else {
+                status.success("running", summaries.len() as u64, registry_bytes)
+            };
+            if result.is_err() {
+                eprintln!("agent-manager-broker: durable status persistence failed");
+            }
+        }
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "broker/state",
+                "params": { "agents": summaries },
+            }));
+        }
     }
 
     fn send(&self, message: Value) {
-        let _ = self.output.send(message);
+        if let Some(output) = &self.output {
+            let _ = output.send(message);
+        }
     }
 
-    async fn shutdown_agents(&mut self) {
+    fn runtime_request(&mut self, public_id: RequestId) -> RequestId {
+        let request_id = RequestId::String(format!(
+            "broker:{}:{}",
+            self.connection_generation, self.next_runtime_request
+        ));
+        self.next_runtime_request = self
+            .next_runtime_request
+            .checked_add(1)
+            .expect("runtime request sequence overflow");
+        self.pending_runtime_requests.insert(
+            request_id.clone(),
+            PendingRuntimeRequest {
+                generation: self.connection_generation,
+                public_id,
+            },
+        );
+        request_id
+    }
+
+    fn send_runtime_response(
+        &mut self,
+        request_id: &RequestId,
+        response: impl FnOnce(RequestId) -> Value,
+    ) {
+        let Some(pending) = self.pending_runtime_requests.remove(request_id) else {
+            return;
+        };
+        if pending.generation == self.connection_generation && self.output.is_some() {
+            self.send(response(pending.public_id));
+        }
+    }
+
+    pub(crate) async fn shutdown_agents(&mut self) {
         for agent in self.agents.values() {
             let _ = agent.commands.send(AgentCommand::Shutdown).await;
         }
@@ -1233,6 +1609,22 @@ impl Broker {
                 let _ = task.await;
             }
         }
+    }
+
+    pub(crate) fn durable_counts(&self) -> (u64, u64) {
+        (
+            self.agents.len() as u64,
+            self.registry.as_ref().map_or(0, RegistryStore::bytes),
+        )
+    }
+}
+
+fn queue_client_disconnect(commands: &mpsc::Sender<AgentCommand>) {
+    if commands.try_send(AgentCommand::ClientDisconnected).is_err() {
+        let commands = commands.clone();
+        tokio::spawn(async move {
+            let _ = commands.send(AgentCommand::ClientDisconnected).await;
+        });
     }
 }
 
@@ -1265,8 +1657,8 @@ enum InputKind {
 struct InitializeParams {
     protocol_version: u32,
     client: ClientIdentity,
-    #[serde(default, rename = "last_sequence")]
-    _last_sequence: Option<u64>,
+    #[serde(default)]
+    last_sequence: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1424,6 +1816,7 @@ fn validate_workspace(
     strategy: WorkspaceStrategy,
     worktree_path: Option<&str>,
     cwd: &Path,
+    mode: BrokerMode,
 ) -> Result<Option<String>, &'static str> {
     match strategy {
         WorkspaceStrategy::Shared if worktree_path.is_none() => Ok(None),
@@ -1434,11 +1827,71 @@ fn validate_workspace(
             };
             let worktree = canonical_directory(raw)?;
             if worktree != cwd {
-                return Err("embedded mode requires worktree_path to equal cwd");
+                return Err("worktree_path must equal the agent cwd");
+            }
+            if mode == BrokerMode::Durable && !is_linked_git_worktree(&worktree) {
+                return Err("durable worktree strategy requires a linked Git worktree");
             }
             Ok(Some(worktree.to_string_lossy().into_owned()))
         }
     }
+}
+
+fn checkout_identity(strategy: WorkspaceStrategy, cwd: &Path) -> PathBuf {
+    if strategy == WorkspaceStrategy::Worktree {
+        return cwd.to_owned();
+    }
+    git_top_level(cwd).unwrap_or_else(|| cwd.to_owned())
+}
+
+fn git_top_level(cwd: &Path) -> Option<PathBuf> {
+    git_rev_parse_path(cwd, "--show-toplevel")
+}
+
+fn git_rev_parse_path(cwd: &Path, argument: &str) -> Option<PathBuf> {
+    let output = StdCommand::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", argument])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = Path::new(raw.trim());
+    let path = if raw.is_absolute() {
+        raw.to_owned()
+    } else {
+        cwd.join(raw)
+    };
+    path.canonicalize().ok()
+}
+
+fn is_linked_git_worktree(path: &Path) -> bool {
+    let marker = path.join(".git");
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() > 8_192 {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return false;
+    };
+    if !contents.starts_with("gitdir: ") {
+        return false;
+    }
+    let Some(root) = git_top_level(path) else {
+        return false;
+    };
+    let Some(git_directory) = git_rev_parse_path(path, "--git-dir") else {
+        return false;
+    };
+    let Some(common_directory) = git_rev_parse_path(path, "--git-common-dir") else {
+        return false;
+    };
+    root == path && git_directory != common_directory
 }
 
 fn validate_context(context: Value, cwd: &Path) -> Result<Value, &'static str> {
@@ -1607,11 +2060,13 @@ mod tests {
     use std::path::PathBuf;
 
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     use super::{
-        MAX_CONTEXT_BYTES, MAX_CONTEXT_ITEMS, valid_question_answers, validate_context,
-        validate_context_collection,
+        Broker, BrokerMode, EmbeddedConfig, MAX_CONTEXT_BYTES, MAX_CONTEXT_ITEMS,
+        valid_question_answers, validate_context, validate_context_collection,
     };
+    use crate::protocol::{EventEnvelope, Provider};
 
     fn fixture_cwd() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1691,5 +2146,77 @@ mod tests {
         }))
         .expect("answer map");
         assert!(!valid_question_answers(&too_many));
+    }
+
+    #[tokio::test]
+    async fn resync_replays_events_created_during_the_initialize_handshake() {
+        let (runtime, _runtime_rx) = mpsc::unbounded_channel();
+        let mut broker = Broker::new(
+            EmbeddedConfig::default().with_replay_capacity(2),
+            BrokerMode::Durable,
+            runtime,
+            None,
+            Vec::new(),
+            None,
+        );
+        let (output, mut messages) = mpsc::unbounded_channel();
+        broker.connect(1, output);
+        for kind in ["one", "two", "three"] {
+            broker.replay.push(EventEnvelope::new(
+                "2026-09-02T00:00:00Z".to_owned(),
+                "agent-1".to_owned(),
+                Provider::Codex,
+                kind.to_owned(),
+                json!({}),
+                json!({}),
+            ));
+        }
+
+        broker
+            .handle_client_frame(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocol_version": 1,
+                    "client": { "name": "resync-test", "version": "0.1.0" },
+                    "last_sequence": 0,
+                },
+            }))
+            .await
+            .expect("initialize frame");
+        let initialized = messages.recv().await.expect("initialize response");
+        assert_eq!(initialized["result"]["replay"]["resync_required"], true);
+        assert_eq!(initialized["result"]["replay"]["latest"], 3);
+
+        broker.handle_provider_event(EventEnvelope::new(
+            "2026-09-02T00:00:01Z".to_owned(),
+            "agent-1".to_owned(),
+            Provider::Codex,
+            "during-handshake".to_owned(),
+            json!({}),
+            json!({}),
+        ));
+        assert!(
+            messages.try_recv().is_err(),
+            "provider events must wait for initialized"
+        );
+
+        broker
+            .handle_client_frame(json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {},
+            }))
+            .await
+            .expect("initialized frame");
+        let replayed = messages.recv().await.expect("event after resync baseline");
+        assert_eq!(replayed["method"], "agent/event");
+        assert_eq!(replayed["params"]["sequence"], 4);
+        assert_eq!(replayed["params"]["type"], "during-handshake");
+        assert_eq!(
+            messages.recv().await.expect("current broker state")["method"],
+            "broker/state"
+        );
     }
 }
