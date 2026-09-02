@@ -27,6 +27,11 @@ end, {
   desc = "Start one embedded Codex or Claude agent",
 })
 
+vim.api.nvim_create_user_command("AgentManagerAttach", function()
+  manager().open()
+  manager().attach_ui()
+end, { desc = "Attach to a broker agent or resume a provider session" })
+
 vim.api.nvim_create_user_command("AgentManagerSend", function(args)
   manager().prompt_ui(args.args)
 end, { nargs = "*", desc = "Send a prompt to the selected agent" })
@@ -38,6 +43,18 @@ end, { nargs = "*", desc = "Steer the selected active turn" })
 vim.api.nvim_create_user_command("AgentManagerInterrupt", function()
   manager().confirm_interrupt()
 end, { desc = "Confirm and interrupt the selected active turn" })
+
+vim.api.nvim_create_user_command("AgentManagerFork", function()
+  manager().fork()
+end, { desc = "Fork the selected resumable session" })
+
+vim.api.nvim_create_user_command("AgentManagerContext", function()
+  manager().context_ui()
+end, { desc = "Queue explicit editor context for the selected agent" })
+
+vim.api.nvim_create_user_command("AgentManagerDiff", function()
+  manager().diff_ui()
+end, { desc = "Show the workspace diff or resolve dirty-buffer conflicts" })
 
 vim.api.nvim_create_user_command("AgentManagerHealth", function()
   vim.cmd("checkhealth agent_manager")

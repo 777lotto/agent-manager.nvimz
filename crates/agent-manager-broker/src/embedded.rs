@@ -23,12 +23,18 @@ use crate::protocol::{
     Provider, RequestId, WorkspaceStrategy,
 };
 use crate::replay::{ReplayBuffer, ReplayResult};
-use crate::runtime::{AgentCommand, RuntimeConfig, RuntimeEvent, spawn_agent};
+use crate::runtime::{
+    AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, discover_sessions, spawn_agent,
+};
 use crate::worker::{PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WorkerCommandSpec};
 
 const MAX_PUBLIC_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_REPLAY_CAPACITY: usize = 2_000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONTEXT_BYTES: usize = 512 * 1024;
+const MAX_CONTEXT_ITEMS: usize = 256;
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedConfig {
@@ -62,7 +68,15 @@ impl EmbeddedConfig {
     #[doc(hidden)]
     #[must_use]
     pub fn with_provider_commands(mut self, codex: CommandSpec, claude: WorkerCommandSpec) -> Self {
-        self.runtime = RuntimeConfig { codex, claude };
+        self.runtime.codex = codex;
+        self.runtime.claude = claude;
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_callback_timeout(mut self, timeout: Duration) -> Self {
+        self.runtime.callback_timeout = timeout;
         self
     }
 }
@@ -177,6 +191,8 @@ struct ManagedAgent {
     summary: AgentSummary,
     commands: mpsc::Sender<AgentCommand>,
     task: Option<JoinHandle<()>>,
+    pending_contexts: Vec<Value>,
+    pending_questions: u64,
 }
 
 struct Broker {
@@ -335,8 +351,10 @@ impl Broker {
                 request_id,
                 json!({ "agents": self.summaries() }),
             )),
-            "agent/start" => self.start_agent(request_id, params),
+            "provider/session/list" => self.provider_sessions(request_id, params).await,
+            "agent/start" => self.start_agent(request_id, params, SessionLaunch::Start),
             "agent/attach" => self.attach_agent(request_id, params),
+            "agent/history" => self.history(request_id, params).await,
             "agent/prompt" => {
                 self.send_agent_input(request_id, params, InputKind::Prompt)
                     .await;
@@ -346,6 +364,12 @@ impl Broker {
                     .await;
             }
             "agent/interrupt" => self.interrupt_agent(request_id, params).await,
+            "agent/resume" => self.resume_agent(request_id, params),
+            "agent/fork" => self.fork_agent(request_id, params).await,
+            "agent/approval/respond" => self.respond_approval(request_id, params).await,
+            "agent/question/respond" => self.respond_question(request_id, params).await,
+            "agent/context/add" => self.add_context(request_id, params),
+            "agent/diff" => self.diff(request_id, params).await,
             "agent/replay" => self.replay(request_id, params),
             "broker/shutdown" => {
                 if !params.as_object().is_some_and(serde_json::Map::is_empty) {
@@ -355,14 +379,7 @@ impl Broker {
                 self.send(success_response(request_id, json!({ "shutdown": true })));
                 return Ok(true);
             }
-            "agent/history"
-            | "agent/resume"
-            | "agent/fork"
-            | "agent/archive"
-            | "agent/approval/respond"
-            | "agent/question/respond"
-            | "agent/context/add"
-            | "agent/diff" => self.send(error_response(
+            "agent/archive" => self.send(error_response(
                 Some(request_id),
                 -32_010,
                 "Method is planned for a later milestone",
@@ -413,16 +430,37 @@ impl Broker {
         false
     }
 
-    fn start_agent(&mut self, request_id: RequestId, params: Value) {
-        if !self.agents.is_empty() {
-            self.send(error_response(
-                Some(request_id),
-                -32_011,
-                "M1 embedded mode supports one agent",
-                None,
+    async fn provider_sessions(&self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ProviderSessionListParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid provider session list parameters",
             ));
             return;
+        };
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let limit = parsed.limit.unwrap_or(50).clamp(1, 1_000);
+        match discover_sessions(
+            parsed.provider,
+            &cwd,
+            parsed.cursor.as_deref(),
+            limit,
+            &self.config.runtime,
+        )
+        .await
+        {
+            Ok(result) => self.send(success_response(request_id, result)),
+            Err(message) => self.send(error_response(Some(request_id), -32_020, message, None)),
         }
+    }
+
+    fn start_agent(&mut self, request_id: RequestId, params: Value, launch: SessionLaunch) {
         let Ok(parsed) = serde_json::from_value::<StartParams>(params) else {
             self.send(invalid_params(request_id, "invalid start parameters"));
             return;
@@ -434,7 +472,7 @@ impl Broker {
         {
             self.send(invalid_params(
                 request_id,
-                "provider options are not available in M1",
+                "provider options are not available in M2",
             ));
             return;
         }
@@ -457,46 +495,78 @@ impl Broker {
             }
         };
 
+        let _ = self.launch_agent(
+            request_id,
+            parsed.provider,
+            cwd,
+            parsed.workspace_strategy,
+            worktree_path,
+            launch,
+        );
+    }
+
+    fn launch_agent(
+        &mut self,
+        request_id: RequestId,
+        provider: Provider,
+        cwd: PathBuf,
+        workspace_strategy: WorkspaceStrategy,
+        worktree_path: Option<String>,
+        launch: SessionLaunch,
+    ) -> Option<String> {
+        if self.agents.values().any(|agent| agent.task.is_some()) {
+            self.send(error_response(
+                Some(request_id),
+                -32_011,
+                "M2 embedded mode supports one live agent",
+                None,
+            ));
+            return None;
+        }
         let agent_id = Uuid::new_v4().to_string();
         let now = timestamp();
         let title = cwd
             .file_name()
             .and_then(|name| name.to_str())
-            .map_or_else(|| parsed.provider.to_string(), str::to_owned);
+            .map_or_else(|| provider.to_string(), str::to_owned);
         let summary = AgentSummary {
             id: agent_id.clone(),
-            provider: parsed.provider,
+            provider,
             provider_session_id: None,
             cwd: cwd.to_string_lossy().into_owned(),
-            workspace_strategy: parsed.workspace_strategy,
+            workspace_strategy,
             worktree_path,
             title,
             state: AgentState::Starting,
             active_turn_id: None,
             pending_approvals: 0,
             unread_events: 0,
-            capabilities: capabilities(parsed.provider),
+            capabilities: capabilities(provider),
             created_at: now.clone(),
             updated_at: now,
         };
         let (commands, task) = spawn_agent(
-            parsed.provider,
+            provider,
             agent_id.clone(),
             cwd,
             request_id,
+            launch,
             self.config.runtime.clone(),
             self.runtime.clone(),
         );
         self.agent_order.push(agent_id.clone());
         self.agents.insert(
-            agent_id,
+            agent_id.clone(),
             ManagedAgent {
                 summary,
                 commands,
                 task: Some(task),
+                pending_contexts: Vec::new(),
+                pending_questions: 0,
             },
         );
         self.notify_state();
+        Some(agent_id)
     }
 
     fn attach_agent(&self, request_id: RequestId, params: Value) {
@@ -514,6 +584,163 @@ impl Broker {
         ));
     }
 
+    async fn history(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<HistoryParams>(params) else {
+            self.send(invalid_params(request_id, "invalid history parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if agent.task.is_none() {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent is not live; resume the provider session before reading history",
+                None,
+            ));
+            return;
+        }
+        if agent
+            .commands
+            .send(AgentCommand::History {
+                request_id: request_id.clone(),
+                cursor: parsed.cursor,
+                limit: parsed.limit,
+            })
+            .await
+            .is_err()
+        {
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    fn resume_agent(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ResumeParams>(params) else {
+            self.send(invalid_params(request_id, "invalid resume parameters"));
+            return;
+        };
+        if parsed.provider_session_id.is_empty() {
+            self.send(invalid_params(
+                request_id,
+                "provider session id must not be empty",
+            ));
+            return;
+        }
+        if parsed
+            .provider_options
+            .as_ref()
+            .is_some_and(|options| !options.is_empty())
+        {
+            self.send(invalid_params(
+                request_id,
+                "provider options are not available in M2",
+            ));
+            return;
+        }
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let worktree_path = match validate_workspace(
+            parsed.workspace_strategy,
+            parsed.worktree_path.as_deref(),
+            &cwd,
+        ) {
+            Ok(path) => path,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let session_id = parsed.provider_session_id;
+        let _ = self.launch_agent(
+            request_id,
+            parsed.provider,
+            cwd,
+            parsed.workspace_strategy,
+            worktree_path,
+            SessionLaunch::Resume(session_id),
+        );
+    }
+
+    async fn fork_agent(&mut self, request_id: RequestId, params: Value) {
+        let Some(source_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(source) = self.agents.get(&source_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if !matches!(
+            source.summary.state,
+            AgentState::Idle | AgentState::Completed | AgentState::Interrupted
+        ) || source.summary.pending_approvals > 0
+            || source.pending_questions > 0
+        {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent must be idle with no pending human request before it can be forked",
+                None,
+            ));
+            return;
+        }
+        let Some(provider_session_id) = source.summary.provider_session_id.clone() else {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent has no provider session identity to fork",
+                None,
+            ));
+            return;
+        };
+        let provider = source.summary.provider;
+        let cwd = PathBuf::from(&source.summary.cwd);
+        let strategy = source.summary.workspace_strategy;
+        let worktree_path = source.summary.worktree_path.clone();
+        let pending_contexts = source.pending_contexts.clone();
+        self.retire_agent(&source_id).await;
+        let forked_id = self.launch_agent(
+            request_id,
+            provider,
+            cwd,
+            strategy,
+            worktree_path,
+            SessionLaunch::Fork(provider_session_id),
+        );
+        if let Some(agent) = forked_id.and_then(|agent_id| self.agents.get_mut(&agent_id)) {
+            agent.pending_contexts = pending_contexts;
+        }
+    }
+
+    async fn retire_agent(&mut self, agent_id: &str) {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return;
+        };
+        let _ = agent.commands.send(AgentCommand::Shutdown).await;
+        if let Some(mut task) = agent.task.take()
+            && tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        agent.summary.state = AgentState::Disconnected;
+        agent.summary.active_turn_id = None;
+        agent.summary.pending_approvals = 0;
+        agent.pending_questions = 0;
+        agent.pending_contexts.clear();
+        agent.summary.updated_at = timestamp();
+        self.notify_state();
+    }
+
     async fn send_agent_input(&mut self, request_id: RequestId, params: Value, kind: InputKind) {
         let Ok(parsed) = serde_json::from_value::<TurnInputParams>(params) else {
             self.send(invalid_params(request_id, "invalid turn input parameters"));
@@ -521,15 +748,6 @@ impl Broker {
         };
         if parsed.input.text.is_empty() {
             self.send(invalid_params(request_id, "input text must not be empty"));
-            return;
-        }
-        if !parsed.input.attachments.is_empty() {
-            self.send(error_response(
-                Some(request_id),
-                -32_012,
-                "Editor attachments are planned for M2",
-                None,
-            ));
             return;
         }
         let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
@@ -552,14 +770,32 @@ impl Broker {
             ));
             return;
         }
+        let cwd = Path::new(&agent.summary.cwd);
+        let mut attachments = agent.pending_contexts.clone();
+        for attachment in parsed.input.attachments {
+            let attachment = match validate_context(attachment, cwd) {
+                Ok(attachment) => attachment,
+                Err(message) => {
+                    self.send(invalid_params(request_id, message));
+                    return;
+                }
+            };
+            attachments.push(attachment);
+        }
+        if let Err(message) = validate_context_collection(&attachments) {
+            self.send(invalid_params(request_id, message));
+            return;
+        }
         let command = match kind {
             InputKind::Prompt => AgentCommand::Prompt {
                 request_id: request_id.clone(),
                 text: parsed.input.text,
+                attachments,
             },
             InputKind::Steer => AgentCommand::Steer {
                 request_id: request_id.clone(),
                 text: parsed.input.text,
+                attachments,
             },
         };
         if agent.commands.send(command).await.is_err() {
@@ -574,6 +810,7 @@ impl Broker {
             self.notify_state();
             return;
         }
+        agent.pending_contexts.clear();
         if kind == InputKind::Prompt {
             agent.summary.state = AgentState::Running;
             agent.summary.updated_at = timestamp();
@@ -608,6 +845,181 @@ impl Broker {
             ));
             self.notify_state();
         }
+    }
+
+    async fn respond_approval(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ApprovalResponseParams>(params) else {
+            self.send(invalid_params(request_id, "invalid approval response"));
+            return;
+        };
+        if !matches!(parsed.decision.as_str(), "allow" | "deny" | "defer") {
+            self.send(invalid_params(request_id, "invalid approval decision"));
+            return;
+        }
+        if parsed.agent_id.is_empty()
+            || parsed.approval_id.is_empty()
+            || parsed
+                .updated_input
+                .as_ref()
+                .is_some_and(|value| !value.is_object())
+            || parsed
+                .message
+                .as_ref()
+                .is_some_and(|message| message.chars().count() > 4_096)
+        {
+            self.send(invalid_params(request_id, "invalid approval response"));
+            return;
+        }
+        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let command = AgentCommand::Approval {
+            request_id: request_id.clone(),
+            action_id: parsed.approval_id,
+            decision: parsed.decision,
+            updated_input: parsed.updated_input,
+            message: parsed.message,
+        };
+        if agent.commands.send(command).await.is_err() {
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    async fn respond_question(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<QuestionResponseParams>(params) else {
+            self.send(invalid_params(request_id, "invalid question response"));
+            return;
+        };
+        if !matches!(parsed.decision.as_str(), "answer" | "deny") {
+            self.send(invalid_params(request_id, "invalid question decision"));
+            return;
+        }
+        if parsed.agent_id.is_empty()
+            || parsed.question_id.is_empty()
+            || !valid_question_answers(&parsed.answers)
+            || parsed
+                .message
+                .as_ref()
+                .is_some_and(|message| message.chars().count() > 4_096)
+        {
+            self.send(invalid_params(request_id, "invalid question response"));
+            return;
+        }
+        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let command = AgentCommand::Question {
+            request_id: request_id.clone(),
+            action_id: parsed.question_id,
+            decision: parsed.decision,
+            answers: parsed.answers,
+            message: parsed.message,
+        };
+        if agent.commands.send(command).await.is_err() {
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    fn add_context(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ContextParams>(params) else {
+            self.send(invalid_params(request_id, "invalid editor context"));
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if agent.task.is_none() || agent.summary.state == AgentState::Disconnected {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Editor context requires a live agent",
+                None,
+            ));
+            return;
+        }
+        let context = match validate_context(parsed.context, Path::new(&agent.summary.cwd)) {
+            Ok(context) => context,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let mut contexts = agent.pending_contexts.clone();
+        contexts.push(context.clone());
+        if let Err(message) = validate_context_collection(&contexts) {
+            self.send(invalid_params(request_id, message));
+            return;
+        }
+        agent.pending_contexts = contexts;
+        let count = agent.pending_contexts.len();
+        self.send(success_response(
+            request_id,
+            json!({
+                "queued": true,
+                "count": count,
+                "context": context,
+            }),
+        ));
+    }
+
+    async fn diff(&self, request_id: RequestId, params: Value) {
+        let Some(agent_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get(&agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let cwd = agent.summary.cwd.clone();
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args(["-C", &cwd, "diff", "--no-ext-diff", "--no-textconv", "--"])
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(DIFF_TIMEOUT, command.output()).await;
+        let Ok(Ok(output)) = output else {
+            self.send(error_response(
+                Some(request_id),
+                -32_020,
+                "Workspace diff timed out or could not be started",
+                None,
+            ));
+            return;
+        };
+        if !output.status.success() {
+            self.send(error_response(
+                Some(request_id),
+                -32_020,
+                "Workspace diff is unavailable for this directory",
+                None,
+            ));
+            return;
+        }
+        let truncated = output.stdout.len() > MAX_DIFF_BYTES;
+        let bytes = &output.stdout[..output.stdout.len().min(MAX_DIFF_BYTES)];
+        let diff = String::from_utf8_lossy(bytes).into_owned();
+        self.send(success_response(
+            request_id,
+            json!({ "cwd": cwd, "diff": diff, "truncated": truncated }),
+        ));
+    }
+
+    fn command_channel_failed(&mut self, agent_id: &str, request_id: RequestId) {
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.summary.state = AgentState::Disconnected;
+            agent.summary.updated_at = timestamp();
+            agent.pending_contexts.clear();
+        }
+        self.send(error_response(
+            Some(request_id),
+            -32_020,
+            "Provider command channel is unavailable",
+            None,
+        ));
+        self.notify_state();
     }
 
     fn replay(&self, request_id: RequestId, params: Value) {
@@ -655,14 +1067,18 @@ impl Broker {
                 agent_id,
                 code,
                 message,
+                fail_agent,
             } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                if fail_agent && let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.summary.state = AgentState::Failed;
                     agent.summary.active_turn_id = None;
                     agent.summary.updated_at = timestamp();
+                    let _ = agent.commands.try_send(AgentCommand::Shutdown);
                 }
-                self.send(error_response(Some(request_id), code, message, None));
-                self.notify_state();
+                self.send(error_response(Some(request_id), code, &message, None));
+                if fail_agent {
+                    self.notify_state();
+                }
             }
             RuntimeEvent::ProviderEvent(mut event) => {
                 let sequence = self.replay.push(event.clone());
@@ -681,7 +1097,10 @@ impl Broker {
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.summary.state = AgentState::Disconnected;
                     agent.summary.active_turn_id = None;
+                    agent.summary.pending_approvals = 0;
+                    agent.pending_questions = 0;
                     agent.summary.updated_at = timestamp();
+                    agent.pending_contexts.clear();
                     let mut event = EventEnvelope::new(
                         timestamp(),
                         agent_id,
@@ -701,13 +1120,15 @@ impl Broker {
                 }
             }
             RuntimeEvent::Stopped { agent_id } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id)
-                    && agent.summary.state != AgentState::Disconnected
-                {
-                    agent.summary.state = AgentState::Disconnected;
-                    agent.summary.active_turn_id = None;
-                    agent.summary.updated_at = timestamp();
-                    self.notify_state();
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    agent.task.take();
+                    agent.pending_contexts.clear();
+                    if agent.summary.state != AgentState::Disconnected {
+                        agent.summary.state = AgentState::Disconnected;
+                        agent.summary.active_turn_id = None;
+                        agent.summary.updated_at = timestamp();
+                        self.notify_state();
+                    }
                 }
             }
         }
@@ -719,6 +1140,8 @@ impl Broker {
         };
         let previous_state = agent.summary.state;
         let previous_turn = agent.summary.active_turn_id.clone();
+        let previous_approvals = agent.summary.pending_approvals;
+        let previous_questions = agent.pending_questions;
         match event.event_type.as_str() {
             "turn.started" => {
                 agent.summary.state = AgentState::Running;
@@ -744,10 +1167,30 @@ impl Broker {
                 agent.summary.state = AgentState::Failed;
                 agent.summary.active_turn_id = None;
             }
+            "approval.requested" => {
+                agent.summary.pending_approvals = agent.summary.pending_approvals.saturating_add(1);
+                agent.summary.state = AgentState::WaitingApproval;
+            }
+            "question.requested" => {
+                agent.pending_questions = agent.pending_questions.saturating_add(1);
+                if agent.summary.pending_approvals == 0 {
+                    agent.summary.state = AgentState::WaitingInput;
+                }
+            }
+            "approval.resolved" => {
+                agent.summary.pending_approvals = agent.summary.pending_approvals.saturating_sub(1);
+                restore_waiting_state(agent);
+            }
+            "question.resolved" => {
+                agent.pending_questions = agent.pending_questions.saturating_sub(1);
+                restore_waiting_state(agent);
+            }
             _ => {}
         }
-        let changed =
-            previous_state != agent.summary.state || previous_turn != agent.summary.active_turn_id;
+        let changed = previous_state != agent.summary.state
+            || previous_turn != agent.summary.active_turn_id
+            || previous_approvals != agent.summary.pending_approvals
+            || previous_questions != agent.pending_questions;
         if changed {
             agent.summary.updated_at = timestamp();
         }
@@ -793,6 +1236,24 @@ impl Broker {
     }
 }
 
+fn restore_waiting_state(agent: &mut ManagedAgent) {
+    if matches!(
+        agent.summary.state,
+        AgentState::Disconnected | AgentState::Failed
+    ) {
+        return;
+    }
+    agent.summary.state = if agent.summary.pending_approvals > 0 {
+        AgentState::WaitingApproval
+    } else if agent.pending_questions > 0 {
+        AgentState::WaitingInput
+    } else if agent.summary.active_turn_id.is_some() {
+        AgentState::Running
+    } else {
+        AgentState::Idle
+    };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputKind {
     Prompt,
@@ -831,8 +1292,42 @@ struct StartParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ProviderSessionListParams {
+    provider: Provider,
+    cwd: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeParams {
+    provider: Provider,
+    provider_session_id: String,
+    cwd: String,
+    workspace_strategy: WorkspaceStrategy,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    provider_options: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentIdParams {
     agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryParams {
+    agent_id: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -847,6 +1342,57 @@ struct TurnInputParams {
 struct TurnInput {
     text: String,
     attachments: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalResponseParams {
+    agent_id: String,
+    approval_id: String,
+    decision: String,
+    #[serde(default)]
+    updated_input: Option<Value>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionResponseParams {
+    agent_id: String,
+    question_id: String,
+    #[serde(default = "answer_decision")]
+    decision: String,
+    answers: serde_json::Map<String, Value>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+fn answer_decision() -> String {
+    "answer".to_owned()
+}
+
+fn valid_question_answers(answers: &serde_json::Map<String, Value>) -> bool {
+    answers.len() <= 32
+        && answers.values().all(|answer| match answer {
+            Value::String(answer) => answer.chars().count() <= 16_384,
+            Value::Array(answers) => {
+                answers.len() <= 32
+                    && answers.iter().all(|answer| {
+                        answer
+                            .as_str()
+                            .is_some_and(|answer| answer.chars().count() <= 4_096)
+                    })
+            }
+            _ => false,
+        })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextParams {
+    agent_id: String,
+    context: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -888,29 +1434,95 @@ fn validate_workspace(
             };
             let worktree = canonical_directory(raw)?;
             if worktree != cwd {
-                return Err("M1 requires worktree_path to equal cwd");
+                return Err("embedded mode requires worktree_path to equal cwd");
             }
             Ok(Some(worktree.to_string_lossy().into_owned()))
         }
     }
 }
 
+fn validate_context(context: Value, cwd: &Path) -> Result<Value, &'static str> {
+    let object = context.as_object().ok_or("context must be an object")?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("context.kind must be a non-empty string")?;
+    if !matches!(kind, "buffer" | "range" | "diagnostics" | "diff") {
+        return Err("context kind must be buffer, range, diagnostics, or diff");
+    }
+    let payload = object
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or("context.payload must be an object")?;
+    let raw_path = payload
+        .get("path")
+        .or_else(|| payload.get("cwd"))
+        .and_then(Value::as_str)
+        .ok_or("editor context must identify its path")?;
+    let path = canonical_context_path(raw_path)?;
+    if !path.starts_with(cwd) {
+        return Err("editor context path escapes the agent cwd");
+    }
+    match kind {
+        "buffer" | "range" if !payload.get("text").is_some_and(Value::is_string) => {
+            return Err("buffer and range context require text");
+        }
+        "diagnostics" if !payload.get("diagnostics").is_some_and(Value::is_array) => {
+            return Err("diagnostics context requires a diagnostics array");
+        }
+        "diff" if !payload.get("diff").is_some_and(Value::is_string) => {
+            return Err("diff context requires diff text");
+        }
+        _ => {}
+    }
+    if serde_json::to_vec(&context).map_or(true, |encoded| encoded.len() > MAX_CONTEXT_BYTES) {
+        return Err("editor context exceeds the size limit");
+    }
+    Ok(context)
+}
+
+fn validate_context_collection(contexts: &[Value]) -> Result<(), &'static str> {
+    if contexts.len() > MAX_CONTEXT_ITEMS {
+        return Err("too many editor context items");
+    }
+    if serde_json::to_vec(contexts).map_or(true, |encoded| encoded.len() > MAX_CONTEXT_BYTES) {
+        return Err("combined editor context exceeds the size limit");
+    }
+    Ok(())
+}
+
+fn canonical_context_path(raw: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err("editor context path must be absolute");
+    }
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map_err(|_| "editor context path could not be resolved");
+    }
+    let parent = path
+        .parent()
+        .ok_or("editor context path has no parent")?
+        .canonicalize()
+        .map_err(|_| "editor context parent does not exist")?;
+    let name = path
+        .file_name()
+        .ok_or("editor context path has no file name")?;
+    Ok(parent.join(name))
+}
+
 fn capabilities(provider: Provider) -> Vec<Capability> {
-    let later = |name| Capability {
-        name,
-        available: false,
-        reason: Some("planned for a later milestone".to_owned()),
-    };
     vec![
         available(CapabilityName::Streaming),
         available(CapabilityName::MultiTurn),
-        later(CapabilityName::History),
-        later(CapabilityName::Resume),
-        later(CapabilityName::Fork),
+        available(CapabilityName::History),
+        available(CapabilityName::Resume),
+        available(CapabilityName::Fork),
         available(CapabilityName::Interrupt),
         available(CapabilityName::Steer),
-        later(CapabilityName::Approvals),
-        later(CapabilityName::Questions),
+        available(CapabilityName::Approvals),
+        available(CapabilityName::Questions),
         Capability {
             name: CapabilityName::Usage,
             available: true,
@@ -918,11 +1530,12 @@ fn capabilities(provider: Provider) -> Vec<Capability> {
         },
         Capability {
             name: CapabilityName::FileChanges,
-            available: provider == Provider::Codex,
-            reason: (provider == Provider::Claude)
-                .then(|| "Claude file projection is planned for M2".to_owned()),
+            available: true,
+            reason: (provider == Provider::Claude).then(|| {
+                "Projected from Claude tool and hook events when paths are supplied".to_owned()
+            }),
         },
-        later(CapabilityName::Diff),
+        available(CapabilityName::Diff),
         available(CapabilityName::Replay),
     ]
 }
@@ -986,5 +1599,97 @@ impl std::fmt::Display for Provider {
             Self::Codex => "codex",
             Self::Claude => "claude",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::{
+        MAX_CONTEXT_BYTES, MAX_CONTEXT_ITEMS, valid_question_answers, validate_context,
+        validate_context_collection,
+    };
+
+    fn fixture_cwd() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .expect("canonical fixture cwd")
+    }
+
+    #[test]
+    fn validates_context_shape_and_rejects_workspace_escape() {
+        let cwd = fixture_cwd();
+        let valid = json!({
+            "kind": "range",
+            "payload": {
+                "path": cwd.join("Cargo.toml"),
+                "start_line": 1,
+                "end_line": 1,
+                "text": "[package]"
+            }
+        });
+        assert!(validate_context(valid, &cwd).is_ok());
+
+        let outside = cwd.parent().expect("workspace root").join("Cargo.toml");
+        let escaped = json!({
+            "kind": "buffer",
+            "payload": { "path": outside, "text": "[workspace]" }
+        });
+        assert_eq!(
+            validate_context(escaped, &cwd),
+            Err("editor context path escapes the agent cwd")
+        );
+        assert_eq!(
+            validate_context(
+                json!({ "kind": "buffer", "payload": { "path": cwd.join("Cargo.toml") } }),
+                &cwd,
+            ),
+            Err("buffer and range context require text")
+        );
+    }
+
+    #[test]
+    fn bounds_context_item_count_and_encoded_size() {
+        let cwd = fixture_cwd();
+        let oversized = json!({
+            "kind": "buffer",
+            "payload": {
+                "path": cwd.join("Cargo.toml"),
+                "text": "x".repeat(MAX_CONTEXT_BYTES)
+            }
+        });
+        assert_eq!(
+            validate_context(oversized, &cwd),
+            Err("editor context exceeds the size limit")
+        );
+
+        let items = (0..=MAX_CONTEXT_ITEMS)
+            .map(|_| json!({ "kind": "buffer", "payload": {} }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_context_collection(&items),
+            Err("too many editor context items")
+        );
+    }
+
+    #[test]
+    fn validates_public_question_answer_shapes() {
+        let valid = serde_json::from_value(json!({
+            "mode": "safe",
+            "checks": ["format", "test"]
+        }))
+        .expect("answer map");
+        assert!(valid_question_answers(&valid));
+
+        let invalid = serde_json::from_value(json!({ "mode": 7 })).expect("answer map");
+        assert!(!valid_question_answers(&invalid));
+        let too_many = serde_json::from_value(json!({
+            "checks": (0..=32).map(|index| index.to_string()).collect::<Vec<_>>()
+        }))
+        .expect("answer map");
+        assert!(!valid_question_answers(&too_many));
     }
 }

@@ -2,8 +2,8 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M1 embedded vertical slice implemented
-- Last reviewed: 2026-09-01
+- Status: M2 safe interactive workflow implemented
+- Last reviewed: 2026-09-02
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
 - Foundation plugin ID: `agent.manager`
@@ -298,6 +298,7 @@ The initialization response includes:
 
 | Method                   | Purpose                                                    |
 | ------------------------ | ---------------------------------------------------------- |
+| `provider/session/list`  | Discover resumable provider sessions for one cwd.          |
 | `agent/list`             | List known agents and live status.                         |
 | `agent/start`            | Start a provider session in an explicit working directory. |
 | `agent/attach`           | Subscribe to an agent owned by the broker.                 |
@@ -605,8 +606,12 @@ Final command names follow the selected package name. The working surface is:
 | `:AgentManagerSplit`            | Open the compact split.                              |
 | `:AgentManagerStart [provider]` | Start an agent rooted at the current project.        |
 | `:AgentManagerSend`             | Open prompt input for the selected agent.            |
+| `:AgentManagerSteer`            | Add input to the selected active turn.               |
 | `:AgentManagerAttach`           | Select a broker-owned or resumable provider session. |
 | `:AgentManagerInterrupt`        | Confirm and interrupt active work.                   |
+| `:AgentManagerFork`             | Fork the selected resumable provider session.        |
+| `:AgentManagerContext`          | Queue explicit editor context for the next input.    |
+| `:AgentManagerDiff`             | Show a diff or resolve a dirty-buffer conflict.      |
 | `:AgentManagerHealth`           | Show component and integration health.               |
 
 Commands accept structured Lua options through the public API; command-line
@@ -627,6 +632,7 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | `x`                 | Confirm and interrupt active work.                        |
 | `a` / `d`           | Allow or deny only while an approval is focused.          |
 | `f`                 | Fork the selected completed/resumable session.            |
+| `c`                 | Queue an explicit editor-context snapshot.                |
 | `D`                 | Open the current diff.                                    |
 | `r`                 | Refresh/resynchronize projection state.                   |
 | `?` / `g?`          | Open visible help.                                        |
@@ -939,11 +945,18 @@ agents.setup(opts)
 agents.open(layout?)
 agents.close()
 agents.start({ provider = "codex", cwd = "...", workspace_strategy = "shared" })
+agents.attach(agent_id)
+agents.sessions({ provider = "codex", cwd = "..." })
 agents.prompt(agent_id, input)
 agents.steer(agent_id, input)
 agents.interrupt(agent_id)
 agents.resume({ provider = "claude", session_id = "...", cwd = "..." })
 agents.fork(agent_id)
+agents.history(agent_id)
+agents.respond_approval(agent_id, approval_id, decision, opts)
+agents.respond_question(agent_id, question_id, decision, answers, opts)
+agents.add_context(agent_id, context)
+agents.diff(agent_id)
 agents.list()
 agents.status()
 agents.running_count()
@@ -1066,6 +1079,12 @@ model projection, native buffers, rendering, controls, and teardown.
 - Explicit buffer/range/diagnostic/diff context.
 - Dirty-buffer and file-change handling.
 - Provider capability/usage presentation.
+
+Implementation status: complete on 2026-09-02. Embedded mode retains one live
+provider runtime, but may keep disconnected summaries after a fork. Human
+callbacks remain broker-owned and fail closed on timeout, interruption,
+shutdown, malformed responses, or client disconnect. Ordinary acceptance uses
+fake provider runtimes and does not require authentication or consume quota.
 
 ### M3: UX ecosystem integration
 

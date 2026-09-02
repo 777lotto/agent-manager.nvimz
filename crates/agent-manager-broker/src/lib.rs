@@ -6,6 +6,8 @@
 pub mod codex;
 pub mod embedded;
 mod framing;
+mod human;
+mod projection;
 pub mod protocol;
 pub mod replay;
 mod runtime;

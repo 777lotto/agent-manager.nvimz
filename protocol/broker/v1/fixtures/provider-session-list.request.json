@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "provider/session/list",
+  "params": {
+    "provider": "codex",
+    "cwd": "/workspace/project",
+    "cursor": null,
+    "limit": 50
+  }
+}

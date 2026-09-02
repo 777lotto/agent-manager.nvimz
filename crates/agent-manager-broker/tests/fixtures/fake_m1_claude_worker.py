@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic multi-turn Claude transcript for the embedded broker."""
+"""Deterministic M2 Claude transcript for the embedded broker."""
 
 from __future__ import annotations
 
@@ -77,17 +77,42 @@ def main() -> None:
         },
     )
 
-    start = read()
-    if start.get("method") != "session/start":
-        raise AssertionError("expected session/start")
-    agent_id = start["params"]["agent_id"]
+    opening = read()
+    if opening.get("method") == "session/list":
+        respond(
+            opening,
+            {
+                "sessions": [
+                    {
+                        "session_id": "session-resumable",
+                        "cwd": opening.get("params", {}).get("directory", "/tmp"),
+                        "summary": "Resumable Claude session",
+                        "last_modified": 1,
+                    }
+                ]
+            },
+        )
+        shutdown = read()
+        if shutdown.get("method") == "worker/shutdown":
+            respond(shutdown, {"shutdown": True})
+        return
+    if opening.get("method") not in {"session/start", "session/resume", "session/fork"}:
+        raise AssertionError("expected session open")
+    agent_id = opening["params"]["agent_id"]
+    source_session = opening.get("params", {}).get("session_id")
+    if opening["method"] == "session/resume":
+        session_id = source_session
+    elif opening["method"] == "session/fork":
+        session_id = f"{source_session}-fork"
+    else:
+        session_id = "session-m1"
     respond(
-        start,
+        opening,
         {
             "agent_id": agent_id,
-            "provider_session_id": "session-m1",
-            "cwd": start["params"]["cwd"],
-            "forked": False,
+            "provider_session_id": session_id,
+            "cwd": opening["params"]["cwd"],
+            "forked": opening["method"] == "session/fork",
         },
     )
 
@@ -97,11 +122,12 @@ def main() -> None:
         method = request.get("method")
         if method == "turn/prompt":
             turn_number += 1
+            if turn_number == 1 and "<agent-manager-context" not in request["params"]["text"]:
+                raise AssertionError("explicit editor context was not forwarded")
             respond(request, {"accepted": True})
             if turn_number == 1:
                 session_event(agent_id, "task.started", {"tool": "Read", "status": "running"})
                 session_event(agent_id, "task.progress", {"delta": "fixture activity"})
-                session_event(agent_id, "stream.event", {"delta": "first answer"})
                 send(
                     {
                         "jsonrpc": "2.0",
@@ -110,16 +136,68 @@ def main() -> None:
                         "params": {
                             "callback_id": "approval-m1",
                             "agent_id": agent_id,
-                            "provider_session_id": "session-m1",
+                            "provider_session_id": session_id,
                             "tool_name": "Bash",
                             "input": {"command": "printf fixture"},
                             "context": {},
                         },
                     }
                 )
-                denial = read()
-                if denial.get("result", {}).get("decision") != "deny":
-                    raise AssertionError("broker did not fail closed")
+                approval = read()
+                approval_result = approval.get("result", {})
+                approval_decision = approval_result.get("decision")
+                if approval_decision == "deny":
+                    complete(agent_id, "interrupted")
+                    continue
+                if approval_decision != "allow":
+                    raise AssertionError("broker did not forward interactive approval")
+                if "updated_input" in approval_result and not isinstance(
+                    approval_result["updated_input"], dict
+                ):
+                    raise AssertionError("absent Claude input override must be omitted")
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "worker:question-m2",
+                        "method": "question/request",
+                        "params": {
+                            "callback_id": "question-m2",
+                            "agent_id": agent_id,
+                            "provider_session_id": session_id,
+                            "tool_name": "AskUserQuestion",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "Which mode?",
+                                        "header": "Mode",
+                                        "options": [
+                                            {"label": "Safe", "description": "Use safe mode"},
+                                            {"label": "Fast", "description": "Use fast mode"},
+                                        ],
+                                        "multiSelect": False,
+                                    }
+                                ]
+                            },
+                            "context": {},
+                        },
+                    }
+                )
+                answer = read()
+                if answer.get("result", {}).get("decision") != "answer" or answer.get(
+                    "result", {}
+                ).get("answers", {}).get("Which mode?") != "Safe":
+                    raise AssertionError("broker did not preserve structured question answers")
+                session_event(
+                    agent_id,
+                    "rate_limit",
+                    {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+                )
+                session_event(
+                    agent_id,
+                    "file.changed",
+                    {"path": "/tmp/agent-manager-m2-file.txt", "kind": "modified"},
+                )
+                session_event(agent_id, "stream.event", {"delta": "first answer"})
                 complete(agent_id)
             elif turn_number == 2:
                 session_event(agent_id, "stream.event", {"delta": "follow-up answer"})
@@ -132,6 +210,20 @@ def main() -> None:
         elif method == "turn/interrupt":
             complete(agent_id, "interrupted")
             respond(request, {"interrupted": True})
+        elif method == "session/history":
+            respond(
+                request,
+                {
+                    "messages": [
+                        {"id": "history-user", "role": "user", "content": "historic question"},
+                        {
+                            "id": "history-assistant",
+                            "role": "assistant",
+                            "content": "historic answer",
+                        },
+                    ]
+                },
+            )
         elif method == "worker/shutdown":
             respond(request, {"shutdown": True})
             return

@@ -13,8 +13,9 @@ CONTENTS                                                   *agent-manager*
 1. Introduction                                      *agent-manager-intro*
 
 Agent Manager starts an embedded Rust broker and presents one Codex or Claude
-agent in native Neovim buffers. M1 streams conversation and tool activity and
-supports follow-up prompts, steering, and interrupt.
+agent in native Neovim buffers. M2 adds safe human decisions, provider session
+resume/fork, explicit editor context, file-conflict handling, and capability
+and usage presentation to the M1 conversation workflow.
 
 ==============================================================================
 2. Setup                                              *agent-manager-setup*
@@ -44,7 +45,10 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerStart*
 :AgentManagerStart [codex|claude]
-                           Start the one agent supported by M1.
+                           Start the one live agent supported by embedded mode.
+
+                                                   *:AgentManagerAttach*
+:AgentManagerAttach        Select a broker agent or resumable provider session.
 
                                                    *:AgentManagerSend*
 :AgentManagerSend [text]   Send a prompt, or open native input without text.
@@ -54,6 +58,17 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerInterrupt*
 :AgentManagerInterrupt     Confirm and interrupt the selected active turn.
+
+                                                   *:AgentManagerFork*
+:AgentManagerFork          Fork the selected idle or completed provider session.
+
+                                                   *:AgentManagerContext*
+:AgentManagerContext       Queue an explicit buffer, range, diagnostic, or diff
+                           snapshot for the selected agent's next input.
+
+                                                   *:AgentManagerDiff*
+:AgentManagerDiff          Show the workspace diff or resolve a dirty-buffer
+                           conflict caused by an external agent edit.
 
                                                    *:AgentManagerHealth*
 :AgentManagerHealth        Run |:checkhealth| for Agent Manager.
@@ -69,26 +84,37 @@ displays show all three. Medium and narrow displays use <Tab> and <S-Tab> to
 cycle panes.
 
     n       start an agent
+    h       attach to or resume a session
     p       prompt the selected agent
     s       steer an active turn
     x       confirm an interrupt
+    a / d   allow or deny only the focused human request
+    <CR>    answer a focused question or select an agent
+    c       queue explicit editor context
+    f       fork the selected provider session
+    D       show a workspace diff or dirty-buffer conflict
     r       refresh broker state
-    <CR>    select the agent under the cursor
     ?       show mapping help
     q       close the workspace view
 
 Mappings are buffer-local. Closing the view does not approve, interrupt, or
-delete provider state.
+delete provider state. A provider approval or question opens a dedicated
+decision buffer that normal streaming redraws do not replace.
 
 ==============================================================================
 5. Safety                                            *agent-manager-safety*
 
 Live prompts may consume provider quota. Credentials stay in the installed
-provider runtimes and never enter Agent Manager configuration. M1 has no
-approval or question UI, so provider callbacks are denied automatically.
+provider runtimes and never enter Agent Manager configuration. Human callbacks
+fail closed on timeout, cancellation, disconnect, malformed response, or
+shutdown. The UI exposes only decisions advertised for the pending request.
 
-Embedded state ends when the broker exits. Durable reconnect, multiple agents,
-approvals, questions, resume, fork, history, diffs, and editor context belong
-to later milestones.
+Editor context is explicit and one-shot. Unsaved snapshots are marked but never
+written automatically. An external change never reloads a modified buffer; use
+|:AgentManagerDiff| to inspect, compare, explicitly reload, or keep it.
+
+Embedded state ends when the broker exits and supports one live runtime. A fork
+keeps the source as a disconnected summary. Durable reconnect, multiple live
+agents, and UX ecosystem integration belong to later milestones.
 
 vim:tw=78:ts=8:noet:ft=help:norl:
