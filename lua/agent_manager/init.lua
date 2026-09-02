@@ -2,10 +2,53 @@ local Config = require("agent_manager.config")
 local Client = require("agent_manager.client")
 local Editor = require("agent_manager.editor")
 local Model = require("agent_manager.model")
+local UX = require("agent_manager.ux")
 local View = require("agent_manager.view")
 
 local M = {}
 local runtime = nil
+local state_event_pending = false
+local state_event_data = nil
+local cached_summary = {
+  running_count = 0,
+  pending_approval_count = 0,
+  agent_ids = {},
+}
+
+local function summary_for(model)
+  local ids = {}
+  for _, agent in ipairs(model and model:list() or {}) do
+    ids[#ids + 1] = agent.id
+  end
+  return {
+    running_count = model and model:running_count() or 0,
+    pending_approval_count = model and model:pending_approval_count() or 0,
+    agent_ids = ids,
+  }
+end
+
+local function publish_state(model, reason)
+  cached_summary = summary_for(model)
+  state_event_data = vim.tbl_extend("force", vim.deepcopy(cached_summary), {
+    reason = reason or "state_changed",
+  })
+  if state_event_pending then
+    return
+  end
+  state_event_pending = true
+  vim.schedule(function()
+    state_event_pending = false
+    local data = state_event_data
+    state_event_data = nil
+    if data then
+      pcall(vim.api.nvim_exec_autocmds, "User", {
+        pattern = "AgentManagerStateChanged",
+        modeline = false,
+        data = data,
+      })
+    end
+  end)
+end
 
 local function structured_error(kind, message)
   return { kind = kind, message = message }
@@ -93,15 +136,25 @@ end
 
 function M.setup(opts)
   if runtime then
-    M.teardown()
+    local torn_down, teardown_err = M.teardown()
+    if not torn_down then
+      return nil, teardown_err
+    end
   end
   local config, err = Config.resolve(opts)
   if not config then
     return nil, err
   end
-  local model = Model.new({ max_events = config.ui.max_events })
+  local model
   local client
   local view
+  local ux = UX.new()
+  model = Model.new({
+    max_events = config.ui.max_events,
+    on_change = function(reason)
+      publish_state(model, reason)
+    end,
+  })
   client = Client.new({
     command = config.broker.command,
     claude_python = config.providers.claude.python,
@@ -169,7 +222,9 @@ function M.setup(opts)
     model = model,
     client = client,
     view = view,
+    ux = ux,
   }
+  publish_state(model, "setup")
   return true
 end
 
@@ -743,6 +798,7 @@ function M.refresh(callback)
     finish(callback, nil, setup_err)
     return nil, setup_err
   end
+  runtime.ux:refresh()
   return with_client(function()
     local _, request_err = runtime.client:request("agent/list", {}, function(result, rpc_err)
       if result and result.agents then
@@ -766,7 +822,7 @@ function M.start_ui()
     return
   end
   if has_live_agent() then
-    vim.notify("Agent Manager M2 supports one live agent per embedded broker", vim.log.levels.WARN)
+    vim.notify("Agent Manager embedded mode supports one live agent before M4", vim.log.levels.WARN)
     return
   end
   vim.ui.select({ "codex", "claude" }, { prompt = "Agent provider" }, function(provider)
@@ -1110,33 +1166,53 @@ function M.list()
 end
 
 function M.status()
-  if not ensure_setup() then
-    return {}
+  if not runtime then
+    return {
+      model = {
+        agents = {},
+        client_state = "stopped",
+      },
+      client = { state = "stopped" },
+      view = {
+        open = false,
+        buffers = {},
+        windows = {},
+        backend = "native",
+      },
+      summary = vim.deepcopy(cached_summary),
+    }
   end
   return {
     model = runtime.model:snapshot(),
     client = runtime.client:status(),
     view = runtime.view:status(),
+    summary = vim.deepcopy(cached_summary),
   }
 end
 
 function M.running_count()
-  return ensure_setup() and runtime.model:running_count() or 0
+  return cached_summary.running_count
 end
 
 function M.pending_approval_count()
-  return ensure_setup() and runtime.model:pending_approval_count() or 0
+  return cached_summary.pending_approval_count
 end
 
 function M.health()
   local status = M.status()
+  local config = runtime and runtime.config or select(1, Config.resolve({}))
+  local broker = status.client or {}
+  if config and broker.command == nil then
+    broker.command = vim.deepcopy(config.broker.command)
+  end
   return {
     neovim = tostring(vim.version()),
-    root = runtime and runtime.config.root or nil,
-    broker = status.client,
-    mode = runtime and runtime.config.broker.mode or nil,
-    claude_python = runtime and runtime.config.providers.claude.python or nil,
+    root = config and config.root or nil,
+    broker = broker,
+    mode = config and config.broker.mode or nil,
+    claude_python = config and config.providers.claude.python or nil,
     agents = status.model and status.model.agents or {},
+    ux = runtime and runtime.ux:status() or UX.detect(),
   }
 end
 
@@ -1148,6 +1224,13 @@ function M.teardown()
   runtime = nil
   old.view:teardown()
   old.client:stop()
+  local ux_ok, ux_err = old.ux:teardown()
+  publish_state(nil, "teardown")
+  if not ux_ok then
+    return nil, structured_error("ux_teardown", "UX presentation teardown failed: " .. tostring(
+      type(ux_err) == "table" and (ux_err.message or vim.inspect(ux_err)) or ux_err
+    ))
+  end
   return true
 end
 

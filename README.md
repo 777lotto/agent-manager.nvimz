@@ -5,14 +5,14 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-The M2 safe interactive workflow is usable now. Neovim starts the Rust broker
-over stdio, the broker owns one live Codex or Claude session, and the native
-workspace streams conversation, tool activity, file changes, and usage. It
-supports provider session discovery, specific resume and fork, human
-approvals, structured questions, explicit editor context, dirty-buffer conflict
-handling, follow-up prompts, steering, interrupt, and bounded in-process
-replay. Ordinary verification uses fake provider processes and never consumes
-provider quota.
+The M3 UX ecosystem integration is usable now. The safe embedded workflow still
+owns one live Codex or Claude session and now publishes the immutable
+`agent.manager` Foundation schema-v1 catalog, deterministic fixtures, and a
+pure Styling discovery adapter. Native presentation remains dependency-free;
+when Foundation is present it owns the semantic groups and profile replay.
+Chrome coexistence uses ordinary buffer/window metadata and a scheduled cached
+status event without writing Chrome-owned surfaces. Ordinary verification uses
+fake provider processes and never consumes provider quota.
 
 ## Selected architecture
 
@@ -98,7 +98,7 @@ and `q` to close only the view. Wide displays show agents, conversation, and
 activity together; medium and narrow displays cycle the same buffers without
 losing model state.
 
-### M2 safety boundary
+### Runtime safety boundary
 
 Live prompts use the provider account already configured for Codex or Claude
 and can consume quota. Agent Manager never reads, prints, stores, or passes
@@ -116,7 +116,7 @@ explicit reload with confirmation, or keep-buffer actions.
 Embedded mode still owns one live runtime and ends when its broker process
 exits. A fork retires the source runtime, preserves its disconnected summary,
 and opens the provider fork. Durable reconnect, multiple concurrent live
-agents, writer isolation, and UX ecosystem integration remain M4/M3 work.
+agents, and writer isolation remain M4 work.
 
 Opening the workspace and running the default test suite are non-spending. The
 diagnostic `codex-probe` performs only initialization and thread discovery;
@@ -127,7 +127,12 @@ diagnostic `codex-probe` performs only initialization and thread discovery;
 ```sh
 mise run setup
 mise run verify
+mise run ux-test
 ```
+
+The M3 gate resolves registered workstation checkouts automatically. Elsewhere,
+set `UX_FOUNDATION_ROOT`, `UX_STYLING_ROOT`, and `UX_CHROME_ROOT` to checkouts
+containing the promoted commits recorded in `tests/ux-pins.env`.
 
 Useful diagnostic commands after a build:
 
@@ -146,21 +151,31 @@ See [M1 embedded slice](docs/architecture/m1-embedded-slice.md) for the current
 runtime foundation. See
 [M2 safe interactive workflow](docs/architecture/m2-safe-interactive-workflow.md)
 for human callbacks, session lifecycle, editor context, filesystem safety, and
-acceptance evidence.
+acceptance evidence. See
+[M3 UX ecosystem integration](docs/architecture/m3-ux-ecosystem-integration.md)
+for the immutable manifest, Styling discovery, Chrome cache, compatibility
+pins, and acceptance evidence.
 
-## UX direction
+## UX integration
 
-The functional plugin will support native Neovim presentation without the UX
-suite. Once those repositories are mature and their contracts are promoted:
+The functional plugin supports native Neovim presentation without the UX suite.
+The promoted schema-v1 integrations are:
 
-- UX Foundation will own token resolution and persistence for the reserved
-  plugin ID `agent.manager`.
-- UX Styling will discover a pure, callback-free presentation adapter and
-  deterministic fixtures without starting provider processes.
-- UX Chrome will retain sole ownership of tabline, statusline, winbar,
-  statuscolumn, folds, and scrollbar surfaces.
-- A mature UX Panels package may provide the renderer primitives behind a
-  narrow view interface.
+- UX Foundation owns token resolution and persistence for the published plugin
+  ID `agent.manager`.
+- UX Styling discovers a pure presentation adapter and deterministic fixtures
+  without starting the Agent Manager runtime or provider processes.
+- UX Chrome retains sole ownership of tabline, statusline, winbar,
+  statuscolumn, folds, and scrollbar surfaces. Its current public API has no
+  segment extension, so external owners consume Agent Manager's non-blocking
+  cache when desired.
+- UX Panels is not yet available. The existing native view remains the narrow
+  backend and health reports that decision explicitly.
+
+Cached consumers can call `status()`, `running_count()`, or
+`pending_approval_count()`. State changes emit a coalesced
+`User AgentManagerStateChanged` event carrying only those counts and stable
+agent IDs—never prompt text or tool payloads.
 
 Agent Manager remains a separate repository and will not be added to
 `nvim-config` until its implementation acceptance gates pass.

@@ -124,9 +124,10 @@ appear with each selected agent; the latest provider-native usage object is
 flattened deterministically in the activity pane. Rendering never evaluates
 provider text as Lua, Ex, mappings, options, or modelines.
 
-M3 still owns Foundation, Styling, Panels, and Chrome integration. M4 owns the
-Unix socket, persistent registry, reconnect/replay recovery, multiple live
-agents, and enforced writable-worktree isolation.
+M3 now owns the implemented Foundation, Styling, native Panels fallback, and
+Chrome integration. M4 owns the Unix socket, persistent registry,
+reconnect/replay recovery, multiple live agents, and enforced
+writable-worktree isolation.
 
 ## Acceptance evidence
 

@@ -2,7 +2,7 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M2 safe interactive workflow implemented
+- Status: M3 UX ecosystem integration implemented
 - Last reviewed: 2026-09-02
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
@@ -14,8 +14,7 @@ runtime is Neovim running inside the AI container over SSH. It is not a
 client-side Neovim plugin and does not relay agent traffic through nginx.
 
 The repository and package names are final. The Foundation plugin ID is
-reserved here but is not published until the promoted schema-v1 contract is
-available, because released Foundation IDs are immutable.
+published against the promoted schema-v1 contract and is now immutable.
 
 ## Decision summary
 
@@ -698,8 +697,8 @@ does not write those surfaces directly.
 
 ### Foundation manifest
 
-Once the Foundation schema-v1 contract is promoted, the plugin ships a
-callback-free manifest and deterministic fixtures. Suggested components are:
+The plugin ships a callback-free Foundation schema-v1 manifest and deterministic
+fixtures. Its immutable components are:
 
 - `shell`;
 - `agent_list`;
@@ -712,7 +711,7 @@ callback-free manifest and deterministic fixtures. Suggested components are:
 - `status`; and
 - `help`.
 
-Suggested semantic groups include:
+The semantic groups include:
 
 ```text
 AgentManagerNormal
@@ -734,6 +733,8 @@ AgentManagerTool
 AgentManagerApprovalPending
 AgentManagerApprovalAllowed
 AgentManagerApprovalDenied
+AgentManagerQuestionPending
+AgentManagerQuestionChoice
 AgentManagerDiffAdd
 AgentManagerDiffChange
 AgentManagerDiffDelete
@@ -747,8 +748,8 @@ require without loading the agent runtime. The runtime uses that module to
 define native fallbacks and, when Foundation is available, register the
 manifest. The Styling adapter imports only the same presentation module and
 returns the same by-value manifest and fixtures. Foundation's idempotent
-same-manifest registration prevents a second owner. Teardown unregisters only
-the handle acquired by the runtime.
+same-manifest registration prevents a second owner. Teardown unregisters a
+runtime-created handle only while no active Styling registration shares it.
 
 Defaults use Foundation semantic tokens when available and native highlight
 links as a standalone fallback. Defaults contain no hard dependency on one
@@ -757,7 +758,7 @@ provenance.
 
 ### Styling adapter
 
-The plugin ships its own discoverable adapter at a path such as:
+The plugin ships its own discoverable adapter at:
 
 ```text
 lua/ux_styling_adapter/agent_manager.lua
@@ -810,10 +811,10 @@ consume its public layout, header, tabs, rows, badges, empty/loading/error,
 help, and confirmation primitives through a narrow view backend. Domain state,
 provider events, mappings, and actions remain in the agent plugin.
 
-If Panels is not yet available, a native backend implements the same internal
-view interface. This prevents the broker and domain model from depending on a
-particular renderer and allows a later visual migration without rewriting
-provider adapters.
+Panels is not available at the promoted M3 compatibility pins, so the native
+backend implements the internal view interface. This prevents the broker and
+domain model from depending on a particular renderer and allows a later visual
+migration without rewriting provider adapters.
 
 ### UX compatibility modes
 
@@ -1094,6 +1095,15 @@ fake provider runtimes and does not require authentication or consume quota.
 - Ship the pure discoverable Styling adapter.
 - Adopt mature Panels primitives if available.
 - Prove Chrome coexistence and optional public cached status integration.
+
+Implementation status: complete on 2026-09-02. The immutable `agent.manager`
+identity, ten-component schema-v1 manifest, semantic groups, and deterministic
+fixtures are shared by runtime Foundation registration and the pure Styling
+adapter. Chrome coexistence tests prove that Agent Manager does not write its
+global surfaces; the current Chrome API has no public segment extension, so M3
+publishes a coalesced, payload-free cached-status event instead. No mature
+`ux.panels` package exists at the promoted pins, and health therefore reports
+the native backend explicitly.
 
 ### M4: durable multi-agent runtime
 

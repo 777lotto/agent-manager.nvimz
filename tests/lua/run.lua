@@ -110,6 +110,53 @@ local function layout_test()
   assert_equal(View.layout_for(80).mode, "narrow", "narrow layout")
 end
 
+local function native_presentation_test()
+  local manager = require("agent_manager")
+  local presentation = require("agent_manager.presentation")
+  local baselines = {}
+  for _, link in ipairs(presentation.native_links()) do
+    baselines[link.group] = vim.api.nvim_get_hl(0, {
+      name = link.group,
+      link = true,
+      create = false,
+    })
+  end
+  local buffer_count = #vim.api.nvim_list_bufs()
+  local initial = manager.status()
+  assert_equal(initial.view.open, false, "status cache must be readable before setup")
+  assert_equal(initial.summary.agent_ids, {}, "initial cached agent IDs")
+  assert_equal(#vim.api.nvim_list_bufs(), buffer_count, "status cache must not initialize a view")
+
+  assert(manager.setup({
+    broker = {
+      command = { "python", root .. "/tests/fixtures/fake_public_broker.py" },
+    },
+    providers = { claude = { python = false } },
+  }))
+  local ux = manager.health().ux
+  assert_equal(ux.foundation.registered, false, "native mode Foundation registration")
+  assert_equal(ux.native_fallback, true, "native fallback mode")
+  for _, link in ipairs(presentation.native_links()) do
+    assert_equal(
+      vim.api.nvim_get_hl(0, { name = link.group, link = true, create = false }).link,
+      link.target,
+      "native highlight link: " .. link.group
+    )
+  end
+  vim.api.nvim_exec_autocmds("ColorScheme", {
+    pattern = "agent-manager-native-replay",
+    modeline = false,
+  })
+  assert(manager.teardown())
+  for group, baseline in pairs(baselines) do
+    assert_equal(
+      vim.api.nvim_get_hl(0, { name = group, link = true, create = false }),
+      baseline,
+      "native highlight restoration: " .. group
+    )
+  end
+end
+
 local function public_input_validation_test()
   local manager = require("agent_manager")
   local result, err = manager.prompt(nil, "")
@@ -439,11 +486,12 @@ end
 local function run()
   pure_model_test()
   layout_test()
+  native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()
   integration_test()
   resume_test()
-  print("Agent Manager Lua M2 tests passed")
+  print("Agent Manager Lua M3 tests passed")
 end
 
 local ok, err = xpcall(run, debug.traceback)

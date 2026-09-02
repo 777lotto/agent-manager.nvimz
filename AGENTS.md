@@ -11,9 +11,11 @@
   to make Codex and Claude appear identical.
 - M2 owns the safe interactive workflow on the embedded stdio broker: one live
   agent, approvals/questions, specific resume/fork, explicit editor context,
-  dirty-buffer handling, and capability/usage presentation. Keep durable
-  sockets, multiple live agents, and UX ecosystem integration within their
-  later milestones unless the specification is explicitly revised.
+  dirty-buffer handling, and capability/usage presentation.
+- M3 owns the immutable `agent.manager` Foundation identity, schema-v1
+  presentation catalog, pure Styling discovery adapter, native Panels fallback,
+  Chrome coexistence, and cached status integration. Keep durable sockets and
+  multiple live agents within M4 unless the specification is explicitly revised.
 
 ## Safety boundaries
 

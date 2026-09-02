@@ -8,14 +8,16 @@ CONTENTS                                                   *agent-manager*
 3. Commands                                        |agent-manager-commands|
 4. Workspace                                      |agent-manager-workspace|
 5. Safety                                            |agent-manager-safety|
+6. UX integration                                       |agent-manager-ux|
 
 ==============================================================================
 1. Introduction                                      *agent-manager-intro*
 
 Agent Manager starts an embedded Rust broker and presents one Codex or Claude
-agent in native Neovim buffers. M2 adds safe human decisions, provider session
+agent in native Neovim buffers. M2 added safe human decisions, provider session
 resume/fork, explicit editor context, file-conflict handling, and capability
-and usage presentation to the M1 conversation workflow.
+and usage presentation. M3 publishes the immutable `agent.manager` Foundation
+catalog, pure Styling discovery, and cached Chrome-compatible status.
 
 ==============================================================================
 2. Setup                                              *agent-manager-setup*
@@ -115,6 +117,32 @@ written automatically. An external change never reloads a modified buffer; use
 
 Embedded state ends when the broker exits and supports one live runtime. A fork
 keeps the source as a disconnected summary. Durable reconnect, multiple live
-agents, and UX ecosystem integration belong to later milestones.
+agents, and writer isolation belong to M4.
+
+==============================================================================
+6. UX integration                                       *agent-manager-ux*
+
+Native presentation has no UX dependency. When UX Foundation schema v1 is on
+the runtimepath, Agent Manager registers the immutable `agent.manager` manifest
+and Foundation owns the AgentManager* groups and profile replay. UX Styling
+discovers `ux_styling_adapter.agent_manager` without loading the Agent Manager
+runtime, starting the broker, or reading domain data.
+
+Agent Manager does not write tabline, statusline, winbar, statuscolumn, fold,
+or scrollbar expressions owned by UX Chrome. Cached consumers may call:
+
+>lua
+    require("agent_manager").status()
+    require("agent_manager").running_count()
+    require("agent_manager").pending_approval_count()
+<
+
+These reads do not initialize the runtime. A scheduled
+`User AgentManagerStateChanged` event carries running_count,
+pending_approval_count, agent_ids, and a non-sensitive reason. It never carries
+prompt text, messages, tool payloads, or credentials. The current Chrome
+contract has no public segment API, so Agent Manager does not use Chrome
+internals. UX Panels is not available at the M3 compatibility pins; the view
+backend remains native and |:AgentManagerHealth| reports that choice.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

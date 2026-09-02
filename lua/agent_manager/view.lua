@@ -55,7 +55,7 @@ local function usage_lines(value, prefix, lines, depth)
   end
 end
 
-local function set_window_options(window, wrap)
+local function set_window_options(window, wrap, pane)
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
   vim.wo[window].signcolumn = "no"
@@ -63,6 +63,10 @@ local function set_window_options(window, wrap)
   vim.wo[window].list = false
   vim.wo[window].wrap = wrap
   vim.wo[window].cursorline = true
+  vim.w[window].agent_manager = {
+    plugin_id = "agent.manager",
+    pane = pane,
+  }
 end
 
 function View.layout_for(columns)
@@ -91,40 +95,8 @@ function View.new(model, actions, opts)
     render_pending = false,
     last_action_id = nil,
   }, View)
-  self:_define_highlights()
   self:_create_autocmds()
   return self
-end
-
-function View:_define_highlights()
-  local links = {
-    AgentManagerNormal = "Normal",
-    AgentManagerTitle = "Title",
-    AgentManagerSelection = "CursorLine",
-    AgentManagerMuted = "Comment",
-    AgentManagerProviderCodex = "Identifier",
-    AgentManagerProviderClaude = "Type",
-    AgentManagerStatusRunning = "DiagnosticInfo",
-    AgentManagerStatusSuccess = "DiagnosticOk",
-    AgentManagerStatusFailure = "DiagnosticError",
-    AgentManagerStatusInterrupted = "DiagnosticWarn",
-    AgentManagerStatusWaiting = "DiagnosticWarn",
-    AgentManagerMessageUser = "Special",
-    AgentManagerMessageAssistant = "Normal",
-    AgentManagerMessageSystem = "Comment",
-    AgentManagerTool = "Function",
-    AgentManagerApprovalPending = "DiagnosticWarn",
-    AgentManagerApprovalAllowed = "DiagnosticOk",
-    AgentManagerApprovalDenied = "DiagnosticError",
-    AgentManagerDiffAdd = "DiffAdd",
-    AgentManagerDiffChange = "DiffChange",
-    AgentManagerDiffDelete = "DiffDelete",
-    AgentManagerHelpKey = "Special",
-    AgentManagerHelpDescription = "Comment",
-  }
-  for group, target in pairs(links) do
-    vim.api.nvim_set_hl(0, group, { default = true, link = target })
-  end
 end
 
 function View:_create_autocmds()
@@ -132,7 +104,6 @@ function View:_create_autocmds()
   vim.api.nvim_create_autocmd("ColorScheme", {
     group = self.augroup,
     callback = function()
-      self:_define_highlights()
       self:schedule_render()
     end,
   })
@@ -166,6 +137,10 @@ function View:_buffer(name)
   vim.bo[buffer].modeline = false
   vim.bo[buffer].modifiable = false
   vim.bo[buffer].filetype = "agent-manager-" .. name
+  vim.b[buffer].agent_manager = {
+    plugin_id = "agent.manager",
+    pane = name,
+  }
   self:_map_buffer(buffer)
   return buffer
 end
@@ -284,7 +259,7 @@ function View:_build_layout()
   end
   self.windows = { conversation = main }
   vim.api.nvim_win_set_buf(main, self:_buffer("conversation"))
-  set_window_options(main, true)
+  set_window_options(main, true, "conversation")
   local layout = View.layout_for(vim.o.columns)
   self.mode = layout.mode
 
@@ -295,7 +270,7 @@ function View:_build_layout()
     vim.api.nvim_win_set_buf(agents, self:_buffer("agents"))
     vim.api.nvim_win_set_width(agents, self.opts.agent_width or 28)
     vim.wo[agents].winfixwidth = true
-    set_window_options(agents, false)
+    set_window_options(agents, false, "agents")
     self.windows.agents = agents
   end
   if layout.mode == "wide" then
@@ -305,7 +280,7 @@ function View:_build_layout()
     vim.api.nvim_win_set_buf(activity, self:_buffer("activity"))
     vim.api.nvim_win_set_width(activity, self.opts.activity_width or 38)
     vim.wo[activity].winfixwidth = true
-    set_window_options(activity, true)
+    set_window_options(activity, true, "activity")
     self.windows.activity = activity
   end
   vim.api.nvim_set_current_win(main)
@@ -323,6 +298,10 @@ function View:cycle(direction)
   local window = self.windows[pane]
   if valid_window(window) then
     vim.api.nvim_win_set_buf(window, self:_buffer(pane))
+    vim.w[window].agent_manager = {
+      plugin_id = "agent.manager",
+      pane = pane,
+    }
     vim.api.nvim_set_current_win(window)
     return
   end
@@ -334,7 +313,7 @@ function View:cycle(direction)
     vim.api.nvim_win_set_buf(content, self:_buffer(pane))
     self.windows.conversation = content
     vim.api.nvim_set_current_win(content)
-    set_window_options(content, pane ~= "agents")
+    set_window_options(content, pane ~= "agents", pane)
   end
 end
 
@@ -392,6 +371,7 @@ function View:_set_lines(name, lines, highlights)
   vim.bo[buffer].modifiable = true
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.bo[buffer].modifiable = false
+  vim.bo[buffer].modified = false
   vim.api.nvim_buf_clear_namespace(buffer, self.namespace, 0, -1)
   for _, highlight in ipairs(highlights or {}) do
     pcall(
@@ -560,7 +540,11 @@ function View:_render_decision(action)
     "",
   }
   local highlights = {
-    { line = 1, group = "AgentManagerApprovalPending" },
+    {
+      line = 1,
+      group = action.kind == "approval" and "AgentManagerApprovalPending"
+        or "AgentManagerQuestionPending",
+    },
     { line = 3, group = "AgentManagerMuted" },
     { line = 4, group = "AgentManagerMuted" },
     { line = 5, group = "AgentManagerMuted" },
@@ -611,6 +595,7 @@ function View:_render_decision(action)
             and (" — " .. inline(option.description))
           or ""
         table.insert(lines, "      • " .. inline(option.label) .. description)
+        table.insert(highlights, { line = #lines, group = "AgentManagerQuestionChoice" })
       end
       if question.multi_select then
         table.insert(lines, "    Multiple answers may be selected.")
@@ -637,13 +622,14 @@ function View:_sync_decision(action)
   local current = vim.api.nvim_win_get_buf(content)
   if action and action.id ~= self.last_action_id then
     vim.api.nvim_win_set_buf(content, self:_buffer("decision"))
-    set_window_options(content, true)
+    set_window_options(content, true, "decision")
     self.active_pane = "decision"
     if vim.api.nvim_get_current_tabpage() == self.tab then
       vim.api.nvim_set_current_win(content)
     end
   elseif not action and current == self.buffers.decision then
     vim.api.nvim_win_set_buf(content, self:_buffer("conversation"))
+    set_window_options(content, true, "conversation")
     self.active_pane = "conversation"
   end
   self.last_action_id = action and action.id or nil
@@ -678,7 +664,7 @@ function View:show_diff(diff, title)
   local content = self.windows.conversation
   if valid_window(content) then
     vim.api.nvim_win_set_buf(content, self:_buffer("diff"))
-    set_window_options(content, false)
+    set_window_options(content, false, "diff")
     self.active_pane = "diff"
     if vim.api.nvim_get_current_tabpage() == self.tab then
       vim.api.nvim_set_current_win(content)
@@ -746,6 +732,8 @@ function View:status()
     mode = self.mode,
     active_pane = self.active_pane,
     buffers = vim.deepcopy(self.buffers),
+    windows = vim.deepcopy(self.windows),
+    backend = "native",
   }
 end
 
