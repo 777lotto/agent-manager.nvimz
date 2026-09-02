@@ -74,7 +74,7 @@ function M.resolve(opts)
   if config.broker.mode ~= "embedded" then
     return nil, {
       kind = "configuration",
-      message = "M2 supports broker.mode = 'embedded' only",
+      message = "embedded broker mode is the only runtime mode before M4",
     }
   end
   local message = command_error(config.broker.command)

@@ -87,7 +87,14 @@ function Model.new(opts)
     client_state = "stopped",
     last_error = nil,
     next_local_id = 1,
+    on_change = opts.on_change,
   }, Model)
+end
+
+function Model:_changed(reason)
+  if type(self.on_change) == "function" then
+    pcall(self.on_change, reason)
+  end
 end
 
 function Model:set_client_state(state, err)
@@ -104,6 +111,7 @@ function Model:set_client_state(state, err)
     self.pending_actions = {}
     self.pending_order = {}
   end
+  self:_changed("client_state")
 end
 
 function Model:apply_notification(method, params)
@@ -135,6 +143,7 @@ function Model:apply_state(agents)
   if not self.selected_agent_id or not next_agents[self.selected_agent_id] then
     self.selected_agent_id = next_order[1]
   end
+  self:_changed("broker_state")
   return true
 end
 
@@ -173,6 +182,7 @@ function Model:apply_event(event)
       payload = deep_copy(stored.payload or {}),
     })
   end
+  self:_changed(stored.type or "agent_event")
   return true
 end
 
@@ -262,6 +272,7 @@ function Model:record_user_input(agent_id, text, kind)
     kind = kind or "prompt",
     streaming = false,
   })
+  self:_changed(kind or "prompt")
   return true
 end
 
@@ -286,6 +297,7 @@ function Model:apply_history(agent_id, messages)
     end
   end
   self.conversations[agent_id] = conversation
+  self:_changed("history")
   return true
 end
 
@@ -318,6 +330,7 @@ function Model:record_file_conflict(agent_id, path, details)
     agent_id = agent_id,
     path = path,
   }, deep_copy(details or {}))
+  self:_changed("file_conflict")
   return true
 end
 
@@ -328,6 +341,7 @@ function Model:resolve_file_conflict(agent_id, path, resolution)
   end
   conflicts[path].resolution = resolution
   conflicts[path].resolved = true
+  self:_changed("file_conflict_resolved")
   return true
 end
 
@@ -349,6 +363,7 @@ function Model:select(agent_id)
     return false
   end
   self.selected_agent_id = agent_id
+  self:_changed("selection")
   return true
 end
 
