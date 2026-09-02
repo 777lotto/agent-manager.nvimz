@@ -14,6 +14,7 @@
 agent-manager	agent-manager.txt	/*agent-manager*
 agent-manager-commands	agent-manager.txt	/*agent-manager-commands*
 agent-manager-intro	agent-manager.txt	/*agent-manager-intro*
+agent-manager-release	agent-manager.txt	/*agent-manager-release*
 agent-manager-safety	agent-manager.txt	/*agent-manager-safety*
 agent-manager-setup	agent-manager.txt	/*agent-manager-setup*
 agent-manager-ux	agent-manager.txt	/*agent-manager-ux*

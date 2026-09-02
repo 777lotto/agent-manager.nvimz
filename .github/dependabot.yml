@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: bluff
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    target-branch: bluff
+    commit-message:
+      prefix: "deps(rust)"
+
+  - package-ecosystem: uv
+    directory: "/python"
+    schedule:
+      interval: weekly
+    target-branch: bluff
+    commit-message:
+      prefix: "deps(python)"

@@ -5,13 +5,15 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-M4 is complete. Durable mode keeps multiple Codex and Claude agents alive
-across SSH and Neovim restarts through an owner-only Unix socket, bounded
-replay, provider-backed history resync, and an archivable metadata-only
-registry. New sessions default to lifecycle-managed worktrees selected by
-repository and created from the first prompt under a generated task name.
-Shared-checkout starts are disabled by default;
-an administrator may explicitly re-enable them. Embedded mode remains available as the
+M5 is complete. Agent Manager now ships as a reproducible, checksummed Linux
+x86_64 broker plus hash-locked Python worker environment, published from signed
+production tags with keyless build attestations. Durable mode keeps multiple
+Codex and Claude agents alive across SSH and Neovim restarts through an
+owner-only Unix socket, bounded replay, provider-backed history resync, and an
+archivable metadata-only registry. New sessions default to lifecycle-managed
+worktrees selected by repository and created from the first prompt under a
+generated task name. Shared-checkout starts are disabled by default; an
+administrator may explicitly re-enable them. Embedded mode remains the
 single-agent, Neovim-owned fallback. The M3 Foundation, Styling, Chrome, and
 native presentation contracts remain unchanged. Ordinary verification uses
 fake provider processes and never consumes provider quota.
@@ -55,7 +57,7 @@ quota or requires authentication.
 mise install
 mise run setup
 mise run verify
-cargo build --release -p agent-manager-broker
+mise run release
 ```
 
 For a source checkout, Agent Manager discovers the release/debug broker and the
@@ -113,10 +115,22 @@ require("agent_manager").setup({
 })
 ```
 
-The resumable unit installation, verification, and rollback phase is documented
-in [ops/m4-durable-service](ops/m4-durable-service/README.md). Stable artifact
-installation remains M5 work; the lifecycle phase intentionally refuses to
-start until those reviewed paths exist.
+For the production v0.1.0 bundle, download the archive and `SHA256SUMS` from the
+signed GitHub release and verify the keyless build attestation from an
+authenticated control plane:
+
+```sh
+gh attestation verify \
+  agent-manager-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  --repo 777lotto/agent-manager.nvimz
+```
+
+The resumable [M5 release installation](ops/m5-release-install/README.md)
+verifies and activates the immutable artifact without Cargo, uv, pip, or any
+dependency resolution during Neovim startup. Then apply the
+[M4 durable-service phase](ops/m4-durable-service/README.md), which installs,
+starts, behaviorally verifies, and can roll back the owner-only systemd user
+service. Both phases use reviewed paths, idempotent steps, and paired undo.
 
 Then open Neovim and use:
 
@@ -253,7 +267,7 @@ mise run verify
 mise run ux-test
 ```
 
-The M4 gate resolves registered UX checkouts automatically. Elsewhere,
+The M5 gate resolves registered UX checkouts automatically. Elsewhere,
 set `UX_FOUNDATION_ROOT`, `UX_STYLING_ROOT`, and `UX_CHROME_ROOT` to checkouts
 containing the promoted commits recorded in `tests/ux-pins.env`.
 
@@ -280,8 +294,10 @@ for the immutable manifest, Styling discovery, Chrome cache, compatibility
 pins, and acceptance evidence. See
 [M4 durable multi-agent runtime](docs/architecture/m4-durable-multi-agent-runtime.md)
 for socket lifecycle, replay/resync, registry privacy, writer isolation, and
-acceptance evidence.
-See
+acceptance evidence. See
+[M5 release and configuration adoption](docs/architecture/m5-release-configuration-adoption.md)
+for the compatibility lock, reproducible artifact, provenance, resumable
+installation, CI policy, and production configuration. See
 [external CLI session discovery](docs/architecture/external-cli-session-discovery.md)
 for the cross-process activity checks and read-only ownership boundary.
 
@@ -358,9 +374,10 @@ Cached consumers can call `status()`, `running_count()`, or
 `User AgentManagerStateChanged` event carrying only those counts and stable
 agent IDs—never prompt text or tool payloads.
 
-Agent Manager remains a separate repository. `nvim-config` consumes an exact
-tested commit from `bluff`; the M5 release and durable-service gates remain the
-authority for packaged runtime adoption.
+Agent Manager remains a separate repository. After M0-M4 passed, M5 added its
+exact production revision to `nvim-config` with durable mode and the reviewed
+stable broker, socket, and worker paths; the plugin's portable default remains
+embedded mode.
 
 ## Repository layout
 
@@ -375,6 +392,9 @@ protocol/vendor/codex/0.152.0/     generated provider schema baseline
 tests/                              headless Lua tests and fake public broker
 docs/                              specification and architecture decisions
 ops/m4-durable-service/            supervised lifecycle apply/undo/verify phase
+ops/m5-release-install/            immutable artifact apply/undo/verify phase
+release/                           versioned compatibility lock
+.github/workflows/                 pinned CI, signed release, update dispatch
 ```
 
 ## Repository workflow

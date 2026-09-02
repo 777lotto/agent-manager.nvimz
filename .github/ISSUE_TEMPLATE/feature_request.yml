@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a focused Agent Manager improvement
+title: "[Feature]: "
+labels:
+  - "type:feature"
+  - "status:needs-triage"
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Broker protocol or runtime
+        - Codex adapter
+        - Claude worker
+        - Neovim workflow
+        - Presentation integration
+        - Release or operations
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Explain the concrete workflow or contract gap first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility pressure
+      description: Describe provider, protocol, approval, filesystem, or release implications.

@@ -9,6 +9,7 @@ CONTENTS                                                   *agent-manager*
 4. Workspace                                      |agent-manager-workspace|
 5. Safety                                            |agent-manager-safety|
 6. UX integration                                       |agent-manager-ux|
+7. Release and durable install                     |agent-manager-release|
 
 ==============================================================================
 1. Introduction                                      *agent-manager-intro*
@@ -17,8 +18,9 @@ Agent Manager presents Codex and Claude agents in native Neovim buffers. Its
 embedded Rust broker owns one live agent. Durable mode connects to a supervised,
 owner-only Unix socket and keeps multiple agents alive across SSH and Neovim
 restarts. M2 added safe interaction, M3 added the immutable `agent.manager` UX
-contracts, and M4 added replay/resync, metadata persistence, and writer
-isolation.
+contracts, M4 added replay/resync, metadata persistence, and writer isolation,
+and M5 added a reproducible, checksummed, attested release with exact production
+configuration pins.
 
 ==============================================================================
 2. Setup                                              *agent-manager-setup*
@@ -68,6 +70,11 @@ and socket paths:
         mode = "durable",
         command = { "/home/ai/.local/bin/agent-manager-broker", "serve-durable" },
         socket = "/run/user/1000/agent-manager/broker.sock",
+      },
+      providers = {
+        claude = {
+          python = "/home/ai/.local/share/agent-manager/venv/bin/python",
+        },
       },
     })
 <
@@ -264,5 +271,22 @@ prompt text, messages, tool payloads, or credentials. The current Chrome
 contract has no public segment API, so Agent Manager does not use Chrome
 internals. UX Panels is not available at the M3 compatibility pins; the view
 backend remains native and |:AgentManagerHealth| reports that choice.
+
+==============================================================================
+7. Release and durable install                     *agent-manager-release*
+
+The v0.1.0 production asset targets Linux x86_64. It contains the native broker
+and the private worker's hash-locked Python 3.13 environment. release.json pins
+the source revision, broker and worker contracts, provider versions, UX
+revisions, and clean-source marker. PAYLOAD.SHA256 covers the inner tree and
+SHA256SUMS covers the archive. GitHub publishes keyless build attestations from
+a verified signed annotated tag on the production bet branch.
+
+Verify the downloaded archive's attestation on an authenticated control plane,
+then run ops/m5-release-install/ in numeric order as the ai user. It validates
+and activates immutable versioned paths without Cargo, uv, pip, or dependency
+resolution during Neovim startup. Next run ops/m4-durable-service/ in its
+documented order to install and start the supervised broker. Both phases are
+idempotent and ship reverse-order paired undo.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

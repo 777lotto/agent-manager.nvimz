@@ -1,4 +1,6 @@
 /target/
+/dist/
+/_deps/
 /python/.venv/
 /.mise.local.toml
 /.cache/

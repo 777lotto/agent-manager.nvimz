@@ -6,6 +6,7 @@ cd "$repo_root"
 
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
+actionlint
 
 (
   cd protocol/vendor/codex/0.152.0
@@ -15,11 +16,22 @@ shellcheck scripts/*.sh
 (
   cd python
   uv sync --frozen --all-groups
-  uv run ruff format --check .
-  uv run ruff check .
-  uv run pyright src tests
+  uv run ruff format --check \
+    . \
+    ../scripts/release_metadata.py \
+    ../scripts/test-release-metadata.py
+  uv run ruff check \
+    . \
+    ../scripts/release_metadata.py \
+    ../scripts/test-release-metadata.py
+  uv run pyright \
+    src \
+    tests \
+    ../scripts/release_metadata.py \
+    ../scripts/test-release-metadata.py
   uv run python -m unittest discover -s tests -v
   uv run python ../scripts/validate_protocol.py
+  uv run python ../scripts/test-release-metadata.py
 )
 
 cargo fmt --all -- --check
@@ -28,5 +40,6 @@ cargo test --workspace --all-features
 scripts/test-lua.sh
 scripts/test-ux.sh
 scripts/verify-ops.sh
+scripts/verify-release.sh
 
 git diff --check

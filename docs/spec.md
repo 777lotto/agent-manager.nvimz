@@ -2,7 +2,7 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M4 durable multi-agent runtime implemented
+- Status: M5 release and configuration adoption implemented
 - Last reviewed: 2026-09-02
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
@@ -38,6 +38,10 @@ published against the promoted schema-v1 contract and is now immutable.
 - Make the broker the owner of managed processes. The workspace may resume a
   persisted provider session, but it will not attempt to seize an unrelated
   interactive CLI process already attached to another PTY.
+- Publish one reproducible Linux x86_64 release unit from verified signed
+  production tags: native broker, locked private worker environment, exact
+  provider/UX compatibility metadata, checksums, and keyless build
+  attestations.
 
 ## Language and process-boundary decision
 
@@ -1216,6 +1220,20 @@ non-sensitive service status.
 - Pin exact broker/UX revisions and reviewed provider compatibility profiles in
   the configuration; record actual provider versions at runtime.
 
+Implementation status: complete on 2026-09-02. v0.1.0 freezes the broker and
+worker protocol at version 1, Codex App Server 0.152.0, Claude Agent SDK
+0.2.148, Claude Code 2.1.251, and the promoted Foundation/Styling/Chrome
+revisions in `release/compatibility-v1.json`. Independent release builds are
+byte-identical and contain an internal payload checksum manifest plus an outer
+`SHA256SUMS`. Production publication accepts only a verified signed annotated
+tag reachable from `bet`, creates keyless GitHub attestations, and publishes
+repository release assets. The resumable M5 phase verifies, installs,
+behaviorally checks, and can roll back the immutable broker and locked worker
+environment before the M4 unit starts. CI covers Linux release/operations and
+macOS provider/runtime contracts without live provider use. `nvim-config`
+selects durable mode explicitly and pins the compatible production revisions;
+embedded mode remains Agent Manager's default elsewhere.
+
 ## Acceptance criteria
 
 The first production release is complete when:
@@ -1240,15 +1258,18 @@ The first production release is complete when:
     replay, registry state, or process arguments.
 12. A Python worker crash cannot stop or corrupt a Codex session, and a target
     repository cannot shadow worker/SDK Python imports.
+13. A production artifact is reproducible, checksummed, built from a clean
+    signed production revision, keylessly attested, installed without Neovim
+    dependency resolution, and behaviorally verified before service startup.
 
-## Open decisions before production
+## Post-v0.1 decisions
 
-- Whether durable mode becomes the default immediately after M4 or remains an
-  explicit opt-in.
-- Whether release binaries remain repository assets or become a separately
-  versioned package with a compatibility lock.
-- Whether one Python worker continues to host all Claude clients or a bounded
-  worker pool is justified by measured isolation or throughput needs after M1.
+- Durable mode remains an explicit opt-in; `nvim-config` selects it because the
+  lifecycle and stable paths are managed there.
+- v0.1 binaries remain attested repository release assets governed by the
+  checked-in compatibility lock.
+- One private Python worker continues to host all Claude clients. A bounded
+  pool requires measured isolation or throughput evidence.
 - The exact public Chrome extension contract, if any; cached status APIs work
   without one.
 - Provider-specific model, reasoning, sandbox, and permission selectors that

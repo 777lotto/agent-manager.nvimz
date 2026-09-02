@@ -1,4 +1,5 @@
 [tools]
+actionlint = "1.7.12"
 python = "3.13.15"
 rust = { version = "1.98.0", profile = "minimal", components = "clippy,rustfmt" }
 shellcheck = "0.11.0"
@@ -22,6 +23,7 @@ run = [
 description = "Run Rust and Python static checks"
 depends = ["setup"]
 run = [
+  "actionlint",
   "cargo clippy --workspace --all-targets --all-features -- -D warnings",
   "cd python && uv run ruff check .",
   "cd python && uv run pyright src tests",
@@ -38,8 +40,18 @@ run = [
 ]
 
 [tasks.verify]
-description = "Run the complete M4 handoff gate"
+description = "Run the complete M5 handoff gate"
 run = "scripts/verify.sh"
+
+[tasks.release]
+description = "Build the reproducible Linux x86_64 release bundle"
+depends = ["setup"]
+run = "scripts/build-release.sh"
+
+[tasks."release-test"]
+description = "Prove release reproducibility and resumable installation"
+depends = ["setup"]
+run = "scripts/verify-release.sh"
 
 [tasks."ux-test"]
 description = "Run pinned Foundation, Styling, and Chrome integration tests"
