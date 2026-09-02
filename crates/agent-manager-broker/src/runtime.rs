@@ -1,4 +1,4 @@
-//! Provider tasks owned by the embedded broker.
+//! Provider tasks owned by the embedded or durable broker.
 
 use std::collections::HashMap;
 use std::future::pending;
@@ -69,6 +69,7 @@ pub(crate) enum AgentCommand {
         answers: Map<String, Value>,
         message: Option<String>,
     },
+    ClientDisconnected,
     Shutdown,
 }
 
@@ -534,6 +535,25 @@ async fn run_codex(
                             &events,
                         )
                         .await;
+                    }
+                    AgentCommand::ClientDisconnected => {
+                        if deny_all_codex_requests(
+                            &mut server,
+                            &agent_id,
+                            &mut pending_requests,
+                            "client_disconnect",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            provider_failed(
+                                &events,
+                                &agent_id,
+                                "Codex client disconnect handling failed",
+                            );
+                            break;
+                        }
                     }
                     AgentCommand::Shutdown => {
                         let _ = deny_all_codex_requests(
@@ -1216,6 +1236,25 @@ async fn run_claude(
                             &events,
                         )
                         .await;
+                    }
+                    AgentCommand::ClientDisconnected => {
+                        if deny_all_worker_requests(
+                            &mut worker,
+                            &agent_id,
+                            &mut pending_requests,
+                            "client_disconnect",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            provider_failed(
+                                &events,
+                                &agent_id,
+                                "Claude client disconnect handling failed",
+                            );
+                            break;
+                        }
                     }
                     AgentCommand::Shutdown => {
                         let _ = deny_all_worker_requests(

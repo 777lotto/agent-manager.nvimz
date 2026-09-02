@@ -24,7 +24,7 @@ end, {
   complete = function()
     return { "codex", "claude" }
   end,
-  desc = "Start one embedded Codex or Claude agent",
+  desc = "Start a Codex or Claude agent",
 })
 
 vim.api.nvim_create_user_command("AgentManagerAttach", function()
@@ -47,6 +47,10 @@ end, { desc = "Confirm and interrupt the selected active turn" })
 vim.api.nvim_create_user_command("AgentManagerFork", function()
   manager().fork()
 end, { desc = "Fork the selected resumable session" })
+
+vim.api.nvim_create_user_command("AgentManagerArchive", function()
+  manager().confirm_archive()
+end, { desc = "Confirm and archive the selected inactive agent" })
 
 vim.api.nvim_create_user_command("AgentManagerContext", function()
   manager().context_ui()

@@ -38,7 +38,7 @@ run = [
 ]
 
 [tasks.verify]
-description = "Run the complete M3 handoff gate"
+description = "Run the complete M4 handoff gate"
 run = "scripts/verify.sh"
 
 [tasks."ux-test"]

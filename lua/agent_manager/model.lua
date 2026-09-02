@@ -301,6 +301,23 @@ function Model:apply_history(agent_id, messages)
   return true
 end
 
+function Model:begin_resync(latest_sequence)
+  self.events = {}
+  self.conversations = {}
+  self.activities = {}
+  self.pending_actions = {}
+  self.pending_order = {}
+  self.usage = {}
+  self.last_sequence = tonumber(latest_sequence) or 0
+  self.sequence_gap = nil
+  for _, agent_id in ipairs(self.order) do
+    self.conversations[agent_id] = {}
+    self.activities[agent_id] = {}
+  end
+  self:_changed("history_resync")
+  return true
+end
+
 function Model:pending(agent_id)
   local actions = {}
   for _, id in ipairs(self.pending_order) do

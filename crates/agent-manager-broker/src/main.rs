@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use agent_manager_broker::codex::{
     CodexAppServer, CommandSpec, PINNED_CODEX_VERSION, normalize_event, thread_id,
 };
+use agent_manager_broker::durable::{self, DurableConfig};
 use agent_manager_broker::embedded::{self, EmbeddedConfig};
 use agent_manager_broker::protocol::PROTOCOL_VERSION;
 use agent_manager_broker::worker::{
@@ -46,10 +47,53 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some("serve") => serve_embedded(&args[1..]).await,
+        Some("serve-durable") => serve_durable(&args[1..]).await,
         Some("codex-probe") => probe_codex(parse_cwd(&args[1..])?).await,
         Some("codex-trace") => trace_codex(&args[1..]).await,
         Some(command) => Err(invalid_input(format!("unknown command: {command}")).into()),
     }
+}
+
+async fn serve_durable(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut broker = EmbeddedConfig::default();
+    let mut socket = None;
+    let mut registry = None;
+    let mut status = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--socket" => {
+                socket = Some(absolute_option(args, index, "--socket")?);
+                index += 2;
+            }
+            "--registry" => {
+                registry = Some(absolute_option(args, index, "--registry")?);
+                index += 2;
+            }
+            "--status" => {
+                status = Some(absolute_option(args, index, "--status")?);
+                index += 2;
+            }
+            "--claude-python" => {
+                let python = absolute_option(args, index, "--claude-python")?;
+                broker = broker.with_claude_python(python.to_string_lossy());
+                index += 2;
+            }
+            option => {
+                return Err(
+                    invalid_input(format!("unknown serve-durable option: {option}")).into(),
+                );
+            }
+        }
+    }
+    let socket = socket.map_or_else(default_socket_path, Ok)?;
+    let registry = registry.map_or_else(default_registry_path, Ok)?;
+    let mut config = DurableConfig::new(socket, registry).with_broker_config(broker);
+    if let Some(status) = status {
+        config = config.with_status_path(status);
+    }
+    durable::serve(config).await?;
+    Ok(())
 }
 
 async fn serve_embedded(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -170,6 +214,49 @@ fn option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
         .map(|window| window[1].as_str())
 }
 
+fn absolute_option(
+    args: &[String],
+    index: usize,
+    option: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let value = args
+        .get(index + 1)
+        .ok_or_else(|| invalid_input(format!("{option} requires an absolute path")))?;
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(invalid_input(format!("{option} requires an absolute path")).into());
+    }
+    Ok(path)
+}
+
+fn default_socket_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let runtime = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            invalid_input(
+                "durable mode requires an absolute XDG_RUNTIME_DIR or an explicit --socket path",
+            )
+        })?;
+    Ok(runtime.join("agent-manager").join("broker.sock"))
+}
+
+fn default_registry_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let state_root = match env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(_) => {
+            return Err(invalid_input("XDG_STATE_HOME must be absolute").into());
+        }
+        None => env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| invalid_input("durable mode could not resolve an absolute state path"))?
+            .join(".local")
+            .join("state"),
+    };
+    Ok(state_root.join("agent-manager").join("registry.json"))
+}
+
 fn ensure_directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !path.is_absolute() || !path.is_dir() {
         return Err(invalid_input("cwd must be an existing absolute directory").into());
@@ -199,10 +286,14 @@ fn print_help() {
          Commands:\n\
            contract-info\n\
            serve [--claude-python ABSOLUTE_PATH]\n\
+           serve-durable [--socket ABSOLUTE_PATH] [--registry ABSOLUTE_PATH]\n\
+                         [--status ABSOLUTE_PATH]\n\
+                         [--claude-python ABSOLUTE_PATH]\n\
            codex-probe --cwd ABSOLUTE_PATH\n\
            codex-trace --cwd ABSOLUTE_PATH --prompt TEXT {LIVE_CONFIRMATION}\n\
          \n\
          serve runs the embedded Neovim JSON-RPC broker over stdio.\n\
+         serve-durable runs the owner-only Unix-socket broker until supervised shutdown.\n\
          codex-probe performs initialization and history discovery only.\n\
          codex-trace invokes the live provider and is never run by verification."
     );

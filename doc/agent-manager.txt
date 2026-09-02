@@ -13,11 +13,12 @@ CONTENTS                                                   *agent-manager*
 ==============================================================================
 1. Introduction                                      *agent-manager-intro*
 
-Agent Manager starts an embedded Rust broker and presents one Codex or Claude
-agent in native Neovim buffers. M2 added safe human decisions, provider session
-resume/fork, explicit editor context, file-conflict handling, and capability
-and usage presentation. M3 publishes the immutable `agent.manager` Foundation
-catalog, pure Styling discovery, and cached Chrome-compatible status.
+Agent Manager presents Codex and Claude agents in native Neovim buffers. Its
+embedded Rust broker owns one live agent. Durable mode connects to a supervised,
+owner-only Unix socket and keeps multiple agents alive across SSH and Neovim
+restarts. M2 added safe interaction, M3 added the immutable `agent.manager` UX
+contracts, and M4 added replay/resync, metadata persistence, and writer
+isolation.
 
 ==============================================================================
 2. Setup                                              *agent-manager-setup*
@@ -39,6 +40,22 @@ A source checkout discovers target/release or target/debug broker artifacts
 and python/.venv/bin/python relative to the plugin root when present. Startup
 never builds or installs dependencies.
 
+Durable mode requires an already supervised broker plus absolute executable
+and socket paths:
+
+>lua
+    require("agent_manager").setup({
+      broker = {
+        mode = "durable",
+        command = { "/home/ai/.local/bin/agent-manager-broker", "serve-durable" },
+        socket = "/run/user/1000/agent-manager/broker.sock",
+      },
+    })
+<
+
+The durable client reconnects with capped backoff. Closing or tearing down the
+view disconnects Neovim only; it never shuts down the supervised broker.
+
 ==============================================================================
 3. Commands                                        *agent-manager-commands*
 
@@ -47,7 +64,8 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerStart*
 :AgentManagerStart [codex|claude]
-                           Start the one live agent supported by embedded mode.
+                           Select provider and shared/worktree strategy. Durable
+                           mode may own multiple agents; embedded mode owns one.
 
                                                    *:AgentManagerAttach*
 :AgentManagerAttach        Select a broker agent or resumable provider session.
@@ -63,6 +81,10 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerFork*
 :AgentManagerFork          Fork the selected idle or completed provider session.
+
+                                                   *:AgentManagerArchive*
+:AgentManagerArchive       Confirm and remove an inactive agent from the broker
+                           registry without deleting provider history.
 
                                                    *:AgentManagerContext*
 :AgentManagerContext       Queue an explicit buffer, range, diagnostic, or diff
@@ -94,6 +116,7 @@ cycle panes.
     <CR>    answer a focused question or select an agent
     c       queue explicit editor context
     f       fork the selected provider session
+    A       archive the selected inactive agent
     D       show a workspace diff or dirty-buffer conflict
     r       refresh broker state
     ?       show mapping help
@@ -115,9 +138,13 @@ Editor context is explicit and one-shot. Unsaved snapshots are marked but never
 written automatically. An external change never reloads a modified buffer; use
 |:AgentManagerDiff| to inspect, compare, explicitly reload, or keep it.
 
-Embedded state ends when the broker exits and supports one live runtime. A fork
-keeps the source as a disconnected summary. Durable reconnect, multiple live
-agents, and writer isolation belong to M4.
+Embedded state ends when its broker exits and supports one live runtime. The
+durable broker persists provider identity and transcript-free metadata, replays
+retained events, and reloads provider history when replay is too old. Shared
+Git checkouts permit one writable agent across all subdirectories. Additional
+writable agents require distinct, existing linked worktrees; Agent Manager
+validates but never creates or removes them. A fork keeps its source as a
+disconnected summary so writer ownership remains explicit.
 
 ==============================================================================
 6. UX integration                                       *agent-manager-ux*
