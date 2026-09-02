@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic multi-turn Codex transcript for the embedded broker."""
+"""Deterministic M2 Codex transcript for the embedded broker."""
 
 from __future__ import annotations
 
@@ -109,9 +109,56 @@ def first_turn(turn_id: str) -> None:
             },
         }
     )
-    denial = read()
-    if denial.get("result", {}).get("decision") != "decline":
-        raise AssertionError("broker did not fail closed")
+    approval = read()
+    approval_decision = approval.get("result", {}).get("decision")
+    if approval_decision == "decline":
+        turn_completed(turn_id, "interrupted")
+        return
+    if approval_decision != "accept":
+        raise AssertionError("broker did not forward interactive approval")
+    send(
+        {
+            "id": "question-m2",
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "threadId": "thread-m1",
+                "turnId": turn_id,
+                "itemId": "question-tool-1",
+                "isBlocking": True,
+                "questions": [
+                    {
+                        "id": "mode",
+                        "header": "Mode",
+                        "question": "Which mode?",
+                        "options": [
+                            {"label": "Safe", "description": "Use safe mode"},
+                            {"label": "Fast", "description": "Use fast mode"},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    answer = read()
+    if answer.get("result", {}).get("answers", {}).get("mode", {}).get("answers") != [
+        "Safe"
+    ]:
+        raise AssertionError("broker did not preserve structured question answers")
+    send(
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread-m1",
+                "tokenUsage": {"inputTokens": 12, "outputTokens": 7, "totalTokens": 19},
+            },
+        }
+    )
+    send(
+        {
+            "method": "fs/changed",
+            "params": {"path": "/tmp/agent-manager-m2-file.txt", "kind": "modified"},
+        }
+    )
     message_delta(turn_id, "first answer")
     turn_completed(turn_id)
 
@@ -129,9 +176,35 @@ def main() -> None:
     )
     expect("initialized")
 
-    start = expect("thread/start")
-    send({"method": "thread/started", "params": {"thread": {"id": "thread-m1"}}})
-    respond(start, {"thread": {"id": "thread-m1"}})
+    opening = read()
+    if opening.get("method") == "thread/list":
+        respond(
+            opening,
+            {
+                "data": [
+                    {
+                        "id": "thread-resumable",
+                        "cwd": opening.get("params", {}).get("cwd", "/tmp"),
+                        "name": "Resumable Codex session",
+                        "preview": "must not leave the broker",
+                        "updatedAt": 1,
+                    }
+                ],
+                "nextCursor": None,
+            },
+        )
+        return
+    method = opening.get("method")
+    if method == "thread/start":
+        thread_id = "thread-m1"
+    elif method == "thread/resume":
+        thread_id = opening["params"]["threadId"]
+    elif method == "thread/fork":
+        thread_id = opening["params"]["threadId"] + "-fork"
+    else:
+        raise AssertionError(f"expected thread open, got {method}")
+    send({"method": "thread/started", "params": {"thread": {"id": thread_id}}})
+    respond(opening, {"thread": {"id": thread_id, "turns": []}})
 
     turn_number = 0
     while True:
@@ -140,6 +213,8 @@ def main() -> None:
         if method == "turn/start":
             turn_number += 1
             turn_id = f"turn-{turn_number}"
+            if turn_number == 1 and "<agent-manager-context" not in request["params"]["input"][0]["text"]:
+                raise AssertionError("explicit editor context was not forwarded")
             respond(request, {"turn": {"id": turn_id, "status": "inProgress"}})
             if turn_number == 1:
                 first_turn(turn_id)
@@ -152,15 +227,43 @@ def main() -> None:
             else:
                 raise AssertionError("unexpected extra turn")
         elif method == "turn/steer":
-            if request.get("params", {}).get("expectedTurnId") != "turn-3":
+            active_turn = f"turn-{turn_number}"
+            if request.get("params", {}).get("expectedTurnId") != active_turn:
                 raise AssertionError("steer did not target the active turn")
-            message_delta("turn-3", "steering accepted")
-            respond(request, {"turnId": "turn-3"})
+            message_delta(active_turn, "steering accepted")
+            respond(request, {"turnId": active_turn})
         elif method == "turn/interrupt":
-            if request.get("params", {}).get("turnId") != "turn-3":
+            active_turn = f"turn-{turn_number}"
+            if request.get("params", {}).get("turnId") != active_turn:
                 raise AssertionError("interrupt did not target the active turn")
-            turn_completed("turn-3", "interrupted")
+            turn_completed(active_turn, "interrupted")
             respond(request, {})
+        elif method == "thread/read":
+            respond(
+                request,
+                {
+                    "thread": {
+                        "id": thread_id,
+                        "turns": [
+                            {
+                                "id": "history-turn",
+                                "items": [
+                                    {
+                                        "id": "history-user",
+                                        "type": "userMessage",
+                                        "content": [{"text": "historic question"}],
+                                    },
+                                    {
+                                        "id": "history-assistant",
+                                        "type": "agentMessage",
+                                        "text": "historic answer",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                },
+            )
         else:
             raise AssertionError(f"unexpected method {method}")
 

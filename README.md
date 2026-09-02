@@ -5,11 +5,14 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-The M1 embedded slice is usable now. Neovim starts the Rust broker over stdio,
-the broker owns one Codex or Claude session, and the native workspace streams
-conversation and tool activity. It supports follow-up prompts, mid-turn
-steering, interrupt, state projection, and bounded in-process replay. Ordinary
-verification uses fake provider processes and never consumes provider quota.
+The M2 safe interactive workflow is usable now. Neovim starts the Rust broker
+over stdio, the broker owns one live Codex or Claude session, and the native
+workspace streams conversation, tool activity, file changes, and usage. It
+supports provider session discovery, specific resume and fork, human
+approvals, structured questions, explicit editor context, dirty-buffer conflict
+handling, follow-up prompts, steering, interrupt, and bounded in-process
+replay. Ordinary verification uses fake provider processes and never consumes
+provider quota.
 
 ## Selected architecture
 
@@ -77,25 +80,43 @@ Then open Neovim and use:
 ```vim
 :AgentManager
 :AgentManagerStart codex
+:AgentManagerAttach
 :AgentManagerSend explain the current repository
 :AgentManagerSteer focus on the failing tests
 :AgentManagerInterrupt
+:AgentManagerContext
+:AgentManagerDiff
+:AgentManagerFork
 :AgentManagerHealth
 ```
 
-The workspace also maps `n` to start, `p` to prompt, `s` to steer, `x` to
-confirm an interrupt, `<Tab>` to cycle panes, and `q` to close only the view.
-Wide displays show agents, conversation, and activity together; medium and
-narrow displays cycle the same buffers without losing model state.
+The workspace also maps `n` to start, `h` to attach or resume, `p` to prompt,
+`s` to steer, `x` to confirm an interrupt, `a`/`d` to decide only a focused
+human request, `<CR>` to answer a focused question, `c` to queue explicit
+context, `f` to fork, `D` to inspect diffs/conflicts, `<Tab>` to cycle panes,
+and `q` to close only the view. Wide displays show agents, conversation, and
+activity together; medium and narrow displays cycle the same buffers without
+losing model state.
 
-### M1 safety boundary
+### M2 safety boundary
 
 Live prompts use the provider account already configured for Codex or Claude
 and can consume quota. Agent Manager never reads, prints, stores, or passes
-provider credentials in arguments. M1 has no approval UI, so provider tool and
-question callbacks fail closed automatically. That makes the embedded slice
-suitable for conversation, observation, and tools that do not require a human
-approval; interactive allow/deny handling arrives in M2.
+provider credentials in arguments. Every approval is focused and shows the
+provider, workspace, action, and affected paths supplied by the provider. Only
+advertised decisions are mapped; timeout, cancellation, shutdown, malformed
+input, and disconnect deny or cancel provider callbacks rather than approving.
+
+Editor context is opt-in and one-shot. Buffer and range snapshots preserve an
+explicit unsaved marker; Agent Manager does not save them. When a provider
+reports a change to a loaded dirty buffer, Neovim never reloads it
+automatically. The workspace records the divergence and offers inspect, diff,
+explicit reload with confirmation, or keep-buffer actions.
+
+Embedded mode still owns one live runtime and ends when its broker process
+exits. A fork retires the source runtime, preserves its disconnected summary,
+and opens the provider fork. Durable reconnect, multiple concurrent live
+agents, writer isolation, and UX ecosystem integration remain M4/M3 work.
 
 Opening the workspace and running the default test suite are non-spending. The
 diagnostic `codex-probe` performs only initialization and thread discovery;
@@ -122,7 +143,10 @@ flag and is never part of verification.
 See [M0 contract decisions](docs/architecture/m0-contract-decisions.md) for the
 frozen runtime versions, framing differences, and upgrade procedure.
 See [M1 embedded slice](docs/architecture/m1-embedded-slice.md) for the current
-runtime, editor surface, limitations, and acceptance evidence.
+runtime foundation. See
+[M2 safe interactive workflow](docs/architecture/m2-safe-interactive-workflow.md)
+for human callbacks, session lifecycle, editor context, filesystem safety, and
+acceptance evidence.
 
 ## UX direction
 

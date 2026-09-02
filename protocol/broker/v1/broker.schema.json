@@ -185,6 +185,17 @@
         "provider_options": { "type": "object" }
       }
     },
+    "providerSessionListParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "cwd"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "cursor": { "type": ["string", "null"], "maxLength": 4096 },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 }
+      }
+    },
     "historyParams": {
       "type": "object",
       "additionalProperties": false,
@@ -266,11 +277,13 @@
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "question_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "decision": { "enum": ["answer", "deny"] },
         "answers": {
           "type": "object",
           "maxProperties": 32,
           "additionalProperties": { "$ref": "#/$defs/answer" }
-        }
+        },
+        "message": { "type": ["string", "null"], "maxLength": 4096 }
       }
     },
     "contextParams": {
@@ -308,6 +321,7 @@
           "enum": [
             "initialize",
             "agent/list",
+            "provider/session/list",
             "agent/start",
             "agent/attach",
             "agent/history",
@@ -330,6 +344,7 @@
       "allOf": [
         { "if": { "properties": { "method": { "const": "initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
         { "if": { "properties": { "method": { "enum": ["agent/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+        { "if": { "properties": { "method": { "const": "provider/session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionListParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
         { "if": { "properties": { "method": { "enum": ["agent/attach", "agent/interrupt", "agent/fork", "agent/archive", "agent/diff"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/agentIdParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/history" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/historyParams" } } } },

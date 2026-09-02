@@ -25,6 +25,36 @@ local function text_lines(value)
   return vim.split(value, "\n", { plain = true })
 end
 
+local function action_has_choice(action, choice)
+  for _, candidate in ipairs(action and action.payload.choices or {}) do
+    if candidate == choice then
+      return true
+    end
+  end
+  return false
+end
+
+local function usage_lines(value, prefix, lines, depth)
+  if depth > 4 or #lines >= 16 then
+    return
+  end
+  if type(value) ~= "table" then
+    table.insert(lines, string.format(" %s: %s", prefix, inline(value)))
+    return
+  end
+  local keys = vim.tbl_keys(value)
+  table.sort(keys, function(left, right)
+    return tostring(left) < tostring(right)
+  end)
+  for _, key in ipairs(keys) do
+    local next_prefix = prefix == "" and tostring(key) or (prefix .. "." .. tostring(key))
+    usage_lines(value[key], next_prefix, lines, depth + 1)
+    if #lines >= 16 then
+      break
+    end
+  end
+end
+
 local function set_window_options(window, wrap)
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
@@ -59,6 +89,7 @@ function View.new(model, actions, opts)
     agent_rows = {},
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
     render_pending = false,
+    last_action_id = nil,
   }, View)
   self:_define_highlights()
   self:_create_autocmds()
@@ -77,9 +108,17 @@ function View:_define_highlights()
     AgentManagerStatusSuccess = "DiagnosticOk",
     AgentManagerStatusFailure = "DiagnosticError",
     AgentManagerStatusInterrupted = "DiagnosticWarn",
+    AgentManagerStatusWaiting = "DiagnosticWarn",
     AgentManagerMessageUser = "Special",
     AgentManagerMessageAssistant = "Normal",
+    AgentManagerMessageSystem = "Comment",
     AgentManagerTool = "Function",
+    AgentManagerApprovalPending = "DiagnosticWarn",
+    AgentManagerApprovalAllowed = "DiagnosticOk",
+    AgentManagerApprovalDenied = "DiagnosticError",
+    AgentManagerDiffAdd = "DiffAdd",
+    AgentManagerDiffChange = "DiffChange",
+    AgentManagerDiffDelete = "DiffDelete",
     AgentManagerHelpKey = "Special",
     AgentManagerHelpDescription = "Comment",
   }
@@ -147,6 +186,18 @@ function View:_map_buffer(buffer)
   vim.keymap.set("n", "<CR>", function()
     self:_activate_row()
   end, map_opts("Agent Manager: select item"))
+  vim.keymap.set("n", "a", function()
+    local action = self:_focused_decision()
+    if action and action.kind == "approval" and action_has_choice(action, "allow") and self.actions.allow then
+      self.actions.allow(action)
+    end
+  end, map_opts("Agent Manager: allow focused approval"))
+  vim.keymap.set("n", "d", function()
+    local action = self:_focused_decision()
+    if action and action_has_choice(action, "deny") and self.actions.deny then
+      self.actions.deny(action)
+    end
+  end, map_opts("Agent Manager: deny focused request"))
   vim.keymap.set("n", "n", function()
     if self.actions.start then
       self.actions.start()
@@ -167,12 +218,35 @@ function View:_map_buffer(buffer)
       self.actions.interrupt()
     end
   end, map_opts("Agent Manager: interrupt"))
+  vim.keymap.set("n", "h", function()
+    if self.actions.attach then
+      self.actions.attach()
+    end
+  end, map_opts("Agent Manager: attach or resume"))
+  vim.keymap.set("n", "f", function()
+    if self.actions.fork then
+      self.actions.fork()
+    end
+  end, map_opts("Agent Manager: fork selected session"))
+  vim.keymap.set("n", "c", function()
+    if self.actions.context then
+      self.actions.context()
+    end
+  end, map_opts("Agent Manager: add editor context"))
+  vim.keymap.set("n", "D", function()
+    if self.actions.diff then
+      self.actions.diff()
+    end
+  end, map_opts("Agent Manager: show diff or file conflict"))
   vim.keymap.set("n", "r", function()
     if self.actions.refresh then
       self.actions.refresh()
     end
   end, map_opts("Agent Manager: refresh"))
   vim.keymap.set("n", "?", function()
+    self:show_help()
+  end, map_opts("Agent Manager: help"))
+  vim.keymap.set("n", "g?", function()
     self:show_help()
   end, map_opts("Agent Manager: help"))
 end
@@ -266,6 +340,13 @@ end
 
 function View:_activate_row()
   local buffer = vim.api.nvim_get_current_buf()
+  if buffer == self.buffers.decision then
+    local action = self:_focused_decision()
+    if action and action.kind == "question" and self.actions.answer then
+      self.actions.answer(action)
+    end
+    return
+  end
   if buffer ~= self.buffers.agents then
     return
   end
@@ -274,6 +355,13 @@ function View:_activate_row()
   if agent_id and self.model:select(agent_id) then
     self:render()
   end
+end
+
+function View:_focused_decision()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.decision then
+    return nil
+  end
+  return self.model:focused_action()
 end
 
 function View:schedule_render()
@@ -294,6 +382,9 @@ function View:render()
   self:_render_agents()
   self:_render_conversation()
   self:_render_activity()
+  local action = self.model:focused_action()
+  self:_render_decision(action)
+  self:_sync_decision(action)
 end
 
 function View:_set_lines(name, lines, highlights)
@@ -330,7 +421,16 @@ function View:_render_agents()
   for _, agent in ipairs(agents) do
     local selected = agent.id == self.model.selected_agent_id and ">" or " "
     local provider = string.upper(inline(agent.provider))
-    local line = string.format("%s %-6s %-11s %s", selected, provider, inline(agent.state), inline(agent.title))
+    local pending = #self.model:pending(agent.id)
+    local marker = pending > 0 and (" !" .. tostring(pending)) or ""
+    local line = string.format(
+      "%s %-6s %-11s %s%s",
+      selected,
+      provider,
+      inline(agent.state),
+      inline(agent.title),
+      marker
+    )
     table.insert(lines, line)
     self.agent_rows[#lines] = agent.id
     table.insert(highlights, {
@@ -338,6 +438,34 @@ function View:_render_agents()
       group = agent.provider == "claude" and "AgentManagerProviderClaude"
         or "AgentManagerProviderCodex",
     })
+  end
+  local selected = self.model:selected_agent()
+  if selected then
+    table.insert(lines, "")
+    table.insert(lines, " WORKSPACE")
+    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+    table.insert(lines, " " .. inline(selected.cwd))
+    table.insert(lines, " " .. inline(selected.workspace_strategy))
+    local conflicts = self.model:file_conflict_list(selected.id)
+    if #conflicts > 0 then
+      table.insert(lines, " ! " .. tostring(#conflicts) .. " dirty buffer conflict(s)")
+      table.insert(highlights, { line = #lines, group = "AgentManagerStatusFailure" })
+    end
+    table.insert(lines, "")
+    table.insert(lines, " CAPABILITIES")
+    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+    for _, capability in ipairs(selected.capabilities or {}) do
+      local mark = capability.available and "+" or "-"
+      table.insert(lines, string.format(" %s %s", mark, inline(capability.name)))
+      table.insert(highlights, {
+        line = #lines,
+        group = capability.available and "AgentManagerStatusSuccess" or "AgentManagerMuted",
+      })
+      if capability.reason and capability.reason ~= "" then
+        table.insert(lines, "   " .. inline(capability.reason))
+        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+      end
+    end
   end
   self:_set_lines("agents", lines, highlights)
 end
@@ -357,6 +485,9 @@ function View:_render_conversation()
   end
   for _, message in ipairs(messages) do
     local label = message.role == "user" and " YOU" or " ASSISTANT"
+    if message.role == "system" then
+      label = " SYSTEM"
+    end
     if message.kind == "steer" then
       label = " YOU · STEER"
     end
@@ -364,6 +495,7 @@ function View:_render_conversation()
     table.insert(highlights, {
       line = #lines,
       group = message.role == "user" and "AgentManagerMessageUser"
+        or message.role == "system" and "AgentManagerMessageSystem"
         or "AgentManagerMessageAssistant",
     })
     for _, line in ipairs(text_lines(message.text)) do
@@ -382,6 +514,15 @@ function View:_render_activity()
   local lines = { " ACTIVITY", "" }
   local highlights = { { line = 1, group = "AgentManagerTitle" } }
   local activity = self.model:activity()
+  local usage = self.model:usage_for()
+  if next(usage) then
+    table.insert(lines, " USAGE")
+    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+    local projected = {}
+    usage_lines(usage, "", projected, 0)
+    vim.list_extend(lines, projected)
+    table.insert(lines, "")
+  end
   if #activity == 0 then
     table.insert(lines, " Tool and provider activity appears here.")
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
@@ -398,17 +539,169 @@ function View:_render_activity()
   self:_set_lines("activity", lines, highlights)
 end
 
+function View:_render_decision(action)
+  if not action then
+    self:_set_lines("decision", { " DECISION", "", " No pending human request." }, {
+      { line = 1, group = "AgentManagerTitle" },
+      { line = 3, group = "AgentManagerMuted" },
+    })
+    return
+  end
+  local agent = self.model.agents[action.agent_id] or {}
+  local payload = action.payload or {}
+  local title = action.kind == "approval" and " APPROVAL REQUIRED" or " QUESTION REQUIRED"
+  local lines = {
+    title,
+    "",
+    " Provider:  " .. inline(action.provider or agent.provider),
+    " Workspace: " .. inline(agent.cwd),
+    " Strategy:  " .. inline(agent.workspace_strategy),
+    " Session:   " .. inline(agent.provider_session_id),
+    "",
+  }
+  local highlights = {
+    { line = 1, group = "AgentManagerApprovalPending" },
+    { line = 3, group = "AgentManagerMuted" },
+    { line = 4, group = "AgentManagerMuted" },
+    { line = 5, group = "AgentManagerMuted" },
+    { line = 6, group = "AgentManagerMuted" },
+  }
+  if action.kind == "approval" then
+    table.insert(lines, " Action:  " .. inline(payload.tool_name))
+    table.insert(lines, " Summary: " .. inline(payload.summary))
+    if payload.command then
+      table.insert(lines, "")
+      table.insert(lines, " Command")
+      table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+      for _, line in ipairs(text_lines(payload.command)) do
+        table.insert(lines, "   " .. line)
+      end
+    end
+    if payload.cwd then
+      table.insert(lines, " Working directory: " .. inline(payload.cwd))
+    end
+    for _, detail in ipairs({
+      { label = "Risk", value = payload.risk },
+      { label = "Permission suggestions", value = payload.permission_suggestions },
+    }) do
+      if detail.value ~= nil and detail.value ~= vim.NIL then
+        local ok, encoded = pcall(vim.json.encode, detail.value)
+        if ok then
+          table.insert(lines, " " .. detail.label .. ": " .. inline(encoded))
+        end
+      end
+    end
+    if #(payload.paths or {}) > 0 then
+      table.insert(lines, "")
+      table.insert(lines, " Affected paths")
+      table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+      for _, path in ipairs(payload.paths) do
+        table.insert(lines, "   " .. inline(path))
+      end
+    end
+  else
+    for index, question in ipairs(payload.questions or {}) do
+      table.insert(lines, string.format(" %d. %s", index, inline(question.header or "Question")))
+      table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+      for _, line in ipairs(text_lines(question.question)) do
+        table.insert(lines, "    " .. line)
+      end
+      for _, option in ipairs(question.options or {}) do
+        local description = option.description and option.description ~= ""
+            and (" — " .. inline(option.description))
+          or ""
+        table.insert(lines, "      • " .. inline(option.label) .. description)
+      end
+      if question.multi_select then
+        table.insert(lines, "    Multiple answers may be selected.")
+        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+      end
+      table.insert(lines, "")
+    end
+  end
+  table.insert(lines, "")
+  if action.kind == "approval" then
+    table.insert(lines, " a allow    d deny")
+  else
+    table.insert(lines, " <CR> answer    d deny")
+  end
+  table.insert(highlights, { line = #lines, group = "AgentManagerHelpKey" })
+  self:_set_lines("decision", lines, highlights)
+end
+
+function View:_sync_decision(action)
+  local content = self.windows.conversation
+  if not valid_window(content) then
+    return
+  end
+  local current = vim.api.nvim_win_get_buf(content)
+  if action and action.id ~= self.last_action_id then
+    vim.api.nvim_win_set_buf(content, self:_buffer("decision"))
+    set_window_options(content, true)
+    self.active_pane = "decision"
+    if vim.api.nvim_get_current_tabpage() == self.tab then
+      vim.api.nvim_set_current_win(content)
+    end
+  elseif not action and current == self.buffers.decision then
+    vim.api.nvim_win_set_buf(content, self:_buffer("conversation"))
+    self.active_pane = "conversation"
+  end
+  self.last_action_id = action and action.id or nil
+end
+
+function View:show_diff(diff, title)
+  if not valid_tab(self.tab) then
+    self:open()
+  end
+  local lines = { " " .. inline(title or "DIFF"), "" }
+  local highlights = { { line = 1, group = "AgentManagerTitle" } }
+  if diff == "" then
+    table.insert(lines, " No changes.")
+    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+  else
+    for _, line in ipairs(text_lines(diff)) do
+      table.insert(lines, line)
+      local group = nil
+      if line:sub(1, 1) == "+" and line:sub(1, 3) ~= "+++" then
+        group = "AgentManagerDiffAdd"
+      elseif line:sub(1, 1) == "-" and line:sub(1, 3) ~= "---" then
+        group = "AgentManagerDiffDelete"
+      elseif line:sub(1, 2) == "@@" then
+        group = "AgentManagerDiffChange"
+      end
+      if group then
+        table.insert(highlights, { line = #lines, group = group })
+      end
+    end
+  end
+  self:_set_lines("diff", lines, highlights)
+  local content = self.windows.conversation
+  if valid_window(content) then
+    vim.api.nvim_win_set_buf(content, self:_buffer("diff"))
+    set_window_options(content, false)
+    self.active_pane = "diff"
+    if vim.api.nvim_get_current_tabpage() == self.tab then
+      vim.api.nvim_set_current_win(content)
+    end
+  end
+end
+
 function View:show_help()
   local lines = {
     " HELP",
     "",
     " n       start agent",
+    " h       attach or resume session",
     " p       prompt selected agent",
     " s       steer active turn",
     " x       interrupt active turn",
+    " a / d   allow or deny focused request",
+    " f       fork selected session",
+    " c       add explicit editor context",
+    " D       show workspace diff or dirty-buffer conflict",
     " r       refresh agent state",
     " <Tab>   cycle panes",
-    " <CR>    select agent",
+    " <CR>    select agent or answer focused question",
     " q       close workspace",
   }
   local highlights = { { line = 1, group = "AgentManagerTitle" } }

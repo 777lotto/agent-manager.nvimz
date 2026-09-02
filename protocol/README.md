@@ -29,6 +29,8 @@ the Rust adapter translates it at the provider boundary.
   stable event vocabulary implicitly.
 - Approval and question response choices are provider-derived. The common
   contract never invents a persistent approval choice.
+- The additive question `decision` field defaults to `answer` when omitted by
+  an older protocol-v1 client; denial is always explicit.
 - Malformed frames, duplicate callback responses, and unknown callback IDs fail
   closed.
 

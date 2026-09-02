@@ -77,6 +77,10 @@ function Model.new(opts)
     events = {},
     conversations = {},
     activities = {},
+    pending_actions = {},
+    pending_order = {},
+    usage = {},
+    file_conflicts = {},
     max_events = opts.max_events or 2000,
     last_sequence = 0,
     sequence_gap = nil,
@@ -90,6 +94,15 @@ function Model:set_client_state(state, err)
   self.client_state = state
   if err then
     self.last_error = deep_copy(err)
+  end
+  if state == "disconnected" or state == "failed" or state == "stopped" then
+    for _, agent in pairs(self.agents) do
+      agent.state = "disconnected"
+      agent.active_turn_id = nil
+      agent.pending_approvals = 0
+    end
+    self.pending_actions = {}
+    self.pending_order = {}
   end
 end
 
@@ -145,6 +158,10 @@ function Model:apply_event(event)
   self.conversations[event.agent_id] = self.conversations[event.agent_id] or {}
   self.activities[event.agent_id] = self.activities[event.agent_id] or {}
   self:_project_conversation(stored)
+  self:_project_human_request(stored)
+  if stored.type == "usage.updated" then
+    self.usage[event.agent_id] = deep_copy(stored.payload or {})
+  end
   if is_activity(stored.type or "") then
     local activity = self.activities[event.agent_id]
     table.insert(activity, {
@@ -153,9 +170,40 @@ function Model:apply_event(event)
       type = stored.type,
       detail = activity_detail(stored),
       provider = stored.provider,
+      payload = deep_copy(stored.payload or {}),
     })
   end
   return true
+end
+
+function Model:_project_human_request(event)
+  local event_type = event.type or ""
+  if event_type == "approval.requested" or event_type == "question.requested" then
+    local payload = event.payload or {}
+    local id = type(payload.id) == "string" and payload.id or ("event:" .. tostring(event.sequence))
+    if not self.pending_actions[id] then
+      table.insert(self.pending_order, id)
+    end
+    self.pending_actions[id] = {
+      id = id,
+      agent_id = event.agent_id,
+      provider = event.provider,
+      kind = event_type == "approval.requested" and "approval" or "question",
+      payload = deep_copy(payload),
+      sequence = event.sequence,
+    }
+  elseif event_type == "approval.resolved" or event_type == "question.resolved" then
+    local id = event.payload and event.payload.id
+    if type(id) == "string" then
+      self.pending_actions[id] = nil
+      for index, pending_id in ipairs(self.pending_order) do
+        if pending_id == id then
+          table.remove(self.pending_order, index)
+          break
+        end
+      end
+    end
+  end
 end
 
 function Model:_project_conversation(event)
@@ -217,6 +265,85 @@ function Model:record_user_input(agent_id, text, kind)
   return true
 end
 
+function Model:apply_history(agent_id, messages)
+  if not self.agents[agent_id] or type(messages) ~= "table" then
+    return false
+  end
+  local conversation = {}
+  for index, message in ipairs(messages) do
+    if
+      type(message) == "table"
+      and (message.role == "user" or message.role == "assistant" or message.role == "system")
+      and type(message.text) == "string"
+    then
+      table.insert(conversation, {
+        id = message.id or ("history:" .. tostring(index)),
+        role = message.role,
+        text = message.text,
+        streaming = false,
+        history = true,
+      })
+    end
+  end
+  self.conversations[agent_id] = conversation
+  return true
+end
+
+function Model:pending(agent_id)
+  local actions = {}
+  for _, id in ipairs(self.pending_order) do
+    local action = self.pending_actions[id]
+    if action and (not agent_id or action.agent_id == agent_id) then
+      table.insert(actions, deep_copy(action))
+    end
+  end
+  return actions
+end
+
+function Model:focused_action()
+  local selected = self:pending(self.selected_agent_id)
+  return selected[1] or self:pending()[1]
+end
+
+function Model:usage_for(agent_id)
+  return deep_copy(self.usage[agent_id or self.selected_agent_id] or {})
+end
+
+function Model:record_file_conflict(agent_id, path, details)
+  if not self.agents[agent_id] or type(path) ~= "string" then
+    return false
+  end
+  self.file_conflicts[agent_id] = self.file_conflicts[agent_id] or {}
+  self.file_conflicts[agent_id][path] = vim.tbl_deep_extend("force", {
+    agent_id = agent_id,
+    path = path,
+  }, deep_copy(details or {}))
+  return true
+end
+
+function Model:resolve_file_conflict(agent_id, path, resolution)
+  local conflicts = self.file_conflicts[agent_id]
+  if not conflicts or not conflicts[path] then
+    return false
+  end
+  conflicts[path].resolution = resolution
+  conflicts[path].resolved = true
+  return true
+end
+
+function Model:file_conflict_list(agent_id)
+  local conflicts = {}
+  for _, conflict in pairs(self.file_conflicts[agent_id or self.selected_agent_id] or {}) do
+    if not conflict.resolved then
+      table.insert(conflicts, deep_copy(conflict))
+    end
+  end
+  table.sort(conflicts, function(left, right)
+    return left.path < right.path
+  end)
+  return conflicts
+end
+
 function Model:select(agent_id)
   if not self.agents[agent_id] then
     return false
@@ -270,6 +397,10 @@ function Model:snapshot()
     events = self.events,
     conversations = self.conversations,
     activities = self.activities,
+    pending_actions = self.pending_actions,
+    pending_order = self.pending_order,
+    usage = self.usage,
+    file_conflicts = self.file_conflicts,
     last_sequence = self.last_sequence,
     sequence_gap = self.sequence_gap,
     client_state = self.client_state,

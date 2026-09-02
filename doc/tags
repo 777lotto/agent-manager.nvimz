@@ -1,5 +1,9 @@
 :AgentManager	agent-manager.txt	/*:AgentManager*
+:AgentManagerAttach	agent-manager.txt	/*:AgentManagerAttach*
 :AgentManagerClose	agent-manager.txt	/*:AgentManagerClose*
+:AgentManagerContext	agent-manager.txt	/*:AgentManagerContext*
+:AgentManagerDiff	agent-manager.txt	/*:AgentManagerDiff*
+:AgentManagerFork	agent-manager.txt	/*:AgentManagerFork*
 :AgentManagerHealth	agent-manager.txt	/*:AgentManagerHealth*
 :AgentManagerInterrupt	agent-manager.txt	/*:AgentManagerInterrupt*
 :AgentManagerSend	agent-manager.txt	/*:AgentManagerSend*
