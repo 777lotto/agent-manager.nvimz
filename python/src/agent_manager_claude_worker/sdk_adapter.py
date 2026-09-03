@@ -33,8 +33,9 @@ from .interfaces import EventCallback, HumanCallback
 from .protocol import JsonObject, JsonValue, ProtocolFault, require_object
 
 SDK_DISTRIBUTION: Final = "claude-agent-sdk"
-PINNED_SDK_VERSION: Final = "0.2.148"
-PINNED_CLAUDE_CODE_VERSION: Final = "2.1.251"
+COMPATIBILITY_PROFILE: Final = "claude-agent-sdk-v1"
+TESTED_SDK_VERSION: Final = "0.2.148"
+TESTED_CLAUDE_CODE_VERSION: Final = "2.1.251"
 ACTIVE_SESSION_TIMEOUT_SECONDS: Final = 5.0
 MAX_ACTIVE_SESSION_BYTES: Final = 1024 * 1024
 MAX_ACTIVE_SESSIONS: Final = 1000
@@ -82,20 +83,25 @@ class ClaudeSdkAdapter:
         except PackageNotFoundError:
             sdk_version = "unavailable"
 
+        cli_path = _bundled_cli_path()
+        sdk_compatible = sdk_version != "unavailable"
+        runtime_compatible = bool(__cli_version__)
         return {
             "python_version": platform.python_version(),
+            "compatibility_profile": COMPATIBILITY_PROFILE,
             "sdk": {
                 "available": sdk_version != "unavailable",
-                "compatible": sdk_version == PINNED_SDK_VERSION,
+                "compatible": sdk_compatible,
                 "version": sdk_version,
-                "pinned_version": PINNED_SDK_VERSION,
+                "tested_version": TESTED_SDK_VERSION,
             },
             "claude_runtime": {
-                "available": True,
-                "compatible": __cli_version__ == PINNED_CLAUDE_CODE_VERSION,
+                "available": cli_path is not None,
+                "compatible": runtime_compatible and cli_path is not None,
                 "source": "sdk_bundled",
                 "version": __cli_version__,
-                "pinned_version": PINNED_CLAUDE_CODE_VERSION,
+                "tested_version": TESTED_CLAUDE_CODE_VERSION,
+                "executable": str(cli_path) if cli_path is not None else None,
             },
         }
 
@@ -153,7 +159,7 @@ class ClaudeSdkAdapter:
             sdk_version = version(SDK_DISTRIBUTION)
         except PackageNotFoundError as error:
             raise ProtocolFault(-32004, "Claude Agent SDK is unavailable") from error
-        if sdk_version != PINNED_SDK_VERSION or __cli_version__ != PINNED_CLAUDE_CODE_VERSION:
+        if sdk_version == "unavailable" or not __cli_version__ or _bundled_cli_path() is None:
             raise ProtocolFault(-32004, "Claude SDK/runtime version is incompatible")
 
         if resume is not None:

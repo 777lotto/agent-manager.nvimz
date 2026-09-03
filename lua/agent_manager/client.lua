@@ -37,7 +37,10 @@ function Client.new(opts)
     mode = opts.mode or "embedded",
     command = vim.deepcopy(opts.command),
     socket = opts.socket,
+    codex_executable = opts.codex_executable,
     claude_python = opts.claude_python,
+    workspace_lifecycle = opts.workspace_lifecycle,
+    allow_shared_workspaces = opts.allow_shared_workspaces == true,
     reconnect = {
       initial_delay = reconnect.initial_delay or 100,
       max_delay = reconnect.max_delay or 5000,
@@ -68,9 +71,28 @@ end
 
 function Client:_argv()
   local command = vim.deepcopy(self.command)
+  if
+    self.mode == "embedded"
+    and type(self.codex_executable) == "string"
+    and self.codex_executable ~= ""
+  then
+    table.insert(command, "--codex-bin")
+    table.insert(command, self.codex_executable)
+  end
   if self.mode == "embedded" and type(self.claude_python) == "string" and self.claude_python ~= "" then
     table.insert(command, "--claude-python")
     table.insert(command, self.claude_python)
+  end
+  if self.mode == "embedded" then
+    if type(self.workspace_lifecycle) == "string" and self.workspace_lifecycle ~= "" then
+      table.insert(command, "--workspace-lifecycle")
+      table.insert(command, self.workspace_lifecycle)
+    else
+      table.insert(command, "--disable-workspace-lifecycle")
+    end
+    if not self.allow_shared_workspaces then
+      table.insert(command, "--deny-shared-workspaces")
+    end
   end
   return command
 end

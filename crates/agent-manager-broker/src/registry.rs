@@ -12,9 +12,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use crate::codex::PINNED_CODEX_VERSION;
-use crate::protocol::{AgentState, AgentSummary, Provider, WorkspaceStrategy};
-use crate::worker::{PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION};
+use crate::protocol::{
+    AgentState, AgentSummary, ManagedWorkspace, Provider, ProviderRuntime, WorkspaceStrategy,
+};
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
@@ -52,11 +52,20 @@ struct RegistryAgent {
     cwd: String,
     workspace_strategy: WorkspaceStrategy,
     worktree_path: Option<String>,
+    #[serde(default)]
+    managed_workspace: Option<ManagedWorkspace>,
+    #[serde(default)]
+    runtime: Option<ProviderRuntime>,
     title: String,
     state: AgentState,
     created_at: String,
     updated_at: String,
-    provider_runtime_version: String,
+    #[serde(
+        default,
+        rename = "provider_runtime_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_provider_runtime_version: Option<String>,
 }
 
 impl RegistryStore {
@@ -169,12 +178,6 @@ impl RegistryStore {
 
 impl From<&AgentSummary> for RegistryAgent {
     fn from(summary: &AgentSummary) -> Self {
-        let provider_runtime_version = match summary.provider {
-            Provider::Codex => format!("codex-app-server/{PINNED_CODEX_VERSION}"),
-            Provider::Claude => format!(
-                "claude-agent-sdk/{PINNED_CLAUDE_SDK_VERSION} claude-code/{PINNED_CLAUDE_CODE_VERSION}"
-            ),
-        };
         Self {
             id: summary.id.clone(),
             provider: summary.provider,
@@ -182,11 +185,13 @@ impl From<&AgentSummary> for RegistryAgent {
             cwd: summary.cwd.clone(),
             workspace_strategy: summary.workspace_strategy,
             worktree_path: summary.worktree_path.clone(),
+            managed_workspace: summary.managed_workspace.clone(),
+            runtime: summary.runtime.clone(),
             title: summary.title.clone(),
             state: summary.state,
             created_at: summary.created_at.clone(),
             updated_at: summary.updated_at.clone(),
-            provider_runtime_version,
+            legacy_provider_runtime_version: None,
         }
     }
 }
@@ -203,12 +208,17 @@ impl RegistryAgent {
                 .provider_session_id
                 .as_ref()
                 .is_some_and(|session| session.is_empty() || session.len() > 1_024)
-            || self.provider_runtime_version.len() > 1_024
+            || self
+                .legacy_provider_runtime_version
+                .as_ref()
+                .is_some_and(|version| version.len() > 1_024)
+            || !valid_managed_workspace(self.managed_workspace.as_ref())
+            || !valid_runtime(self.runtime.as_ref())
         {
             return Err(RegistryError::Unsafe("agent metadata is invalid"));
         }
         match (self.workspace_strategy, self.worktree_path.as_deref()) {
-            (WorkspaceStrategy::Shared, None) => {}
+            (WorkspaceStrategy::Shared, None) if self.managed_workspace.is_none() => {}
             (WorkspaceStrategy::Worktree, Some(path))
                 if !path.is_empty() && path.len() <= 8_192 && Path::new(path).is_absolute() => {}
             _ => return Err(RegistryError::Unsafe("workspace metadata is inconsistent")),
@@ -220,6 +230,8 @@ impl RegistryAgent {
             cwd: self.cwd,
             workspace_strategy: self.workspace_strategy,
             worktree_path: self.worktree_path,
+            managed_workspace: self.managed_workspace,
+            runtime: self.runtime,
             title: self.title,
             state: AgentState::Disconnected,
             active_turn_id: None,
@@ -230,6 +242,34 @@ impl RegistryAgent {
             updated_at: self.updated_at,
         })
     }
+}
+
+fn valid_managed_workspace(workspace: Option<&ManagedWorkspace>) -> bool {
+    workspace.is_none_or(|workspace| {
+        !workspace.repository.is_empty()
+            && workspace.repository.len() <= 128
+            && !workspace.task_id.is_empty()
+            && workspace.task_id.len() <= 128
+            && workspace.branch == format!("agent/{}", workspace.task_id)
+            && !workspace.base_branch.is_empty()
+            && workspace.base_branch.len() <= 256
+    })
+}
+
+fn valid_runtime(runtime: Option<&ProviderRuntime>) -> bool {
+    runtime.is_none_or(|runtime| {
+        !runtime.compatibility_profile.is_empty()
+            && runtime.compatibility_profile.len() <= 256
+            && !runtime.provider_version.is_empty()
+            && runtime.provider_version.len() <= 256
+            && runtime
+                .adapter_version
+                .as_ref()
+                .is_none_or(|version| !version.is_empty() && version.len() <= 256)
+            && runtime.executable.as_ref().is_none_or(|path| {
+                !path.is_empty() && path.len() <= 8_192 && Path::new(path).is_absolute()
+            })
+    })
 }
 
 pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), RegistryError> {
@@ -282,7 +322,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::{RegistryError, RegistryStore};
-    use crate::protocol::{AgentState, AgentSummary, Provider, WorkspaceStrategy};
+    use crate::protocol::{AgentState, AgentSummary, Provider, ProviderRuntime, WorkspaceStrategy};
 
     #[test]
     fn registry_round_trip_contains_metadata_only() {
@@ -303,6 +343,13 @@ mod tests {
                 cwd: "/workspace/project".to_owned(),
                 workspace_strategy: WorkspaceStrategy::Shared,
                 worktree_path: None,
+                managed_workspace: None,
+                runtime: Some(ProviderRuntime {
+                    compatibility_profile: "codex-app-server-stable-v1".to_owned(),
+                    provider_version: "0.153.0".to_owned(),
+                    adapter_version: None,
+                    executable: Some("/home/ai/.local/bin/codex".to_owned()),
+                }),
                 title: "project".to_owned(),
                 state: AgentState::Running,
                 active_turn_id: Some("turn-secret-payload".to_owned()),
@@ -327,6 +374,13 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].state, AgentState::Disconnected);
         assert_eq!(loaded[0].provider_session_id.as_deref(), Some("thread-1"));
+        assert_eq!(
+            loaded[0]
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.provider_version.as_str()),
+            Some("0.153.0")
+        );
         fs::remove_file(&path).expect("remove registry fixture");
         symlink(directory.join("missing-target"), &path).expect("create dangling registry symlink");
         assert!(matches!(

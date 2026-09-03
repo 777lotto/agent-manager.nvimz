@@ -14,9 +14,10 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::framing::{BoundedFrame, read_bounded_line};
-use crate::protocol::{EventEnvelope, Provider};
+use crate::protocol::{EventEnvelope, Provider, ProviderRuntime};
 
-pub const PINNED_CODEX_VERSION: &str = "0.152.0";
+pub const CODEX_COMPATIBILITY_PROFILE: &str = "codex-app-server-stable-v1";
+pub const CODEX_SCHEMA_BASELINE_VERSION: &str = "0.152.0";
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,10 +76,75 @@ pub enum CodexError {
     UnexpectedFrame,
     #[error("Codex App Server response omitted {0}")]
     MissingField(&'static str),
+    #[error("Codex App Server runtime {0} is outside the stable-v1 compatibility profile")]
+    IncompatibleRuntime(String),
     #[error("Codex App Server event is not an unanswered server request")]
     InvalidServerRequest,
     #[error("failed to format event timestamp: {0}")]
     Timestamp(#[from] time::error::Format),
+}
+
+pub fn runtime_identity(
+    initialize: &Value,
+    spec: &CommandSpec,
+) -> Result<ProviderRuntime, CodexError> {
+    let user_agent = initialize
+        .get("userAgent")
+        .and_then(Value::as_str)
+        .ok_or(CodexError::MissingField("userAgent"))?;
+    let version = user_agent
+        .split_once('/')
+        .map(|(_, version)| version)
+        .and_then(|version| version.split_whitespace().next())
+        .map(|version| {
+            version.trim_end_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '.' && character != '-'
+            })
+        })
+        .filter(|version| !version.is_empty())
+        .ok_or(CodexError::MissingField("userAgent version"))?;
+    let current = numeric_version(version)
+        .ok_or_else(|| CodexError::IncompatibleRuntime(version.to_owned()))?;
+    let baseline = numeric_version(CODEX_SCHEMA_BASELINE_VERSION)
+        .expect("committed Codex baseline must be numeric");
+    if current < baseline {
+        return Err(CodexError::IncompatibleRuntime(version.to_owned()));
+    }
+    Ok(ProviderRuntime {
+        compatibility_profile: CODEX_COMPATIBILITY_PROFILE.to_owned(),
+        provider_version: version.to_owned(),
+        adapter_version: None,
+        executable: resolve_program(&spec.program),
+    })
+}
+
+fn numeric_version(value: &str) -> Option<(u64, u64, u64)> {
+    let core = value.split_once('-').map_or(value, |(core, _)| core);
+    let mut components = core.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn resolve_program(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return path
+            .canonicalize()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+    }
+    env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.canonicalize().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 pub struct CodexAppServer {
@@ -613,8 +679,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ProviderEvent, ProviderEventKind, active_thread_ids, normalize_event,
-        safe_server_request_response,
+        CODEX_COMPATIBILITY_PROFILE, CodexError, CommandSpec, ProviderEvent, ProviderEventKind,
+        active_thread_ids, normalize_event, runtime_identity, safe_server_request_response,
     };
 
     fn event(method: &str, params: Value) -> ProviderEvent {
@@ -624,6 +690,37 @@ mod tests {
             response_required: false,
             method: method.to_owned(),
             params,
+        }
+    }
+
+    #[test]
+    fn stable_profile_accepts_the_schema_baseline_and_newer_runtimes() {
+        let command = CommandSpec {
+            program: "/fixture/codex".to_owned(),
+            args: Vec::new(),
+        };
+        for version in ["0.152.0", "0.153.0", "1.0.0"] {
+            let runtime = runtime_identity(
+                &json!({ "userAgent": format!("codex_cli_rs/{version}") }),
+                &command,
+            )
+            .expect("compatible runtime");
+            assert_eq!(runtime.provider_version, version);
+            assert_eq!(runtime.compatibility_profile, CODEX_COMPATIBILITY_PROFILE);
+        }
+    }
+
+    #[test]
+    fn stable_profile_rejects_pre_baseline_and_malformed_runtimes() {
+        let command = CommandSpec::default();
+        for version in ["0.151.9", "not-a-version"] {
+            assert!(matches!(
+                runtime_identity(
+                    &json!({ "userAgent": format!("codex_cli_rs/{version}") }),
+                    &command,
+                ),
+                Err(CodexError::IncompatibleRuntime(_))
+            ));
         }
     }
 

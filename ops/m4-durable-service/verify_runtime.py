@@ -66,7 +66,11 @@ def main() -> None:
     client.close()
     if response.get("result", {}).get("mode") != "durable":
         fail("socket handshake", "broker did not report durable mode")
+    workspaces = response.get("result", {}).get("workspaces", {})
+    if workspaces.get("managed_tasks") is not True or workspaces.get("shared_starts") is not False:
+        fail("workspace policy", "managed-only workspace policy is not active")
     print("PASS socket handshake")
+    print("PASS managed-only workspace policy")
 
     registry = read_json(registry_path)
 

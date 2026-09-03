@@ -15,5 +15,6 @@ pub mod replay;
 mod runtime;
 mod status;
 pub mod worker;
+pub mod workspace;
 
 pub const BROKER_VERSION: &str = env!("CARGO_PKG_VERSION");

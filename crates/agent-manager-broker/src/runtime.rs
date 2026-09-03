@@ -15,15 +15,19 @@ use uuid::Uuid;
 
 use crate::codex::{
     CodexAppServer, CodexError, CommandSpec, ProviderEvent, active_thread_ids,
-    default_thread_lock_directory, normalize_event, thread_id, turn_id,
+    default_thread_lock_directory, normalize_event, runtime_identity as codex_runtime_identity,
+    thread_id, turn_id,
 };
 use crate::human::{
     HumanRequestKind, claude_approval_response, claude_question_response, claude_request,
     codex_approval_response, codex_question_response, codex_request, resolved_event,
 };
 use crate::projection::{history, provider_sessions, render_input};
-use crate::protocol::{EventEnvelope, Provider, RequestId};
-use crate::worker::{ClaudeWorker, WorkerCommandSpec, WorkerError, WorkerInbound};
+use crate::protocol::{EventEnvelope, Provider, ProviderRuntime, RequestId};
+use crate::worker::{
+    ClaudeWorker, WorkerCommandSpec, WorkerError, WorkerInbound,
+    runtime_identity as claude_runtime_identity,
+};
 
 const PROVIDER_ERROR_CODE: i64 = -32_020;
 const INVALID_STATE_CODE: i64 = -32_021;
@@ -80,6 +84,7 @@ pub(crate) enum RuntimeEvent {
         request_id: RequestId,
         agent_id: String,
         provider_session_id: String,
+        runtime: ProviderRuntime,
     },
     Response {
         request_id: RequestId,
@@ -168,7 +173,13 @@ pub(crate) async fn discover_sessions(
         Provider::Codex => {
             let mut server = CodexAppServer::spawn(&config.codex)
                 .map_err(|_| "Codex App Server could not be started")?;
-            if server.initialize().await.is_err() {
+            let initialized = server.initialize().await;
+            if initialized
+                .as_ref()
+                .ok()
+                .and_then(|value| codex_runtime_identity(value, &config.codex).ok())
+                .is_none()
+            {
                 let _ = server.shutdown().await;
                 return Err("Codex App Server initialization failed");
             }
@@ -247,7 +258,7 @@ async fn run_codex(
         runtime_stopped(&events, &agent_id);
         return;
     };
-    if server.initialize().await.is_err() {
+    let Ok(initialized) = server.initialize().await else {
         start_failed(
             &events,
             start_request_id,
@@ -257,7 +268,18 @@ async fn run_codex(
         let _ = server.shutdown().await;
         runtime_stopped(&events, &agent_id);
         return;
-    }
+    };
+    let Ok(runtime) = codex_runtime_identity(&initialized, &spec) else {
+        start_failed(
+            &events,
+            start_request_id,
+            &agent_id,
+            "Codex App Server is outside the supported compatibility profile",
+        );
+        let _ = server.shutdown().await;
+        runtime_stopped(&events, &agent_id);
+        return;
+    };
     let started = match &launch {
         SessionLaunch::Start => server.start_thread(&cwd).await,
         SessionLaunch::Resume(session_id) => server.resume_thread(session_id, &cwd).await,
@@ -290,6 +312,7 @@ async fn run_codex(
             request_id: start_request_id,
             agent_id: agent_id.clone(),
             provider_session_id: provider_session_id.clone(),
+            runtime,
         })
         .is_err()
     {
@@ -929,7 +952,7 @@ async fn run_claude(
         runtime_stopped(&events, &agent_id);
         return;
     };
-    if worker.initialize().await.is_err() {
+    let Ok(initialized) = worker.initialize().await else {
         start_failed(
             &events,
             start_request_id,
@@ -939,7 +962,18 @@ async fn run_claude(
         let _ = worker.shutdown().await;
         runtime_stopped(&events, &agent_id);
         return;
-    }
+    };
+    let Ok(runtime) = claude_runtime_identity(&initialized) else {
+        start_failed(
+            &events,
+            start_request_id,
+            &agent_id,
+            "Claude worker is outside the supported compatibility profile",
+        );
+        let _ = worker.shutdown().await;
+        runtime_stopped(&events, &agent_id);
+        return;
+    };
     let (open_method, open_params) = match &launch {
         SessionLaunch::Start => ("session/start", json!({ "agent_id": agent_id, "cwd": cwd })),
         SessionLaunch::Resume(session_id) => (
@@ -983,6 +1017,7 @@ async fn run_claude(
             request_id: start_request_id,
             agent_id: agent_id.clone(),
             provider_session_id: provider_session_id.clone(),
+            runtime,
         })
         .is_err()
     {

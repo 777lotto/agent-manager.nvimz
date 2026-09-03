@@ -39,6 +39,7 @@ def main() -> None:
             "nonce": initialize["params"]["nonce"],
             "diagnostics": {
                 "python_version": "3.13.15",
+                "compatibility_profile": "claude-agent-sdk-v1",
                 "sdk": {
                     "available": True,
                     "compatible": True,
@@ -51,6 +52,7 @@ def main() -> None:
                     "source": "sdk_bundled",
                     "version": "2.1.251",
                     "pinned_version": "2.1.251",
+                    "executable": "/fixture/claude",
                 },
             },
             "capabilities": {"callbacks": ["approval", "question"]},

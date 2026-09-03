@@ -55,6 +55,20 @@ function M.check()
         .. ", broker "
         .. tostring(broker.initialized.broker_version)
     )
+    local providers = broker.initialized.providers or {}
+    for _, provider in ipairs({ "codex", "claude" }) do
+      local profile = providers[provider] and providers[provider].compatibility_profile
+      if profile then
+        vim.health.ok(provider .. " compatibility profile: " .. tostring(profile))
+      end
+    end
+  end
+  if health.codex_executable then
+    if vim.fn.executable(health.codex_executable) == 1 then
+      vim.health.ok("Codex executable: " .. health.codex_executable)
+    else
+      vim.health.warn("configured Codex executable is not executable")
+    end
   end
   if health.claude_python then
     if vim.fn.executable(health.claude_python) == 1 then
@@ -67,6 +81,15 @@ function M.check()
       "Run mise run setup or configure providers.claude.python.",
     })
   end
+  local worktrees = health.worktrees or {}
+  if worktrees.lifecycle and vim.fn.executable(worktrees.lifecycle) == 1 then
+    vim.health.ok("managed worktree lifecycle: " .. worktrees.lifecycle)
+  else
+    vim.health.warn("managed worktree lifecycle is unavailable")
+  end
+  vim.health.info(
+    "shared-checkout starts: " .. (worktrees.allow_shared and "admin-enabled" or "disabled")
+  )
   if broker.last_error then
     vim.health.warn("last client error: " .. tostring(broker.last_error.message))
   end

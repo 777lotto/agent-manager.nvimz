@@ -26,6 +26,22 @@ pub enum WorkspaceStrategy {
     Worktree,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManagedWorkspace {
+    pub repository: String,
+    pub task_id: String,
+    pub branch: String,
+    pub base_branch: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderRuntime {
+    pub compatibility_profile: String,
+    pub provider_version: String,
+    pub adapter_version: Option<String>,
+    pub executable: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
@@ -73,6 +89,8 @@ pub struct AgentSummary {
     pub cwd: String,
     pub workspace_strategy: WorkspaceStrategy,
     pub worktree_path: Option<String>,
+    pub managed_workspace: Option<ManagedWorkspace>,
+    pub runtime: Option<ProviderRuntime>,
     pub title: String,
     pub state: AgentState,
     pub active_turn_id: Option<String>,

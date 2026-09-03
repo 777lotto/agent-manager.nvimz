@@ -23,6 +23,28 @@
     "workspaceStrategy": {
       "enum": ["shared", "worktree"]
     },
+    "managedWorkspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "task_id", "branch", "base_branch"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$", "maxLength": 128 },
+        "task_id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+        "branch": { "type": "string", "pattern": "^agent/[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 134 },
+        "base_branch": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "providerRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compatibility_profile", "provider_version", "adapter_version", "executable"],
+      "properties": {
+        "compatibility_profile": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "provider_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "adapter_version": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "executable": { "type": ["string", "null"], "maxLength": 8192 }
+      }
+    },
     "agentState": {
       "enum": [
         "starting",
@@ -73,6 +95,8 @@
         "cwd",
         "workspace_strategy",
         "worktree_path",
+        "managed_workspace",
+        "runtime",
         "title",
         "state",
         "active_turn_id",
@@ -89,6 +113,18 @@
         "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
         "workspace_strategy": { "$ref": "#/$defs/workspaceStrategy" },
         "worktree_path": { "type": ["string", "null"], "maxLength": 8192 },
+        "managed_workspace": {
+          "oneOf": [
+            { "$ref": "#/$defs/managedWorkspace" },
+            { "type": "null" }
+          ]
+        },
+        "runtime": {
+          "oneOf": [
+            { "$ref": "#/$defs/providerRuntime" },
+            { "type": "null" }
+          ]
+        },
         "title": { "type": "string", "maxLength": 4096 },
         "state": { "$ref": "#/$defs/agentState" },
         "active_turn_id": { "type": ["string", "null"], "maxLength": 1024 },
@@ -176,13 +212,48 @@
     "startParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider", "cwd", "workspace_strategy"],
+      "required": ["provider"],
       "properties": {
         "provider": { "$ref": "#/$defs/provider" },
         "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
         "workspace_strategy": { "$ref": "#/$defs/workspaceStrategy" },
         "worktree_path": { "type": ["string", "null"], "maxLength": 8192 },
+        "managed_workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "task_id", "resume"],
+          "properties": {
+            "repository": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$", "maxLength": 128 },
+            "task_id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 },
+            "resume": { "type": "boolean" }
+          }
+        },
         "provider_options": { "type": "object" }
+      },
+      "oneOf": [
+        {
+          "required": ["cwd", "workspace_strategy"],
+          "not": { "required": ["managed_workspace"] }
+        },
+        {
+          "required": ["managed_workspace"],
+          "not": {
+            "anyOf": [
+              { "required": ["cwd"] },
+              { "required": ["workspace_strategy"] },
+              { "required": ["worktree_path"] }
+            ]
+          }
+        }
+      ]
+    },
+    "managedWorkspaceParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "task_id"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$", "maxLength": 128 },
+        "task_id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 }
       }
     },
     "providerSessionListParams": {
@@ -322,6 +393,8 @@
           "enum": [
             "initialize",
             "agent/list",
+            "workspace/list",
+            "workspace/handoff",
             "provider/session/list",
             "agent/start",
             "agent/attach",
@@ -344,7 +417,8 @@
       },
       "allOf": [
         { "if": { "properties": { "method": { "const": "initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
-        { "if": { "properties": { "method": { "enum": ["agent/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+        { "if": { "properties": { "method": { "enum": ["agent/list", "workspace/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+        { "if": { "properties": { "method": { "const": "workspace/handoff" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/managedWorkspaceParams" } } } },
         { "if": { "properties": { "method": { "const": "provider/session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionListParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
         { "if": { "properties": { "method": { "enum": ["agent/attach", "agent/interrupt", "agent/fork", "agent/archive", "agent/diff"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/agentIdParams" } } } },
