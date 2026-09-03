@@ -7,7 +7,7 @@ import unittest
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, ClassVar, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -200,6 +200,54 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime["source"], "sdk_bundled")
         self.assertEqual(runtime["version"], "2.1.251")
         self.assertIs(runtime["compatible"], True)
+
+    async def test_active_session_projection_retains_only_safe_identity_and_cwd(self) -> None:
+        payload = AsyncMock(
+            return_value=[
+                {
+                    "sessionId": "active-session",
+                    "cwd": "/workspace/project",
+                    "name": "named session",
+                    "startedAt": 1_788_225_600_000,
+                    "prompt": "must not cross the worker protocol",
+                    "status": "running",
+                }
+            ]
+        )
+        with (
+            patch(
+                "agent_manager_claude_worker.sdk_adapter._bundled_cli_path",
+                return_value=Path("/fixture/claude"),
+            ),
+            patch(
+                "agent_manager_claude_worker.sdk_adapter._active_session_payload",
+                new=payload,
+            ),
+        ):
+            sessions, available = await ClaudeSdkAdapter().list_active_sessions(None)
+
+        self.assertEqual(
+            sessions,
+            [
+                {
+                    "session_id": "active-session",
+                    "cwd": "/workspace/project",
+                    "name": "named session",
+                    "updated_at": 1_788_225_600_000,
+                    "active": True,
+                }
+            ],
+        )
+        self.assertIs(available, True)
+        self.assertNotIn(
+            "prompt",
+            {
+                key: value
+                for session in sessions
+                if isinstance(session, dict)
+                for key, value in session.items()
+            },
+        )
 
     async def test_adapter_builds_locked_options_and_maps_structured_question(self) -> None:
         callback_records: list[tuple[str, JsonObject]] = []

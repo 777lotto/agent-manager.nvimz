@@ -1,10 +1,18 @@
 //! Provider metadata/history projection and explicit editor-context rendering.
 
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 
 use crate::protocol::Provider;
 
-pub(crate) fn provider_sessions(provider: Provider, result: &Value) -> Value {
+pub(crate) fn provider_sessions(
+    provider: Provider,
+    result: &Value,
+    active_session_ids: &HashSet<String>,
+    activity_available: bool,
+    active_only: bool,
+) -> Value {
     let records = match provider {
         Provider::Codex => result.get("data"),
         Provider::Claude => result.get("sessions"),
@@ -14,8 +22,10 @@ pub(crate) fn provider_sessions(provider: Provider, result: &Value) -> Value {
     .unwrap_or_default();
     let sessions = records
         .iter()
-        .filter_map(|record| session_record(provider, record))
+        .filter_map(|record| session_record(provider, record, active_session_ids))
+        .filter(|record| !active_only || record["active"] == true)
         .collect::<Vec<_>>();
+    let observed_active = sessions.iter().any(|record| record["active"] == true);
     let cursor = match provider {
         Provider::Codex => result.get("nextCursor"),
         Provider::Claude => result
@@ -24,7 +34,11 @@ pub(crate) fn provider_sessions(provider: Provider, result: &Value) -> Value {
     }
     .cloned()
     .unwrap_or(Value::Null);
-    json!({ "sessions": sessions, "cursor": cursor })
+    json!({
+        "sessions": sessions,
+        "cursor": cursor,
+        "activity_available": activity_available || observed_active,
+    })
 }
 
 pub(crate) fn history(provider: Provider, result: &Value) -> Value {
@@ -45,7 +59,11 @@ pub(crate) fn render_input(text: &str, attachments: &[Value]) -> Result<String, 
     ))
 }
 
-fn session_record(provider: Provider, record: &Value) -> Option<Value> {
+fn session_record(
+    provider: Provider,
+    record: &Value,
+    active_session_ids: &HashSet<String>,
+) -> Option<Value> {
     let provider_session_id = first_string(
         record,
         &["id", "session_id", "sessionId", "provider_session_id"],
@@ -67,12 +85,21 @@ fn session_record(provider: Provider, record: &Value) -> Option<Value> {
     )
     .cloned()
     .unwrap_or(Value::Null);
+    let provider_status = record
+        .get("status")
+        .and_then(|status| status.get("type"))
+        .and_then(Value::as_str);
+    let active = record.get("active").and_then(Value::as_bool) == Some(true)
+        || provider_status == Some("active")
+        || active_session_ids.contains(provider_session_id);
     Some(json!({
         "provider": provider,
         "provider_session_id": provider_session_id,
         "cwd": cwd,
         "title": title,
         "updated_at": updated_at,
+        "active": active,
+        "state": if active { "running" } else { "resumable" },
     }))
 }
 
@@ -194,6 +221,8 @@ fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 mod tests {
     use serde_json::json;
 
+    use std::collections::HashSet;
+
     use super::{history, provider_sessions, render_input};
     use crate::protocol::Provider;
 
@@ -211,6 +240,9 @@ mod tests {
                 }],
                 "nextCursor": "next"
             }),
+            &HashSet::new(),
+            true,
+            false,
         );
         assert_eq!(
             projected["sessions"][0]["provider_session_id"],
@@ -218,6 +250,29 @@ mod tests {
         );
         assert_eq!(projected["cursor"], "next");
         assert!(!projected.to_string().contains("sensitive first prompt"));
+    }
+
+    #[test]
+    fn active_only_projection_uses_external_writer_observations() {
+        let active_id = "018f6f57-7220-7dcb-9cf8-86f21b9754ed".to_owned();
+        let projected = provider_sessions(
+            Provider::Codex,
+            &json!({
+                "data": [
+                    { "id": active_id, "cwd": "/workspace/live", "updatedAt": 2 },
+                    { "id": "018f6f57-7220-7dcb-9cf8-86f21b9754ee", "cwd": "/workspace/old", "updatedAt": 1 }
+                ],
+                "nextCursor": null
+            }),
+            &HashSet::from([active_id]),
+            true,
+            true,
+        );
+
+        assert_eq!(projected["sessions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(projected["sessions"][0]["cwd"], "/workspace/live");
+        assert_eq!(projected["sessions"][0]["state"], "running");
+        assert_eq!(projected["activity_available"], true);
     }
 
     #[test]

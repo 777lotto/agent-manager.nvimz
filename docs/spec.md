@@ -297,7 +297,7 @@ The initialization response includes:
 
 | Method                   | Purpose                                                    |
 | ------------------------ | ---------------------------------------------------------- |
-| `provider/session/list`  | Discover resumable provider sessions for one cwd.          |
+| `provider/session/list`  | Discover provider sessions, optionally globally or active. |
 | `agent/list`             | List known agents and live status.                         |
 | `agent/start`            | Start a provider session in an explicit working directory. |
 | `agent/attach`           | Subscribe to an agent owned by the broker.                 |
@@ -317,6 +317,13 @@ The initialization response includes:
 
 Deleting provider transcripts or terminating the durable broker is not an
 ordinary workspace action in the first release.
+
+`provider/session/list` accepts an optional canonical `cwd`, pagination, and
+an `active_only` flag. Omitting `cwd` queries all provider-visible projects.
+Each projected record contains only provider identity, opaque session ID,
+working directory, optional provider-supplied title, update timestamp, and normalized
+active/state fields. The response also reports whether cross-process activity
+observation was available. Prompt previews and transcript content are excluded.
 
 ### Agent summary
 
@@ -415,7 +422,7 @@ The target request surface is:
 | Method              | Purpose                                                  |
 | ------------------- | -------------------------------------------------------- |
 | `worker/initialize` | Negotiate bridge versions and capabilities.              |
-| `session/list`      | List Claude sessions visible to the configured SDK.      |
+| `session/list`      | List persisted or currently active Claude sessions.      |
 | `session/start`     | Create a client/session for an explicit canonical cwd.   |
 | `session/history`   | Read provider-backed history by a specific session ID.   |
 | `session/resume`    | Resume one specific provider session.                    |
@@ -580,7 +587,9 @@ maintaining a competing set.
 ### Views
 
 - **Agents:** provider, title, cwd/worktree, precise status, unread marker, and
-  pending-approval count.
+  pending-approval count. Broker-owned and external CLI sessions are grouped
+  in a directory tree; external sessions are marked read-only and de-duplicated
+  by provider session ID.
 - **Conversation:** user and assistant messages with incremental updates,
   compaction boundaries, and provider notices.
 - **Activity:** ordered tool, command, file, and usage events with expandable

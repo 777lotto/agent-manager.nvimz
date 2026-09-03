@@ -1,6 +1,9 @@
 //! Native Codex App Server JSONL boundary for the pinned CLI contract.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::env;
+use std::fs::{self, OpenOptions, TryLockError};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde_json::{Value, json};
@@ -128,8 +131,21 @@ impl CodexAppServer {
         Ok(outcome.result)
     }
 
-    pub async fn list_threads(&mut self, limit: u32) -> Result<RequestOutcome, CodexError> {
-        self.request("thread/list", json!({ "limit": limit })).await
+    pub async fn list_threads(
+        &mut self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "thread/list",
+            json!({
+                "cursor": cursor,
+                "limit": limit,
+                "sortKey": "updated_at",
+                "sortDirection": "desc"
+            }),
+        )
+        .await
     }
 
     pub async fn list_threads_for_directory(
@@ -364,6 +380,63 @@ impl CodexAppServer {
     }
 }
 
+#[must_use]
+pub(crate) fn default_thread_lock_directory() -> Option<PathBuf> {
+    match env::var_os("CODEX_HOME").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => Some(path.join("thread-writer-locks")),
+        Some(_) => None,
+        None => env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.join(".codex").join("thread-writer-locks")),
+    }
+}
+
+/// Returns thread IDs whose pinned Codex writer lock is currently held.
+///
+/// The lock directory is provider-owned and deliberately optional. Missing,
+/// unreadable, malformed, or unlocked entries fail open as an unavailable or
+/// inactive observation; Agent Manager never creates or mutates a lock file.
+pub(crate) fn active_thread_ids(directory: Option<&Path>) -> (HashSet<String>, bool) {
+    let Some(directory) = directory else {
+        return (HashSet::new(), false);
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return (HashSet::new(), false);
+    };
+    let mut active = HashSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(thread_id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".lock"))
+            .filter(|thread_id| uuid::Uuid::parse_str(thread_id).is_ok())
+        else {
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+            }
+            Err(TryLockError::WouldBlock) => {
+                active.insert(thread_id.to_owned());
+            }
+            Err(_) => {}
+        }
+    }
+    (active, true)
+}
+
 impl Drop for CodexAppServer {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -534,9 +607,15 @@ fn response_error(error: &Value) -> CodexError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::fs::{self, File};
+
     use serde_json::{Value, json};
 
-    use super::{ProviderEvent, ProviderEventKind, normalize_event, safe_server_request_response};
+    use super::{
+        ProviderEvent, ProviderEventKind, active_thread_ids, normalize_event,
+        safe_server_request_response,
+    };
 
     fn event(method: &str, params: Value) -> ProviderEvent {
         ProviderEvent {
@@ -622,5 +701,28 @@ mod tests {
             safe_server_request_response("mcpServer/elicitation/request"),
             Err("unsupported server request denied by Agent Manager")
         );
+    }
+
+    #[test]
+    fn observes_only_held_codex_writer_locks() {
+        let directory = std::env::temp_dir().join(format!(
+            "agent-manager-codex-lock-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).expect("create lock test directory");
+        let active_id = uuid::Uuid::new_v4().to_string();
+        let inactive_id = uuid::Uuid::new_v4().to_string();
+        let active_file =
+            File::create(directory.join(format!("{active_id}.lock"))).expect("create active lock");
+        active_file.lock().expect("hold active lock");
+        File::create(directory.join(format!("{inactive_id}.lock"))).expect("create inactive lock");
+        File::create(directory.join("not-a-thread.lock")).expect("create malformed lock");
+
+        let (active, available) = active_thread_ids(Some(&directory));
+
+        assert!(available);
+        assert_eq!(active, HashSet::from([active_id]));
+        active_file.unlock().expect("release active lock");
+        fs::remove_dir_all(directory).expect("remove lock test directory");
     }
 }

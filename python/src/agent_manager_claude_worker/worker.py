@@ -234,8 +234,31 @@ class Worker:
         directory = _optional_directory(params.get("directory"))
         limit = _optional_limit(params.get("limit"))
         offset = _offset(params.get("offset"))
-        sessions = await self._adapter.list_sessions(directory, limit, offset)
-        return {"sessions": sessions}
+        active_only = _optional_bool(params.get("active_only"), "active_only")
+        if active_only:
+            active, activity_available = await self._adapter.list_active_sessions(directory)
+            sessions, next_cursor = _page(active, limit, offset)
+            return {
+                "sessions": sessions,
+                "next_cursor": next_cursor,
+                "activity_available": activity_available,
+            }
+        sessions, active_result = await asyncio.gather(
+            self._adapter.list_sessions(directory, limit, offset),
+            self._adapter.list_active_sessions(directory),
+        )
+        active, activity_available = active_result
+        listed_count = len(sessions)
+        if activity_available:
+            sessions = _merge_active_sessions(sessions, active)
+        next_cursor = (
+            str(offset + listed_count) if limit is not None and listed_count >= limit else None
+        )
+        return {
+            "sessions": sessions,
+            "next_cursor": next_cursor,
+            "activity_available": activity_available,
+        }
 
     async def _history(self, params: JsonObject) -> JsonObject:
         session_id = require_string(params.get("session_id"), "session_id")
@@ -503,3 +526,51 @@ def _offset(value: JsonValue) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ProtocolFault(-32602, "offset must be a non-negative integer")
     return value
+
+
+def _optional_bool(value: JsonValue, name: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ProtocolFault(-32602, f"{name} must be a boolean")
+    return value
+
+
+def _page(
+    values: list[JsonValue], limit: int | None, offset: int
+) -> tuple[list[JsonValue], str | None]:
+    end = len(values) if limit is None else min(len(values), offset + limit)
+    page = values[offset:end]
+    return page, str(end) if end < len(values) else None
+
+
+def _merge_active_sessions(
+    sessions: list[JsonValue], active_sessions: list[JsonValue]
+) -> list[JsonValue]:
+    active_by_id = {
+        session_id: active
+        for active in active_sessions
+        if isinstance(active, dict) and (session_id := _session_id(active)) is not None
+    }
+    merged: list[JsonValue] = []
+    seen: set[str] = set()
+    for session in sessions:
+        if not isinstance(session, dict):
+            merged.append(session)
+            continue
+        record = dict(session)
+        session_id = _session_id(record)
+        if session_id is not None:
+            seen.add(session_id)
+            record["active"] = session_id in active_by_id
+        merged.append(record)
+    merged.extend(active for session_id, active in active_by_id.items() if session_id not in seen)
+    return merged
+
+
+def _session_id(record: JsonObject) -> str | None:
+    for key in ("session_id", "sessionId", "id", "uuid", "provider_session_id"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None

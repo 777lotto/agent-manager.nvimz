@@ -147,6 +147,49 @@ fn request(id: i64, method: &str, params: Value) -> Value {
     Value::Object(request)
 }
 
+async fn prove_global_active_session_discovery(provider: Provider) {
+    let mut harness = Harness::start();
+    harness
+        .send(request(
+            1,
+            "initialize",
+            json!({
+                "protocol_version": 1,
+                "client": { "name": "active-session-test", "version": "0.1.0" }
+            }),
+        ))
+        .await;
+    harness.response(1).await;
+    harness
+        .send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+    harness
+        .wait_for(|message| message["method"] == "broker/state")
+        .await;
+    harness
+        .send(request(
+            2,
+            "provider/session/list",
+            json!({
+                "provider": provider,
+                "cursor": null,
+                "limit": 1000,
+                "active_only": true
+            }),
+        ))
+        .await;
+    let discovered = harness.response(2).await;
+    let sessions = discovered["result"]["sessions"]
+        .as_array()
+        .expect("active session array");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["provider"], json!(provider));
+    assert_eq!(sessions[0]["cwd"], "/tmp");
+    assert_eq!(sessions[0]["active"], true);
+    assert_eq!(sessions[0]["state"], "running");
+    harness.shutdown(3).await;
+}
+
 #[allow(clippy::too_many_lines)]
 async fn prove_embedded_flow(provider: Provider) {
     let mut harness = Harness::start();
@@ -626,6 +669,16 @@ async fn claude_embedded_flow_streams_follow_up_steer_interrupt_and_replay() {
     completes_within(prove_embedded_flow(Provider::Claude))
         .await
         .expect("Claude embedded flow timed out");
+}
+
+#[tokio::test]
+async fn provider_discovery_lists_active_cli_sessions_without_a_cwd_filter() {
+    completes_within(async {
+        prove_global_active_session_discovery(Provider::Codex).await;
+        prove_global_active_session_discovery(Provider::Claude).await;
+    })
+    .await
+    .expect("global active session discovery timed out");
 }
 
 #[tokio::test]

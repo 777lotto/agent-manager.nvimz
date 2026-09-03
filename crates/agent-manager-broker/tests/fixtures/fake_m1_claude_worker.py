@@ -85,11 +85,13 @@ def main() -> None:
                 "sessions": [
                     {
                         "session_id": "session-resumable",
-                        "cwd": opening.get("params", {}).get("directory", "/tmp"),
+                        "cwd": opening.get("params", {}).get("directory") or "/tmp",
                         "summary": "Resumable Claude session",
                         "last_modified": 1,
+                        "active": True,
                     }
-                ]
+                ],
+                "activity_available": True,
             },
         )
         shutdown = read()

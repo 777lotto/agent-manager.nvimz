@@ -19,7 +19,7 @@ async fn proves_initialize_history_turn_event_and_approval_flow() {
     let initialized = server.initialize().await.expect("initialize");
     assert_eq!(initialized["platformOs"], "linux");
 
-    let listed = server.list_threads(10).await.expect("list threads");
+    let listed = server.list_threads(None, 10).await.expect("list threads");
     assert_eq!(
         listed.result["data"].as_array().expect("data array").len(),
         0

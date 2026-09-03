@@ -55,6 +55,76 @@ local function usage_lines(value, prefix, lines, depth)
   end
 end
 
+local function sorted_keys(values)
+  local keys = vim.tbl_keys(values)
+  table.sort(keys, function(left, right)
+    return tostring(left) < tostring(right)
+  end)
+  return keys
+end
+
+local function directory_parts(path, home)
+  local normalized = tostring(path or ""):gsub("\\", "/")
+  normalized = normalized ~= "/" and normalized:gsub("/+$", "") or normalized
+  local normalized_home = tostring(home or ""):gsub("\\", "/"):gsub("/+$", "")
+  local root = "/"
+  local remainder = normalized:gsub("^/+", "")
+  if normalized_home ~= "" and (normalized == normalized_home or normalized:sub(1, #normalized_home + 1) == normalized_home .. "/") then
+    root = "~"
+    remainder = normalized:sub(#normalized_home + 1):gsub("^/+", "")
+  else
+    local drive, rest = normalized:match("^([A-Za-z]:)/?(.*)$")
+    if drive then
+      root = drive
+      remainder = rest
+    elseif normalized:sub(1, 1) ~= "/" then
+      root = "(unknown)"
+      remainder = normalized
+    end
+  end
+  local parts = {}
+  for part in remainder:gmatch("[^/]+") do
+    table.insert(parts, part)
+  end
+  return root, parts
+end
+
+local function session_tree(sessions, home)
+  local roots = {}
+  for _, session in ipairs(sessions) do
+    local root_name, parts = directory_parts(session.cwd, home)
+    roots[root_name] = roots[root_name] or { directories = {}, sessions = {} }
+    local node = roots[root_name]
+    for _, part in ipairs(parts) do
+      node.directories[part] = node.directories[part]
+        or { directories = {}, sessions = {} }
+      node = node.directories[part]
+    end
+    table.insert(node.sessions, session)
+  end
+  return roots
+end
+
+local function ordered_node_items(node)
+  local items = {}
+  for _, name in ipairs(sorted_keys(node.directories)) do
+    table.insert(items, { kind = "directory", name = name, node = node.directories[name] })
+  end
+  table.sort(node.sessions, function(left, right)
+    if left.provider ~= right.provider then
+      return tostring(left.provider) < tostring(right.provider)
+    end
+    if left.title ~= right.title then
+      return tostring(left.title) < tostring(right.title)
+    end
+    return tostring(left.key) < tostring(right.key)
+  end)
+  for _, session in ipairs(node.sessions) do
+    table.insert(items, { kind = "session", session = session })
+  end
+  return items
+end
+
 local function set_window_options(window, wrap, pane)
   vim.wo[window].number = false
   vim.wo[window].relativenumber = false
@@ -392,37 +462,80 @@ function View:_set_lines(name, lines, highlights)
 end
 
 function View:_render_agents()
-  local lines = { " AGENTS", " broker: " .. inline(self.model.client_state), "" }
+  local sessions = self.model:session_list()
+  local lines = {
+    " AGENTS · BY DIRECTORY",
+    string.format(" broker: %s · sessions: %d", inline(self.model.client_state), #sessions),
+    "",
+  }
   local highlights = {
     { line = 1, group = "AgentManagerTitle" },
     { line = 2, group = "AgentManagerMuted" },
   }
   self.agent_rows = {}
-  local agents = self.model:list()
-  if #agents == 0 then
-    table.insert(lines, " No agents. Press n to start one.")
+  if #sessions == 0 then
+    table.insert(lines, " No sessions. Press n to start one.")
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
-  for _, agent in ipairs(agents) do
-    local selected = agent.id == self.model.selected_agent_id and ">" or " "
-    local provider = string.upper(inline(agent.provider))
-    local pending = #self.model:pending(agent.id)
-    local marker = pending > 0 and (" !" .. tostring(pending)) or ""
-    local line = string.format(
-      "%s %-6s %-11s %s%s",
-      selected,
-      provider,
-      inline(agent.state),
-      inline(agent.title),
-      marker
-    )
-    table.insert(lines, line)
-    self.agent_rows[#lines] = agent.id
-    table.insert(highlights, {
-      line = #lines,
-      group = agent.provider == "claude" and "AgentManagerProviderClaude"
-        or "AgentManagerProviderCodex",
-    })
+
+  local function render_node(node, prefix)
+    local items = ordered_node_items(node)
+    for index, item in ipairs(items) do
+      local last = index == #items
+      local connector = last and "└─ " or "├─ "
+      if item.kind == "directory" then
+        table.insert(lines, prefix .. connector .. inline(item.name))
+        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+        render_node(item.node, prefix .. (last and "   " or "│  "))
+      else
+        local session = item.session
+        local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
+        local provider = string.upper(inline(session.provider))
+        local pending = session.managed and #self.model:pending(session.id) or 0
+        local marker = pending > 0 and (" !" .. tostring(pending)) or ""
+        table.insert(
+          lines,
+          string.format(
+            "%s%s%s %s · %s · %s%s",
+            prefix,
+            connector,
+            selected,
+            provider,
+            inline(session.state),
+            inline(session.title),
+            marker
+          )
+        )
+        if session.managed then
+          self.agent_rows[#lines] = session.id
+        end
+        table.insert(highlights, {
+          line = #lines,
+          group = session.provider == "claude" and "AgentManagerProviderClaude"
+            or "AgentManagerProviderCodex",
+        })
+      end
+    end
+  end
+
+  local tree = session_tree(sessions, vim.env.HOME)
+  for _, root_name in ipairs(sorted_keys(tree)) do
+    table.insert(lines, " " .. inline(root_name))
+    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+    render_node(tree[root_name], " ")
+  end
+
+  if #self.model:external_session_list() > 0 then
+    table.insert(lines, "")
+    table.insert(lines, " CLI sessions are read-only here. Press r to refresh.")
+    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+  end
+  for _, provider in ipairs({ "codex", "claude" }) do
+    local activity = self.model.external_activity[provider]
+    if activity and (activity.error or not activity.available) then
+      table.insert(lines, " ! " .. provider .. " CLI session discovery unavailable")
+      table.insert(highlights, { line = #lines, group = "AgentManagerStatusFailure" })
+    end
   end
   local selected = self.model:selected_agent()
   if selected then
@@ -691,7 +804,7 @@ function View:show_help()
     " A       archive selected inactive agent",
     " c       add explicit editor context",
     " D       show workspace diff or dirty-buffer conflict",
-    " r       refresh agent state",
+    " r       refresh agents and CLI sessions",
     " <Tab>   cycle panes",
     " <CR>    select agent or answer focused question",
     " q       close workspace",

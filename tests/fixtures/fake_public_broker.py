@@ -221,6 +221,40 @@ class Broker:
             respond(request, {"agents": [agent(record) for record in self.records]})
         elif method == "provider/session/list":
             provider = params["provider"]
+            if params.get("active_only"):
+                sessions = {
+                    "codex": [
+                        {
+                            "provider": "codex",
+                            "provider_session_id": "codex-cli-running",
+                            "cwd": "/workspace/repos/alpha/api",
+                            "title": "Codex terminal session",
+                            "updated_at": "2026-09-01T00:00:02Z",
+                            "active": True,
+                            "state": "running",
+                        }
+                    ],
+                    "claude": [
+                        {
+                            "provider": "claude",
+                            "provider_session_id": "claude-cli-running",
+                            "cwd": "/workspace/repos/alpha/web",
+                            "title": "Claude terminal session",
+                            "updated_at": "2026-09-01T00:00:01Z",
+                            "active": True,
+                            "state": "running",
+                        }
+                    ],
+                }
+                respond(
+                    request,
+                    {
+                        "sessions": sessions[provider],
+                        "cursor": None,
+                        "activity_available": True,
+                    },
+                )
+                return True
             respond(
                 request,
                 {
@@ -234,6 +268,7 @@ class Broker:
                         }
                     ],
                     "cursor": None,
+                    "activity_available": True,
                 },
             )
         elif method == "agent/start":
