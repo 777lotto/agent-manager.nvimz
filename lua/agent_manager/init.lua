@@ -199,8 +199,8 @@ function M.setup(opts)
     end,
   })
   local actions = {
-    start = function()
-      M.start_ui()
+    start = function(context)
+      M.start_ui(context)
     end,
     prompt = function()
       M.prompt_ui()
@@ -260,6 +260,7 @@ function M.open()
   if not ok then
     return nil, err
   end
+  runtime.view:add_directory_hint(project_root())
   runtime.view:open()
   local started, start_err = runtime.client:start(function(ready_err)
     if ready_err then
@@ -545,6 +546,10 @@ function M.workspaces(callback)
         report(rpc_err)
         finish(callback, nil, rpc_err)
         return
+      end
+      if result and result.repositories then
+        runtime.model:apply_workspace_inventory(result.repositories)
+        runtime.view:schedule_render()
       end
       finish(callback, result, nil)
     end)
@@ -1091,16 +1096,74 @@ local function load_workspace_inventory(callback)
   end)
 end
 
-local function start_new_managed_task(provider)
-  load_workspace_inventory(function(repositories)
-    vim.ui.select(repositories, {
-      prompt = "Repository",
-      format_item = repository_label,
-    }, function(repository)
-      if not repository then
-        return
+local function schedule_ui(callback)
+  local owner = runtime
+  vim.schedule(function()
+    if runtime == owner then
+      callback()
+    end
+  end)
+end
+
+local function normalized_path(path)
+  if type(path) ~= "string" or path == "" then
+    return nil
+  end
+  local normalized = vim.fs.normalize(path):gsub("/+$", "")
+  return normalized == "" and "/" or normalized
+end
+
+local function path_within(path, root)
+  path = normalized_path(path)
+  root = normalized_path(root)
+  if not path or not root then
+    return false
+  end
+  return root == "/" or path == root or path:sub(1, #root + 1) == root .. "/"
+end
+
+local function contextual_repository(repositories, context)
+  context = type(context) == "table" and context or {}
+  if type(context.repository) == "string" then
+    for _, repository in ipairs(repositories) do
+      if repository.slug == context.repository then
+        return repository
       end
-      vim.ui.input({ prompt = "Stable task ID (lowercase kebab-case): " }, function(task_id)
+    end
+  end
+  local selected = nil
+  local selected_length = -1
+  for _, repository in ipairs(repositories) do
+    local roots = { repository.canonical_path }
+    if repository.worktree_root ~= nil and repository.worktree_root ~= vim.NIL then
+      table.insert(roots, repository.worktree_root)
+    end
+    for _, root in ipairs(roots) do
+      if type(root) == "string" and path_within(context.cwd, root) and #root > selected_length then
+        selected = repository
+        selected_length = #root
+      end
+    end
+  end
+  return selected
+end
+
+local function started_notice(provider, result)
+  local agent = result and result.agent
+  if not agent then
+    return
+  end
+  vim.notify(
+    string.format("Agent Manager: %s is ready in %s — press p to prompt", provider, agent.cwd)
+  )
+end
+
+local function start_new_managed_task(provider, context)
+  local function choose_task_id(repository)
+    schedule_ui(function()
+      vim.ui.input({
+        prompt = string.format("New %s task in %s · stable task ID: ", provider, repository.slug),
+      }, function(task_id)
         if not task_id or task_id == "" then
           return
         end
@@ -1108,20 +1171,65 @@ local function start_new_managed_task(provider)
           vim.notify("Agent Manager: task ID must use lowercase kebab-case", vim.log.levels.ERROR)
           return
         end
-        M.start({
-          provider = provider,
-          managed_workspace = {
-            repository = repository.slug,
-            task_id = task_id,
-            resume = false,
-          },
-        })
+        schedule_ui(function()
+          vim.notify(
+            string.format(
+              "Agent Manager: starting %s in isolated task %s/%s…",
+              provider,
+              repository.slug,
+              task_id
+            )
+          )
+          local ok, start_err = M.start({
+            provider = provider,
+            managed_workspace = {
+              repository = repository.slug,
+              task_id = task_id,
+              resume = false,
+            },
+          }, function(result, err)
+            if not err then
+              started_notice(provider, result)
+            end
+          end)
+          if not ok and start_err then
+            report(start_err)
+          end
+        end)
       end)
+    end)
+  end
+
+  local cached = runtime.model:workspace_list()
+  local known = contextual_repository(cached, context)
+  if not known and valid_managed_identifier(context and context.repository, true) then
+    known = { slug = context.repository }
+  end
+  if known then
+    choose_task_id(known)
+    return
+  end
+
+  vim.notify("Agent Manager: loading registered repositories for " .. provider .. "…")
+  load_workspace_inventory(function(repositories)
+    local repository = contextual_repository(repositories, context)
+    if repository then
+      choose_task_id(repository)
+      return
+    end
+    vim.ui.select(repositories, {
+      prompt = "New " .. provider .. " task · choose repository",
+      format_item = repository_label,
+    }, function(selected)
+      if selected then
+        choose_task_id(selected)
+      end
     end)
   end)
 end
 
 local function resume_managed_task(provider)
+  vim.notify("Agent Manager: loading managed tasks for " .. provider .. "…")
   load_workspace_inventory(function(repositories)
     local tasks = {}
     for _, repository in ipairs(repositories) do
@@ -1136,48 +1244,91 @@ local function resume_managed_task(provider)
       return
     end
     vim.ui.select(tasks, {
-      prompt = "Managed task",
+      prompt = "Resume " .. provider .. " · choose managed task",
       format_item = task_label,
     }, function(task)
       if task then
-        M.start({
-          provider = provider,
-          managed_workspace = {
-            repository = task.repository,
-            task_id = task.task_id,
-            resume = true,
-          },
-        })
+        schedule_ui(function()
+          vim.notify(
+            string.format(
+              "Agent Manager: resuming %s in isolated task %s/%s…",
+              provider,
+              task.repository,
+              task.task_id
+            )
+          )
+          local ok, start_err = M.start({
+            provider = provider,
+            managed_workspace = {
+              repository = task.repository,
+              task_id = task.task_id,
+              resume = true,
+            },
+          }, function(result, err)
+            if not err then
+              started_notice(provider, result)
+            end
+          end)
+          if not ok and start_err then
+            report(start_err)
+          end
+        end)
       end
     end)
   end)
 end
 
-function M.start_ui()
+function M.start_ui(context)
   if not ensure_setup() then
     return
   end
+  context = type(context) == "table" and vim.deepcopy(context) or {}
   if runtime.config.broker.mode == "embedded" and has_live_agent() then
     vim.notify("Agent Manager embedded mode supports one live agent", vim.log.levels.WARN)
     return
   end
-  vim.ui.select({ "codex", "claude" }, { prompt = "Agent provider" }, function(provider)
-    if not provider then
-      return
-    end
+  local function choose_workspace(provider)
     local actions = { "New isolated task", "Resume isolated task" }
     if runtime.config.worktrees.allow_shared then
       table.insert(actions, "Shared checkout (admin-enabled)")
     end
-    vim.ui.select(actions, { prompt = "Workspace" }, function(action)
+    vim.ui.select(actions, { prompt = "Start " .. provider .. " · choose workspace" }, function(action)
       if action == "New isolated task" then
-        start_new_managed_task(provider)
+        schedule_ui(function()
+          start_new_managed_task(provider, context)
+        end)
       elseif action == "Resume isolated task" then
-        resume_managed_task(provider)
+        schedule_ui(function()
+          resume_managed_task(provider)
+        end)
       elseif action == "Shared checkout (admin-enabled)" then
-        M.start({ provider = provider, cwd = project_root(), workspace_strategy = "shared" })
+        local cwd = context.cwd or project_root()
+        vim.notify(string.format("Agent Manager: starting %s in shared checkout %s…", provider, cwd))
+        local ok, start_err = M.start({ provider = provider, cwd = cwd, workspace_strategy = "shared" }, function(
+          result,
+          err
+        )
+          if not err then
+            started_notice(provider, result)
+          end
+        end)
+        if not ok and start_err then
+          report(start_err)
+        end
       end
     end)
+  end
+
+  if context.provider == "codex" or context.provider == "claude" then
+    choose_workspace(context.provider)
+    return
+  end
+  vim.ui.select({ "codex", "claude" }, { prompt = "Start agent · choose provider" }, function(provider)
+    if provider then
+      schedule_ui(function()
+        choose_workspace(provider)
+      end)
+    end
   end)
 end
 
@@ -1275,12 +1426,31 @@ local function input_ui(prompt, callback)
 end
 
 function M.prompt_ui(initial)
+  if not ensure_setup() then
+    return
+  end
+  if not selected_agent() then
+    local err = structured_error(
+      "input",
+      "no agent is selected — press 1, place the cursor on a [repo] or [cwd] directory, then press n"
+    )
+    report(err)
+    return nil, err
+  end
   if initial and initial ~= "" then
-    return M.prompt(nil, initial)
+    local ok, err = M.prompt(nil, initial)
+    if not ok and err then
+      report(err)
+    end
+    return ok, err
   end
   input_ui("Prompt: ", function(text)
-    M.prompt(nil, text)
+    local ok, err = M.prompt(nil, text)
+    if not ok and err then
+      report(err)
+    end
   end)
+  return true
 end
 
 function M.steer_ui(initial)

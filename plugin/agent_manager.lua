@@ -12,12 +12,12 @@ vim.api.nvim_create_user_command("AgentManager", function()
 end, { desc = "Open the Agent Manager workspace" })
 
 vim.api.nvim_create_user_command("AgentManagerStart", function(args)
-  local provider = args.args ~= "" and args.args or "codex"
+  local cwd = vim.fs.root(0, { ".git" }) or vim.uv.cwd()
+  local provider = args.args ~= "" and args.args or nil
   manager().open()
-  manager().start({
+  manager().start_ui({
     provider = provider,
-    cwd = vim.fs.root(0, { ".git" }) or vim.uv.cwd(),
-    workspace_strategy = "shared",
+    cwd = cwd,
   })
 end, {
   nargs = "?",

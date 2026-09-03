@@ -80,6 +80,7 @@ function Model.new(opts)
     external_sessions = {},
     external_order = {},
     external_activity = {},
+    workspace_repositories = {},
     selected_agent_id = nil,
     events = {},
     conversations = {},
@@ -243,6 +244,34 @@ function Model:clear_external_sessions()
   self.external_order = {}
   self.external_activity = {}
   self:_changed("external_sessions")
+end
+
+function Model:apply_workspace_inventory(repositories)
+  if type(repositories) ~= "table" then
+    return false
+  end
+  local projected = {}
+  for _, repository in ipairs(repositories) do
+    if
+      type(repository) == "table"
+      and type(repository.slug) == "string"
+      and repository.slug ~= ""
+      and type(repository.canonical_path) == "string"
+      and repository.canonical_path ~= ""
+    then
+      table.insert(projected, deep_copy(repository))
+    end
+  end
+  table.sort(projected, function(left, right)
+    return left.slug < right.slug
+  end)
+  self.workspace_repositories = projected
+  self:_changed("workspace_inventory")
+  return true
+end
+
+function Model:workspace_list()
+  return deep_copy(self.workspace_repositories)
 end
 
 function Model:apply_event(event)
@@ -548,6 +577,7 @@ function Model:snapshot()
     agents = self:list(),
     external_sessions = self:external_session_list(),
     external_activity = self.external_activity,
+    workspace_repositories = self:workspace_list(),
     selected_agent_id = self.selected_agent_id,
     events = self.events,
     conversations = self.conversations,

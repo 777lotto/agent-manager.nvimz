@@ -68,7 +68,6 @@ local palette = {
   green = token("ux.foundation.palette.green", "#A6DA95"),
   yellow = token("ux.foundation.palette.yellow", "#EED49F"),
   red = token("ux.foundation.palette.red", "#ED8796"),
-  mauve = token("ux.foundation.palette.mauve", "#C6A0F6"),
   peach = token("ux.foundation.palette.peach", "#F5A97F"),
 }
 
@@ -113,8 +112,17 @@ local COMPONENTS = {
     id = "agent_list",
     label = "Agent List",
     roles = {
-      role("provider_codex", "Codex Provider", "AgentManagerProviderCodex", "Identifier", palette.blue),
-      role("provider_claude", "Claude Provider", "AgentManagerProviderClaude", "Type", palette.mauve),
+      role("provider_codex", "Codex Provider", "AgentManagerProviderCodex", "DiagnosticInfo", palette.blue, {
+        bold = true,
+      }),
+      role(
+        "provider_claude",
+        "Claude Provider",
+        "AgentManagerProviderClaude",
+        "DiagnosticWarn",
+        palette.peach,
+        { bold = true }
+      ),
     },
   },
   {

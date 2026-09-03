@@ -122,22 +122,43 @@ Then open Neovim and use:
 :AgentManagerHealth
 ```
 
-The workspace also maps `n` to start, `h` to attach or resume, `p` to prompt,
-`s` to steer, `x` to confirm an interrupt, `a`/`d` to decide only a focused
-human request, `<CR>` to answer a focused question, `c` to queue explicit
-context, `f` to fork, `A` to archive an inactive agent, `D` to inspect
-diffs/conflicts, `<Tab>` to cycle panes, and `q` to close only the view. Wide
-displays show agents, conversation, and activity together; medium and narrow
-displays cycle the same buffers without losing model state.
+To start a session from the workspace:
 
-The Agents pane groups broker-owned agents and currently active Codex/Claude
-CLI sessions in a directory tree. CLI sessions are discovered across the AI
-container when the workspace opens and whenever `r` refreshes the view. They
-are labeled `cli-running` and are read-only in Agent Manager while their
-original terminal owns them; after a session stops, `h` can resume its
-provider history for the current project. Set `ui.external_sessions = false`
-to disable discovery, or lower `ui.external_session_limit` from its default of
-1000 to cap each provider query.
+1. Press `1` to focus Agents and place the cursor on the desired directory.
+   The project where Agent Manager was opened is marked `[cwd]`; registered or
+   already managed repositories are marked `[repo]`.
+2. Press `n`, choose Codex or Claude, then choose `New isolated task`.
+3. Enter the stable lowercase task ID. Agent Manager creates or resumes the
+   lifecycle-managed worktree for that repository and reports when the agent is
+   ready.
+4. Press `2`, then `p`, to compose the first prompt.
+
+Starting from another pane still works; Agent Manager asks which registered
+repository to use. `:AgentManagerStart [codex|claude]` uses the current project
+as the directory hint and follows the same managed-workspace flow. Prompting
+without a selected agent now explains how to start one instead of accepting
+input that cannot be sent.
+
+The workspace maps `1`, `2`, and `3` directly to Agents, Conversation, and
+Activity. `<Tab>` and `<S-Tab>` still cycle panes. It also maps `n` to start,
+`h` to attach or resume, `p` to prompt, `s` to steer, `x` to confirm an
+interrupt, `a`/`d` to decide only a focused human request, `<CR>` to answer a
+focused question, `c` to queue explicit context, `f` to fork, `A` to archive an
+inactive agent, `D` to inspect diffs/conflicts, and `q` to close only the view.
+Wide displays show agents, conversation, and activity together; medium and
+narrow displays switch the same buffers without losing model state.
+
+The Agents pane groups registered repositories, broker-owned agents, and
+currently active Codex/Claude CLI sessions in a directory tree. Codex rows use
+a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
+identity remains clear even when a theme does not preserve the intended color.
+CLI sessions are discovered across the AI container when the workspace opens
+and whenever `r` refreshes the view. They are labeled `cli-running` and are
+read-only in Agent Manager while their original terminal owns them; after a
+session stops, `h` can resume its provider history for the current project. Set
+`ui.external_sessions = false` to disable discovery, or lower
+`ui.external_session_limit` from its default of 1000 to cap each provider
+query.
 
 ### Runtime safety boundary
 
@@ -223,7 +244,7 @@ The promoted schema-v1 integrations are:
   segment extension, so external owners consume Agent Manager's non-blocking
   cache when desired.
 - UX Panels is not yet available. The existing native view remains the narrow
-backend and health reports that decision explicitly.
+  backend and health reports that decision explicitly.
 
 ### Managed worktrees and administrator policy
 
