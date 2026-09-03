@@ -270,8 +270,9 @@ Cached consumers can call `status()`, `running_count()`, or
 `User AgentManagerStateChanged` event carrying only those counts and stable
 agent IDs—never prompt text or tool payloads.
 
-Agent Manager remains a separate repository and will not be added to
-`nvim-config` until its implementation acceptance gates pass.
+Agent Manager remains a separate repository. `nvim-config` consumes an exact
+tested commit from `bluff`; the M5 release and durable-service gates remain the
+authority for packaged runtime adoption.
 
 ## Repository layout
 
@@ -290,10 +291,16 @@ ops/m4-durable-service/            supervised lifecycle apply/undo/verify phase
 
 ## Repository workflow
 
-- `bet` is production/default.
-- `bluff` is persistent integration.
-- focused branches merge into `bluff`; verified milestones promote from
-  `bluff` to `bet`.
+- `bluff` is the default and only long-lived branch.
+- focused branches start from and merge into `bluff`.
+- signed `vX.Y.Z` tags and GitHub Releases mark tested `bluff` commits.
 
 Agent work uses broker-managed `agent/**` branches and pull requests into
-`bluff`. Verified milestones promote from `bluff` to `bet`.
+`bluff`. Brokered `zemrip-ai` commits use the expected unsigned agent identity;
+workflow changes require an operator-approved one-use ticket. The broker cannot
+push `bluff` or tags, publish Releases, or administer repository secrets.
+
+Publishing a stable GitHub Release can notify `nvim-config` to test and pin the
+exact tagged commit. The operator provisions the repository-scoped
+`NVIM_CONFIG_DISPATCH_TOKEN`; the credential-free agent plane never receives
+its value.
