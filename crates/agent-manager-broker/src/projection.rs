@@ -1,0 +1,251 @@
+//! Provider metadata/history projection and explicit editor-context rendering.
+
+use serde_json::{Value, json};
+
+use crate::protocol::Provider;
+
+pub(crate) fn provider_sessions(provider: Provider, result: &Value) -> Value {
+    let records = match provider {
+        Provider::Codex => result.get("data"),
+        Provider::Claude => result.get("sessions"),
+    }
+    .and_then(Value::as_array)
+    .cloned()
+    .unwrap_or_default();
+    let sessions = records
+        .iter()
+        .filter_map(|record| session_record(provider, record))
+        .collect::<Vec<_>>();
+    let cursor = match provider {
+        Provider::Codex => result.get("nextCursor"),
+        Provider::Claude => result
+            .get("next_cursor")
+            .or_else(|| result.get("nextCursor")),
+    }
+    .cloned()
+    .unwrap_or(Value::Null);
+    json!({ "sessions": sessions, "cursor": cursor })
+}
+
+pub(crate) fn history(provider: Provider, result: &Value) -> Value {
+    let messages = match provider {
+        Provider::Codex => codex_history(result),
+        Provider::Claude => claude_history(result),
+    };
+    json!({ "messages": messages, "cursor": null })
+}
+
+pub(crate) fn render_input(text: &str, attachments: &[Value]) -> Result<String, serde_json::Error> {
+    if attachments.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let context = serde_json::to_string(attachments)?;
+    Ok(format!(
+        "<agent-manager-context format=\"json\">\n{context}\n</agent-manager-context>\n\n{text}"
+    ))
+}
+
+fn session_record(provider: Provider, record: &Value) -> Option<Value> {
+    let provider_session_id = first_string(
+        record,
+        &["id", "session_id", "sessionId", "provider_session_id"],
+    )?;
+    let cwd = first_string(record, &["cwd", "directory", "project_path"]).unwrap_or("");
+    let explicit_title = first_string(record, &["name", "title", "summary"]);
+    let short_id = provider_session_id
+        .char_indices()
+        .nth(12)
+        .map_or(provider_session_id, |(index, _)| {
+            &provider_session_id[..index]
+        });
+    let title = explicit_title
+        .filter(|title| !title.is_empty())
+        .map_or_else(|| format!("{provider} {short_id}"), str::to_owned);
+    let updated_at = first_value(
+        record,
+        &["updatedAt", "updated_at", "last_modified", "modified_at"],
+    )
+    .cloned()
+    .unwrap_or(Value::Null);
+    Some(json!({
+        "provider": provider,
+        "provider_session_id": provider_session_id,
+        "cwd": cwd,
+        "title": title,
+        "updated_at": updated_at,
+    }))
+}
+
+fn codex_history(result: &Value) -> Vec<Value> {
+    let Some(turns) = result
+        .get("thread")
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut messages = Vec::new();
+    for turn in turns {
+        let turn_id = turn.get("id").and_then(Value::as_str);
+        let Some(items) = turn.get("items").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            let role = match item_type {
+                "userMessage" => "user",
+                "agentMessage" => "assistant",
+                _ => continue,
+            };
+            let Some(text) = text_from(item) else {
+                continue;
+            };
+            messages.push(json!({
+                "id": item.get("id").and_then(Value::as_str),
+                "turn_id": turn_id,
+                "role": role,
+                "text": text,
+            }));
+        }
+    }
+    messages
+}
+
+fn claude_history(result: &Value) -> Vec<Value> {
+    result
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            let role = first_string(record, &["role", "type"])
+                .and_then(normalized_role)
+                .or_else(|| {
+                    record
+                        .get("message")
+                        .and_then(|message| first_string(message, &["role"]))
+                        .and_then(normalized_role)
+                })?;
+            let text = text_from(record)?;
+            let id = first_string(record, &["id", "uuid", "message_id"])
+                .map_or_else(|| format!("history-{index}"), str::to_owned);
+            Some(json!({ "id": id, "role": role, "text": text }))
+        })
+        .collect()
+}
+
+fn normalized_role(role: &str) -> Option<&'static str> {
+    let lowercase = role.to_ascii_lowercase();
+    if lowercase.contains("assistant") {
+        Some("assistant")
+    } else if lowercase.contains("user") || lowercase == "human" {
+        Some("user")
+    } else if lowercase.contains("system") {
+        Some("system")
+    } else {
+        None
+    }
+}
+
+fn text_from(value: &Value) -> Option<String> {
+    text_from_depth(value, 0)
+}
+
+fn text_from_depth(value: &Value, depth: usize) -> Option<String> {
+    if depth > 12 {
+        return None;
+    }
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .filter_map(|value| text_from_depth(value, depth + 1))
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(""))
+        }
+        Value::Object(object) => {
+            for key in ["text", "content", "message", "delta"] {
+                if let Some(text) = object
+                    .get(key)
+                    .and_then(|value| text_from_depth(value, depth + 1))
+                {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn first_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    first_value(value, keys).and_then(Value::as_str)
+}
+
+fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| value.get(*key))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{history, provider_sessions, render_input};
+    use crate::protocol::Provider;
+
+    #[test]
+    fn projects_provider_metadata_without_transcript_previews() {
+        let projected = provider_sessions(
+            Provider::Codex,
+            &json!({
+                "data": [{
+                    "id": "thread-1234567890",
+                    "cwd": "/tmp/project",
+                    "name": null,
+                    "preview": "sensitive first prompt",
+                    "updatedAt": 10
+                }],
+                "nextCursor": "next"
+            }),
+        );
+        assert_eq!(
+            projected["sessions"][0]["provider_session_id"],
+            "thread-1234567890"
+        );
+        assert_eq!(projected["cursor"], "next");
+        assert!(!projected.to_string().contains("sensitive first prompt"));
+    }
+
+    #[test]
+    fn projects_codex_turn_messages() {
+        let projected = history(
+            Provider::Codex,
+            &json!({
+                "thread": { "turns": [{
+                    "id": "turn-1",
+                    "items": [
+                        { "id": "u1", "type": "userMessage", "content": [{ "text": "hello" }] },
+                        { "id": "a1", "type": "agentMessage", "text": "hi" }
+                    ]
+                }] }
+            }),
+        );
+        assert_eq!(projected["messages"][0]["role"], "user");
+        assert_eq!(projected["messages"][1]["text"], "hi");
+    }
+
+    #[test]
+    fn renders_context_as_an_explicit_one_shot_prefix() {
+        let rendered = render_input(
+            "review this",
+            &[json!({ "kind": "range", "payload": { "path": "/tmp/a", "text": "x" } })],
+        )
+        .expect("render input");
+        assert!(rendered.contains("<agent-manager-context"));
+        assert!(rendered.ends_with("review this"));
+    }
+}

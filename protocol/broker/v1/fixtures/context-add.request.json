@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "agent/context/add",
+  "params": {
+    "agent_id": "a4e9d943-2310-42fd-b470-6f63c83f0181",
+    "context": {
+      "kind": "range",
+      "payload": {
+        "path": "/workspace/project/lua/example.lua",
+        "filetype": "lua",
+        "unsaved": true,
+        "changedtick": 9,
+        "start_line": 2,
+        "end_line": 4,
+        "text": "local value = 1"
+      }
+    }
+  }
+}

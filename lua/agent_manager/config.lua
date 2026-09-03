@@ -29,12 +29,27 @@ local function default_claude_python(root)
   return executable(python) and python or nil
 end
 
+local function default_socket()
+  local runtime = vim.env.XDG_RUNTIME_DIR
+  if type(runtime) ~= "string" or runtime == "" or runtime:sub(1, 1) ~= "/" then
+    return nil
+  end
+  return vim.fs.normalize(runtime .. "/agent-manager/broker.sock")
+end
+
 local function defaults()
   local root = source_root()
   return {
     broker = {
       mode = "embedded",
       command = default_broker_command(root),
+      socket = default_socket(),
+      reconnect = {
+        initial_delay = 100,
+        max_delay = 5000,
+        max_attempts = 8,
+        jitter = 0.2,
+      },
     },
     providers = {
       codex = {},
@@ -49,6 +64,24 @@ local function defaults()
     },
     root = root,
   }
+end
+
+local function reconnect_error(reconnect)
+  if type(reconnect) ~= "table" then
+    return "broker.reconnect must be a table"
+  end
+  for _, key in ipairs({ "initial_delay", "max_delay", "max_attempts" }) do
+    local value = reconnect[key]
+    if type(value) ~= "number" or value < 1 or value % 1 ~= 0 then
+      return "broker.reconnect." .. key .. " must be a positive integer"
+    end
+  end
+  if reconnect.max_delay < reconnect.initial_delay then
+    return "broker.reconnect.max_delay must be at least initial_delay"
+  end
+  if type(reconnect.jitter) ~= "number" or reconnect.jitter < 0 or reconnect.jitter > 1 then
+    return "broker.reconnect.jitter must be between 0 and 1"
+  end
 end
 
 local function command_error(command)
@@ -71,15 +104,38 @@ function M.resolve(opts)
   if opts.broker and opts.broker.command then
     config.broker.command = vim.deepcopy(opts.broker.command)
   end
-  if config.broker.mode ~= "embedded" then
+  if config.broker.mode ~= "embedded" and config.broker.mode ~= "durable" then
     return nil, {
       kind = "configuration",
-      message = "M1 supports broker.mode = 'embedded' only",
+      message = "broker.mode must be 'embedded' or 'durable'",
     }
   end
   local message = command_error(config.broker.command)
   if message then
     return nil, { kind = "configuration", message = message }
+  end
+  if config.broker.mode == "durable" then
+    if config.broker.command[1]:sub(1, 1) ~= "/" or not executable(config.broker.command[1]) then
+      return nil, {
+        kind = "configuration",
+        message = "durable broker.command must begin with an absolute executable path",
+      }
+    end
+    if
+      type(config.broker.socket) ~= "string"
+      or config.broker.socket == ""
+      or config.broker.socket:sub(1, 1) ~= "/"
+    then
+      return nil, {
+        kind = "configuration",
+        message = "durable broker.socket must be an absolute path",
+      }
+    end
+    config.broker.socket = vim.fs.normalize(config.broker.socket)
+    local reconnect_message = reconnect_error(config.broker.reconnect)
+    if reconnect_message then
+      return nil, { kind = "configuration", message = reconnect_message }
+    end
   end
   local python = config.providers.claude.python
   if python ~= nil and python ~= false and (type(python) ~= "string" or python == "") then

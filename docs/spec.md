@@ -2,8 +2,8 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M1 embedded vertical slice implemented
-- Last reviewed: 2026-09-01
+- Status: M4 durable multi-agent runtime implemented
+- Last reviewed: 2026-09-02
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
 - Foundation plugin ID: `agent.manager`
@@ -14,8 +14,7 @@ runtime is Neovim running inside the AI container over SSH. It is not a
 client-side Neovim plugin and does not relay agent traffic through nginx.
 
 The repository and package names are final. The Foundation plugin ID is
-reserved here but is not published until the promoted schema-v1 contract is
-available, because released Foundation IDs are immutable.
+published against the promoted schema-v1 contract and is now immutable.
 
 ## Decision summary
 
@@ -298,6 +297,7 @@ The initialization response includes:
 
 | Method                   | Purpose                                                    |
 | ------------------------ | ---------------------------------------------------------- |
+| `provider/session/list`  | Discover resumable provider sessions for one cwd.          |
 | `agent/list`             | List known agents and live status.                         |
 | `agent/start`            | Start a provider session in an explicit working directory. |
 | `agent/attach`           | Subscribe to an agent owned by the broker.                 |
@@ -605,8 +605,12 @@ Final command names follow the selected package name. The working surface is:
 | `:AgentManagerSplit`            | Open the compact split.                              |
 | `:AgentManagerStart [provider]` | Start an agent rooted at the current project.        |
 | `:AgentManagerSend`             | Open prompt input for the selected agent.            |
+| `:AgentManagerSteer`            | Add input to the selected active turn.               |
 | `:AgentManagerAttach`           | Select a broker-owned or resumable provider session. |
 | `:AgentManagerInterrupt`        | Confirm and interrupt active work.                   |
+| `:AgentManagerFork`             | Fork the selected resumable provider session.        |
+| `:AgentManagerContext`          | Queue explicit editor context for the next input.    |
+| `:AgentManagerDiff`             | Show a diff or resolve a dirty-buffer conflict.      |
 | `:AgentManagerHealth`           | Show component and integration health.               |
 
 Commands accept structured Lua options through the public API; command-line
@@ -627,6 +631,7 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | `x`                 | Confirm and interrupt active work.                        |
 | `a` / `d`           | Allow or deny only while an approval is focused.          |
 | `f`                 | Fork the selected completed/resumable session.            |
+| `c`                 | Queue an explicit editor-context snapshot.                |
 | `D`                 | Open the current diff.                                    |
 | `r`                 | Refresh/resynchronize projection state.                   |
 | `?` / `g?`          | Open visible help.                                        |
@@ -692,8 +697,8 @@ does not write those surfaces directly.
 
 ### Foundation manifest
 
-Once the Foundation schema-v1 contract is promoted, the plugin ships a
-callback-free manifest and deterministic fixtures. Suggested components are:
+The plugin ships a callback-free Foundation schema-v1 manifest and deterministic
+fixtures. Its immutable components are:
 
 - `shell`;
 - `agent_list`;
@@ -706,7 +711,7 @@ callback-free manifest and deterministic fixtures. Suggested components are:
 - `status`; and
 - `help`.
 
-Suggested semantic groups include:
+The semantic groups include:
 
 ```text
 AgentManagerNormal
@@ -728,6 +733,8 @@ AgentManagerTool
 AgentManagerApprovalPending
 AgentManagerApprovalAllowed
 AgentManagerApprovalDenied
+AgentManagerQuestionPending
+AgentManagerQuestionChoice
 AgentManagerDiffAdd
 AgentManagerDiffChange
 AgentManagerDiffDelete
@@ -741,8 +748,8 @@ require without loading the agent runtime. The runtime uses that module to
 define native fallbacks and, when Foundation is available, register the
 manifest. The Styling adapter imports only the same presentation module and
 returns the same by-value manifest and fixtures. Foundation's idempotent
-same-manifest registration prevents a second owner. Teardown unregisters only
-the handle acquired by the runtime.
+same-manifest registration prevents a second owner. Teardown unregisters a
+runtime-created handle only while no active Styling registration shares it.
 
 Defaults use Foundation semantic tokens when available and native highlight
 links as a standalone fallback. Defaults contain no hard dependency on one
@@ -751,7 +758,7 @@ provenance.
 
 ### Styling adapter
 
-The plugin ships its own discoverable adapter at a path such as:
+The plugin ships its own discoverable adapter at:
 
 ```text
 lua/ux_styling_adapter/agent_manager.lua
@@ -804,10 +811,10 @@ consume its public layout, header, tabs, rows, badges, empty/loading/error,
 help, and confirmation primitives through a narrow view backend. Domain state,
 provider events, mappings, and actions remain in the agent plugin.
 
-If Panels is not yet available, a native backend implements the same internal
-view interface. This prevents the broker and domain model from depending on a
-particular renderer and allows a later visual migration without rewriting
-provider adapters.
+Panels is not available at the promoted M3 compatibility pins, so the native
+backend implements the internal view interface. This prevents the broker and
+domain model from depending on a particular renderer and allows a later visual
+migration without rewriting provider adapters.
 
 ### UX compatibility modes
 
@@ -939,11 +946,18 @@ agents.setup(opts)
 agents.open(layout?)
 agents.close()
 agents.start({ provider = "codex", cwd = "...", workspace_strategy = "shared" })
+agents.attach(agent_id)
+agents.sessions({ provider = "codex", cwd = "..." })
 agents.prompt(agent_id, input)
 agents.steer(agent_id, input)
 agents.interrupt(agent_id)
 agents.resume({ provider = "claude", session_id = "...", cwd = "..." })
 agents.fork(agent_id)
+agents.history(agent_id)
+agents.respond_approval(agent_id, approval_id, decision, opts)
+agents.respond_question(agent_id, question_id, decision, answers, opts)
+agents.add_context(agent_id, context)
+agents.diff(agent_id)
 agents.list()
 agents.status()
 agents.running_count()
@@ -1067,6 +1081,12 @@ model projection, native buffers, rendering, controls, and teardown.
 - Dirty-buffer and file-change handling.
 - Provider capability/usage presentation.
 
+Implementation status: complete on 2026-09-02. Embedded mode retains one live
+provider runtime, but may keep disconnected summaries after a fork. Human
+callbacks remain broker-owned and fail closed on timeout, interruption,
+shutdown, malformed responses, or client disconnect. Ordinary acceptance uses
+fake provider runtimes and does not require authentication or consume quota.
+
 ### M3: UX ecosystem integration
 
 - Publish the reserved immutable Foundation plugin ID after compatibility
@@ -1076,12 +1096,32 @@ model projection, native buffers, rendering, controls, and teardown.
 - Adopt mature Panels primitives if available.
 - Prove Chrome coexistence and optional public cached status integration.
 
+Implementation status: complete on 2026-09-02. The immutable `agent.manager`
+identity, ten-component schema-v1 manifest, semantic groups, and deterministic
+fixtures are shared by runtime Foundation registration and the pure Styling
+adapter. Chrome coexistence tests prove that Agent Manager does not write its
+global surfaces; the current Chrome API has no public segment extension, so M3
+publishes a coalesced, payload-free cached-status event instead. No mature
+`ux.panels` package exists at the promoted pins, and health therefore reports
+the native backend explicitly.
+
 ### M4: durable multi-agent runtime
 
 - Owner-only Unix socket broker under the container lifecycle manager.
 - Reconnect, bounded replay, history resync, and Neovim restart recovery.
 - Multiple agents with serialized per-agent input.
 - Enforce shared-checkout writer policy and add explicit worktree strategy.
+
+Implementation status: complete on 2026-09-02. Durable mode uses an owner-only
+Unix socket, metadata-only atomic registry, bounded automatic replay, explicit
+history resync, and generation-scoped provider responses. The Neovim client
+reconnects with capped exponential backoff without stopping the supervised
+broker. Multiple provider tasks run concurrently while each agent's input is
+serialized independently. Shared writer ownership resolves to the canonical
+Git checkout root; additional writable agents require distinct, pre-existing
+linked worktrees validated by the broker. The resumable lifecycle package
+ships a systemd user unit, paired undo, behavioral verification, and stable
+non-sensitive service status.
 
 ### M5: release and configuration adoption
 
@@ -1123,17 +1163,14 @@ The first production release is complete when:
   explicit opt-in.
 - Whether release binaries remain repository assets or become a separately
   versioned package with a compatibility lock.
-- The exact Python floor and locked-environment tool selected during M0.
 - Whether one Python worker continues to host all Claude clients or a bounded
   worker pool is justified by measured isolation or throughput needs after M1.
-- The container supervisor/user-service mechanism and upgrade procedure.
-- Whether worktree creation belongs in this plugin or delegates to a separate
-  Git/worktree authority.
 - The exact public Chrome extension contract, if any; cached status APIs work
   without one.
 - Provider-specific model, reasoning, sandbox, and permission selectors that
   are safe to expose without pretending they are common settings.
-- Retention limits for in-memory replay and archived registry metadata.
+- Retention and archival policy for registry metadata; in-memory replay is
+  bounded to 2,000 events.
 - Public distribution, branding, and authentication review for each provider.
 
 ## Upstream contracts reviewed

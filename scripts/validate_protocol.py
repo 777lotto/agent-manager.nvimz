@@ -40,6 +40,27 @@ INVALID_CASES: dict[str, tuple[dict[str, Any], ...]] = {
                 "provider_event": {},
             },
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "agent/approval/respond",
+            "params": {
+                "agent_id": "agent-1",
+                "approval_id": "approval-1",
+                "decision": "allow_always",
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "agent/question/respond",
+            "params": {
+                "agent_id": "agent-1",
+                "question_id": "question-1",
+                "decision": "allow",
+                "answers": {},
+            },
+        },
     ),
     "worker.schema.json": (
         {"jsonrpc": "2.0", "id": True, "method": "session/list", "params": {}},

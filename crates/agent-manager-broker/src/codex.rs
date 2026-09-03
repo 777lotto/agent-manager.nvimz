@@ -132,14 +132,74 @@ impl CodexAppServer {
         self.request("thread/list", json!({ "limit": limit })).await
     }
 
+    pub async fn list_threads_for_directory(
+        &mut self,
+        cwd: &Path,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "thread/list",
+            json!({
+                "cwd": cwd,
+                "cursor": cursor,
+                "limit": limit,
+                "sortKey": "updated_at",
+                "sortDirection": "desc"
+            }),
+        )
+        .await
+    }
+
     pub async fn start_thread(&mut self, cwd: &Path) -> Result<RequestOutcome, CodexError> {
         self.request(
             "thread/start",
             json!({
                 "cwd": cwd,
                 "approvalPolicy": "on-request",
-                "ephemeral": true
+                "ephemeral": false
             }),
+        )
+        .await
+    }
+
+    pub async fn resume_thread(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "thread/resume",
+            json!({
+                "threadId": thread_id,
+                "cwd": cwd,
+                "approvalPolicy": "on-request"
+            }),
+        )
+        .await
+    }
+
+    pub async fn fork_thread(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "thread/fork",
+            json!({
+                "threadId": thread_id,
+                "cwd": cwd,
+                "approvalPolicy": "on-request",
+                "ephemeral": false
+            }),
+        )
+        .await
+    }
+
+    pub async fn read_thread(&mut self, thread_id: &str) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "thread/read",
+            json!({ "threadId": thread_id, "includeTurns": true }),
         )
         .await
     }

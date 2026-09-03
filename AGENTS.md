@@ -9,10 +9,13 @@
   never expose a listener or write non-protocol data to standard output.
 - Provider-specific payloads stay namespaced. Do not erase capabilities merely
   to make Codex and Claude appear identical.
-- M1 owns the embedded stdio broker and native Lua workspace. Keep durable
-  sockets, multiple agents, interactive approvals/questions, resume/fork, and
-  UX ecosystem integration within their later milestones unless the
-  specification is explicitly revised.
+- M2 owns the safe interactive workflow on the embedded stdio broker: one live
+  agent, approvals/questions, specific resume/fork, explicit editor context,
+  dirty-buffer handling, and capability/usage presentation.
+- M3 owns the immutable `agent.manager` Foundation identity, schema-v1
+  presentation catalog, pure Styling discovery adapter, native Panels fallback,
+  Chrome coexistence, and cached status integration. Keep durable sockets and
+  multiple live agents within M4 unless the specification is explicitly revised.
 
 ## Safety boundaries
 

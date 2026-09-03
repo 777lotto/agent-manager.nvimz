@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "agent/question/respond",
+  "params": {
+    "agent_id": "a4e9d943-2310-42fd-b470-6f63c83f0181",
+    "question_id": "question-3",
+    "decision": "answer",
+    "answers": {
+      "strategy": "shared",
+      "checks": ["format", "test"]
+    },
+    "message": null
+  }
+}

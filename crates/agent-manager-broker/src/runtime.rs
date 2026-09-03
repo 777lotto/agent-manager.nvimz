@@ -1,28 +1,75 @@
-//! Provider tasks owned by the embedded broker.
+//! Provider tasks owned by the embedded or durable broker.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::future::pending;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::codex::{
     CodexAppServer, CodexError, CommandSpec, ProviderEvent, normalize_event, thread_id, turn_id,
 };
+use crate::human::{
+    HumanRequestKind, claude_approval_response, claude_question_response, claude_request,
+    codex_approval_response, codex_question_response, codex_request, resolved_event,
+};
+use crate::projection::{history, provider_sessions, render_input};
 use crate::protocol::{EventEnvelope, Provider, RequestId};
 use crate::worker::{ClaudeWorker, WorkerCommandSpec, WorkerError, WorkerInbound};
 
 const PROVIDER_ERROR_CODE: i64 = -32_020;
 const INVALID_STATE_CODE: i64 = -32_021;
+const DEFAULT_CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Clone, Debug)]
+pub(crate) enum SessionLaunch {
+    Start,
+    Resume(String),
+    Fork(String),
+}
 
 #[derive(Debug)]
 pub(crate) enum AgentCommand {
-    Prompt { request_id: RequestId, text: String },
-    Steer { request_id: RequestId, text: String },
-    Interrupt { request_id: RequestId },
+    Prompt {
+        request_id: RequestId,
+        text: String,
+        attachments: Vec<Value>,
+    },
+    Steer {
+        request_id: RequestId,
+        text: String,
+        attachments: Vec<Value>,
+    },
+    Interrupt {
+        request_id: RequestId,
+    },
+    History {
+        request_id: RequestId,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    },
+    Approval {
+        request_id: RequestId,
+        action_id: String,
+        decision: String,
+        updated_input: Option<Value>,
+        message: Option<String>,
+    },
+    Question {
+        request_id: RequestId,
+        action_id: String,
+        decision: String,
+        answers: Map<String, Value>,
+        message: Option<String>,
+    },
+    ClientDisconnected,
     Shutdown,
 }
 
@@ -41,7 +88,8 @@ pub(crate) enum RuntimeEvent {
         request_id: RequestId,
         agent_id: String,
         code: i64,
-        message: &'static str,
+        message: String,
+        fail_agent: bool,
     },
     ProviderEvent(EventEnvelope),
     ProviderFailed {
@@ -53,10 +101,21 @@ pub(crate) enum RuntimeEvent {
     },
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
     pub codex: CommandSpec,
     pub claude: WorkerCommandSpec,
+    pub callback_timeout: Duration,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            codex: CommandSpec::default(),
+            claude: WorkerCommandSpec::default(),
+            callback_timeout: DEFAULT_CALLBACK_TIMEOUT,
+        }
+    }
 }
 
 pub(crate) fn spawn_agent(
@@ -64,6 +123,7 @@ pub(crate) fn spawn_agent(
     agent_id: String,
     cwd: PathBuf,
     start_request_id: RequestId,
+    launch: SessionLaunch,
     config: RuntimeConfig,
     events: mpsc::UnboundedSender<RuntimeEvent>,
 ) -> (mpsc::Sender<AgentCommand>, JoinHandle<()>) {
@@ -73,7 +133,9 @@ pub(crate) fn spawn_agent(
             agent_id,
             cwd,
             start_request_id,
+            launch,
             config.codex,
+            config.callback_timeout,
             commands_rx,
             events,
         )),
@@ -81,7 +143,9 @@ pub(crate) fn spawn_agent(
             agent_id,
             cwd,
             start_request_id,
+            launch,
             config.claude,
+            config.callback_timeout,
             commands_rx,
             events,
         )),
@@ -89,12 +153,60 @@ pub(crate) fn spawn_agent(
     (commands_tx, handle)
 }
 
-#[allow(clippy::too_many_lines)]
+pub(crate) async fn discover_sessions(
+    provider: Provider,
+    cwd: &Path,
+    cursor: Option<&str>,
+    limit: u32,
+    config: &RuntimeConfig,
+) -> Result<Value, &'static str> {
+    match provider {
+        Provider::Codex => {
+            let mut server = CodexAppServer::spawn(&config.codex)
+                .map_err(|_| "Codex App Server could not be started")?;
+            if server.initialize().await.is_err() {
+                let _ = server.shutdown().await;
+                return Err("Codex App Server initialization failed");
+            }
+            let outcome = server
+                .list_threads_for_directory(cwd, cursor, limit)
+                .await
+                .map_err(|_| "Codex session discovery failed");
+            let _ = server.shutdown().await;
+            outcome.map(|outcome| provider_sessions(provider, &outcome.result))
+        }
+        Provider::Claude => {
+            let mut worker = ClaudeWorker::spawn(&config.claude)
+                .map_err(|_| "Claude worker could not be started")?;
+            if worker.initialize().await.is_err() {
+                let _ = worker.shutdown().await;
+                return Err("Claude worker initialization failed");
+            }
+            let outcome = worker
+                .request(
+                    "session/list",
+                    json!({
+                        "directory": cwd,
+                        "limit": limit,
+                        "offset": cursor.and_then(|cursor| cursor.parse::<u64>().ok()).unwrap_or(0),
+                    }),
+                )
+                .await
+                .map_err(|_| "Claude session discovery failed");
+            let _ = worker.shutdown().await;
+            outcome.map(|outcome| provider_sessions(provider, &outcome.result))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_codex(
     agent_id: String,
     cwd: PathBuf,
     start_request_id: RequestId,
+    launch: SessionLaunch,
     spec: CommandSpec,
+    callback_timeout: Duration,
     mut commands: mpsc::Receiver<AgentCommand>,
     events: mpsc::UnboundedSender<RuntimeEvent>,
 ) {
@@ -105,6 +217,7 @@ async fn run_codex(
             &agent_id,
             "Codex App Server could not be started",
         );
+        runtime_stopped(&events, &agent_id);
         return;
     };
     if server.initialize().await.is_err() {
@@ -115,16 +228,23 @@ async fn run_codex(
             "Codex App Server initialization failed",
         );
         let _ = server.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     }
-    let Ok(started) = server.start_thread(&cwd).await else {
+    let started = match &launch {
+        SessionLaunch::Start => server.start_thread(&cwd).await,
+        SessionLaunch::Resume(session_id) => server.resume_thread(session_id, &cwd).await,
+        SessionLaunch::Fork(session_id) => server.fork_thread(session_id, &cwd).await,
+    };
+    let Ok(started) = started else {
         start_failed(
             &events,
             start_request_id,
             &agent_id,
-            "Codex thread creation failed",
+            "Codex session open failed",
         );
         let _ = server.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     };
     let Some(provider_session_id) = thread_id(&started.result).map(str::to_owned) else {
@@ -132,9 +252,10 @@ async fn run_codex(
             &events,
             start_request_id,
             &agent_id,
-            "Codex thread creation omitted its identity",
+            "Codex session open omitted its identity",
         );
         let _ = server.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     };
     if events
@@ -148,12 +269,21 @@ async fn run_codex(
         let _ = server.shutdown().await;
         return;
     }
-    if publish_codex_events(&mut server, &agent_id, started.events, &events)
-        .await
-        .is_err()
+    let mut pending_requests: HashMap<String, PendingCodexRequest> = HashMap::new();
+    if publish_codex_events(
+        &mut server,
+        &agent_id,
+        started.events,
+        &mut pending_requests,
+        callback_timeout,
+        &events,
+    )
+    .await
+    .is_err()
     {
         provider_failed(&events, &agent_id, "Codex startup events were invalid");
         let _ = server.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     }
 
@@ -165,18 +295,26 @@ async fn run_codex(
                     break;
                 };
                 match command {
-                    AgentCommand::Prompt { request_id, text } => {
+                    AgentCommand::Prompt { request_id, text, attachments } => {
                         if active_turn_id.is_some() {
-                            request_failed(
+                            request_rejected(
                                 &events,
                                 request_id,
                                 &agent_id,
-                                INVALID_STATE_CODE,
                                 "agent already has an active turn",
                             );
                             continue;
                         }
-                        match server.start_turn(&provider_session_id, &text).await {
+                        let Ok(rendered) = render_input(&text, &attachments) else {
+                            request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "editor context could not be encoded",
+                            );
+                            continue;
+                        };
+                        match server.start_turn(&provider_session_id, &rendered).await {
                             Ok(outcome) => {
                                 let Some(new_turn_id) = turn_id(&outcome.result).map(str::to_owned) else {
                                     request_failed(
@@ -197,6 +335,8 @@ async fn run_codex(
                                     &mut server,
                                     &agent_id,
                                     outcome.events,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -222,18 +362,26 @@ async fn run_codex(
                             ),
                         }
                     }
-                    AgentCommand::Steer { request_id, text } => {
+                    AgentCommand::Steer { request_id, text, attachments } => {
                         let Some(turn_id) = active_turn_id.as_deref() else {
-                            request_failed(
+                            request_rejected(
                                 &events,
                                 request_id,
                                 &agent_id,
-                                INVALID_STATE_CODE,
                                 "agent has no active turn to steer",
                             );
                             continue;
                         };
-                        match server.steer(&provider_session_id, turn_id, &text).await {
+                        let Ok(rendered) = render_input(&text, &attachments) else {
+                            request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "editor context could not be encoded",
+                            );
+                            continue;
+                        };
+                        match server.steer(&provider_session_id, turn_id, &rendered).await {
                             Ok(outcome) => {
                                 let _ = events.send(RuntimeEvent::Response {
                                     request_id,
@@ -243,6 +391,8 @@ async fn run_codex(
                                     &mut server,
                                     &agent_id,
                                     outcome.events,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -269,6 +419,25 @@ async fn run_codex(
                         }
                     }
                     AgentCommand::Interrupt { request_id } => {
+                        if deny_all_codex_requests(
+                            &mut server,
+                            &agent_id,
+                            &mut pending_requests,
+                            "interrupt",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            request_failed(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                PROVIDER_ERROR_CODE,
+                                "Codex pending request cancellation failed",
+                            );
+                            continue;
+                        }
                         let Some(turn_id) = active_turn_id.as_deref() else {
                             let _ = events.send(RuntimeEvent::Response {
                                 request_id,
@@ -286,6 +455,8 @@ async fn run_codex(
                                     &mut server,
                                     &agent_id,
                                     outcome.events,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -311,12 +482,102 @@ async fn run_codex(
                             ),
                         }
                     }
-                    AgentCommand::Shutdown => break,
+                    AgentCommand::History { request_id, cursor: _, limit: _ } => {
+                        match server.read_thread(&provider_session_id).await {
+                            Ok(outcome) => {
+                                let _ = events.send(RuntimeEvent::Response {
+                                    request_id,
+                                    result: history(Provider::Codex, &outcome.result),
+                                });
+                            }
+                            Err(_) => request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "Codex history request failed",
+                            ),
+                        }
+                    }
+                    AgentCommand::Approval {
+                        request_id,
+                        action_id,
+                        decision,
+                        updated_input: _,
+                        message,
+                    } => {
+                        respond_codex_approval(
+                            &mut server,
+                            &agent_id,
+                            request_id,
+                            &action_id,
+                            &decision,
+                            message.as_deref(),
+                            &mut pending_requests,
+                            &events,
+                        )
+                        .await;
+                    }
+                    AgentCommand::Question {
+                        request_id,
+                        action_id,
+                        decision,
+                        answers,
+                        message: _,
+                    } => {
+                        respond_codex_question(
+                            &mut server,
+                            &agent_id,
+                            request_id,
+                            &action_id,
+                            &decision,
+                            &answers,
+                            &mut pending_requests,
+                            &events,
+                        )
+                        .await;
+                    }
+                    AgentCommand::ClientDisconnected => {
+                        if deny_all_codex_requests(
+                            &mut server,
+                            &agent_id,
+                            &mut pending_requests,
+                            "client_disconnect",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            provider_failed(
+                                &events,
+                                &agent_id,
+                                "Codex client disconnect handling failed",
+                            );
+                            break;
+                        }
+                    }
+                    AgentCommand::Shutdown => {
+                        let _ = deny_all_codex_requests(
+                            &mut server,
+                            &agent_id,
+                            &mut pending_requests,
+                            "shutdown",
+                            &events,
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
             provider_event = server.next_event(), if active_turn_id.is_some() => {
                 if let Ok(provider_event) = provider_event {
-                    match publish_codex_event(&mut server, &agent_id, provider_event, &events).await {
+                    match publish_codex_event(
+                        &mut server,
+                        &agent_id,
+                        provider_event,
+                        &mut pending_requests,
+                        callback_timeout,
+                        &events,
+                    ).await {
                         Ok(true) => active_turn_id = None,
                         Ok(false) => {}
                         Err(_) => {
@@ -329,9 +590,31 @@ async fn run_codex(
                     break;
                 }
             }
+            () = wait_for_deadline(next_codex_deadline(&pending_requests)), if !pending_requests.is_empty() => {
+                if expire_codex_requests(
+                    &mut server,
+                    &agent_id,
+                    &mut pending_requests,
+                    &events,
+                )
+                .await
+                .is_err()
+                {
+                    provider_failed(&events, &agent_id, "Codex callback timeout handling failed");
+                    break;
+                }
+            }
         }
     }
 
+    let _ = deny_all_codex_requests(
+        &mut server,
+        &agent_id,
+        &mut pending_requests,
+        "provider_exit",
+        &events,
+    )
+    .await;
     let _ = server.shutdown().await;
     let _ = events.send(RuntimeEvent::Stopped { agent_id });
 }
@@ -340,11 +623,21 @@ async fn publish_codex_events(
     server: &mut CodexAppServer,
     agent_id: &str,
     provider_events: Vec<ProviderEvent>,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    callback_timeout: Duration,
     events: &mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<bool, CodexError> {
     let mut terminal = false;
     for provider_event in provider_events {
-        terminal |= publish_codex_event(server, agent_id, provider_event, events).await?;
+        terminal |= publish_codex_event(
+            server,
+            agent_id,
+            provider_event,
+            pending_requests,
+            callback_timeout,
+            events,
+        )
+        .await?;
     }
     Ok(terminal)
 }
@@ -353,10 +646,23 @@ async fn publish_codex_event(
     server: &mut CodexAppServer,
     agent_id: &str,
     mut provider_event: ProviderEvent,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    callback_timeout: Duration,
     events: &mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<bool, CodexError> {
     let terminal = matches!(provider_event.method.as_str(), "turn/completed" | "error");
     if provider_event.response_required {
+        let action_id = Uuid::new_v4().to_string();
+        if let Some(request) = codex_request(agent_id, action_id, &provider_event) {
+            let pending = PendingCodexRequest {
+                kind: request.kind,
+                event: provider_event,
+                deadline: Instant::now() + callback_timeout,
+            };
+            pending_requests.insert(request.id, pending);
+            let _ = events.send(RuntimeEvent::ProviderEvent(request.envelope));
+            return Ok(false);
+        }
         server.deny_server_request(&mut provider_event).await?;
     }
     let normalized = normalize_event(agent_id, &provider_event)?;
@@ -364,12 +670,225 @@ async fn publish_codex_event(
     Ok(terminal)
 }
 
-#[allow(clippy::too_many_lines)]
+struct PendingCodexRequest {
+    kind: HumanRequestKind,
+    event: ProviderEvent,
+    deadline: Instant,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn respond_codex_approval(
+    server: &mut CodexAppServer,
+    agent_id: &str,
+    request_id: RequestId,
+    action_id: &str,
+    decision: &str,
+    message: Option<&str>,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) {
+    let Some(pending) = pending_requests.get_mut(action_id) else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "approval request is no longer pending",
+        );
+        return;
+    };
+    if pending.kind != HumanRequestKind::Approval {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "pending request is not an approval",
+        );
+        return;
+    }
+    let result = match codex_approval_response(&pending.event, decision, message) {
+        Ok(result) => result,
+        Err(message) => {
+            request_rejected(events, request_id, agent_id, message);
+            return;
+        }
+    };
+    if server
+        .respond_server_request(&mut pending.event, result)
+        .await
+        .is_err()
+    {
+        request_failed(
+            events,
+            request_id,
+            agent_id,
+            PROVIDER_ERROR_CODE,
+            "Codex approval response failed",
+        );
+        return;
+    }
+    pending_requests.remove(action_id);
+    let _ = events.send(RuntimeEvent::Response {
+        request_id,
+        result: json!({ "resolved": true, "id": action_id, "decision": decision }),
+    });
+    let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+        agent_id,
+        Provider::Codex,
+        HumanRequestKind::Approval,
+        action_id,
+        decision,
+        None,
+    )));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn respond_codex_question(
+    server: &mut CodexAppServer,
+    agent_id: &str,
+    request_id: RequestId,
+    action_id: &str,
+    decision: &str,
+    answers: &Map<String, Value>,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) {
+    let Some(pending) = pending_requests.get_mut(action_id) else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "question request is no longer pending",
+        );
+        return;
+    };
+    if pending.kind != HumanRequestKind::Question {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "pending request is not a question",
+        );
+        return;
+    }
+    let result = match codex_question_response(&pending.event, decision, answers) {
+        Ok(result) => result,
+        Err(message) => {
+            request_rejected(events, request_id, agent_id, message);
+            return;
+        }
+    };
+    if server
+        .respond_server_request(&mut pending.event, result)
+        .await
+        .is_err()
+    {
+        request_failed(
+            events,
+            request_id,
+            agent_id,
+            PROVIDER_ERROR_CODE,
+            "Codex question response failed",
+        );
+        return;
+    }
+    pending_requests.remove(action_id);
+    let _ = events.send(RuntimeEvent::Response {
+        request_id,
+        result: json!({ "resolved": true, "id": action_id, "decision": decision }),
+    });
+    let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+        agent_id,
+        Provider::Codex,
+        HumanRequestKind::Question,
+        action_id,
+        decision,
+        None,
+    )));
+}
+
+async fn deny_all_codex_requests(
+    server: &mut CodexAppServer,
+    agent_id: &str,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    reason: &'static str,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(), CodexError> {
+    let mut failure = None;
+    let action_ids = pending_requests.keys().cloned().collect::<Vec<_>>();
+    for action_id in action_ids {
+        let Some(mut pending_request) = pending_requests.remove(&action_id) else {
+            continue;
+        };
+        if let Err(error) = server.deny_server_request(&mut pending_request.event).await {
+            failure.get_or_insert(error);
+        }
+        let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+            agent_id,
+            Provider::Codex,
+            pending_request.kind,
+            &action_id,
+            "deny",
+            Some(reason),
+        )));
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn expire_codex_requests(
+    server: &mut CodexAppServer,
+    agent_id: &str,
+    pending_requests: &mut HashMap<String, PendingCodexRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(), CodexError> {
+    let now = Instant::now();
+    let mut failure = None;
+    let expired = pending_requests
+        .iter()
+        .filter(|(_, request)| request.deadline <= now)
+        .map(|(action_id, _)| action_id.clone())
+        .collect::<Vec<_>>();
+    for action_id in expired {
+        let Some(mut pending_request) = pending_requests.remove(&action_id) else {
+            continue;
+        };
+        if let Err(error) = server.deny_server_request(&mut pending_request.event).await {
+            failure.get_or_insert(error);
+        }
+        let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+            agent_id,
+            Provider::Codex,
+            pending_request.kind,
+            &action_id,
+            "deny",
+            Some("timeout"),
+        )));
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn next_codex_deadline(pending_requests: &HashMap<String, PendingCodexRequest>) -> Option<Instant> {
+    pending_requests
+        .values()
+        .map(|request| request.deadline)
+        .min()
+}
+
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        pending::<()>().await;
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_claude(
     agent_id: String,
     cwd: PathBuf,
     start_request_id: RequestId,
+    launch: SessionLaunch,
     spec: WorkerCommandSpec,
+    callback_timeout: Duration,
     mut commands: mpsc::Receiver<AgentCommand>,
     events: mpsc::UnboundedSender<RuntimeEvent>,
 ) {
@@ -380,6 +899,7 @@ async fn run_claude(
             &agent_id,
             "Claude worker could not be started",
         );
+        runtime_stopped(&events, &agent_id);
         return;
     };
     if worker.initialize().await.is_err() {
@@ -390,19 +910,29 @@ async fn run_claude(
             "Claude worker initialization failed",
         );
         let _ = worker.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     }
-    let Ok(started) = worker
-        .request("session/start", json!({ "agent_id": agent_id, "cwd": cwd }))
-        .await
-    else {
+    let (open_method, open_params) = match &launch {
+        SessionLaunch::Start => ("session/start", json!({ "agent_id": agent_id, "cwd": cwd })),
+        SessionLaunch::Resume(session_id) => (
+            "session/resume",
+            json!({ "agent_id": agent_id, "cwd": cwd, "session_id": session_id }),
+        ),
+        SessionLaunch::Fork(session_id) => (
+            "session/fork",
+            json!({ "agent_id": agent_id, "cwd": cwd, "session_id": session_id }),
+        ),
+    };
+    let Ok(started) = worker.request(open_method, open_params).await else {
         start_failed(
             &events,
             start_request_id,
             &agent_id,
-            "Claude session creation failed",
+            "Claude session open failed",
         );
         let _ = worker.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     };
     let Some(provider_session_id) = started
@@ -415,28 +945,38 @@ async fn run_claude(
             &events,
             start_request_id,
             &agent_id,
-            "Claude session creation omitted its identity",
+            "Claude session open omitted its identity",
         );
         let _ = worker.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     };
     if events
         .send(RuntimeEvent::Started {
             request_id: start_request_id,
             agent_id: agent_id.clone(),
-            provider_session_id,
+            provider_session_id: provider_session_id.clone(),
         })
         .is_err()
     {
         let _ = worker.shutdown().await;
         return;
     }
-    if publish_worker_inbound(&mut worker, &agent_id, started.inbound, &events)
-        .await
-        .is_err()
+    let mut pending_requests: HashMap<String, PendingWorkerRequest> = HashMap::new();
+    if publish_worker_inbound(
+        &mut worker,
+        &agent_id,
+        started.inbound,
+        &mut pending_requests,
+        callback_timeout,
+        &events,
+    )
+    .await
+    .is_err()
     {
         provider_failed(&events, &agent_id, "Claude startup events were invalid");
         let _ = worker.shutdown().await;
+        runtime_stopped(&events, &agent_id);
         return;
     }
 
@@ -448,18 +988,26 @@ async fn run_claude(
                     break;
                 };
                 match command {
-                    AgentCommand::Prompt { request_id, text } => {
+                    AgentCommand::Prompt { request_id, text, attachments } => {
                         if active_turn_id.is_some() {
-                            request_failed(
+                            request_rejected(
                                 &events,
                                 request_id,
                                 &agent_id,
-                                INVALID_STATE_CODE,
                                 "agent already has an active turn",
                             );
                             continue;
                         }
-                        match worker.request("turn/prompt", json!({ "agent_id": agent_id, "text": text })).await {
+                        let Ok(rendered) = render_input(&text, &attachments) else {
+                            request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "editor context could not be encoded",
+                            );
+                            continue;
+                        };
+                        match worker.request("turn/prompt", json!({ "agent_id": agent_id, "text": rendered })).await {
                             Ok(outcome) => {
                                 let new_turn_id = Uuid::new_v4().to_string();
                                 let _ = events.send(RuntimeEvent::Response {
@@ -477,6 +1025,8 @@ async fn run_claude(
                                     &mut worker,
                                     &agent_id,
                                     outcome.inbound,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -502,18 +1052,26 @@ async fn run_claude(
                             ),
                         }
                     }
-                    AgentCommand::Steer { request_id, text } => {
+                    AgentCommand::Steer { request_id, text, attachments } => {
                         if active_turn_id.is_none() {
-                            request_failed(
+                            request_rejected(
                                 &events,
                                 request_id,
                                 &agent_id,
-                                INVALID_STATE_CODE,
                                 "agent has no active turn to steer",
                             );
                             continue;
                         }
-                        match worker.request("turn/steer", json!({ "agent_id": agent_id, "text": text })).await {
+                        let Ok(rendered) = render_input(&text, &attachments) else {
+                            request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "editor context could not be encoded",
+                            );
+                            continue;
+                        };
+                        match worker.request("turn/steer", json!({ "agent_id": agent_id, "text": rendered })).await {
                             Ok(outcome) => {
                                 let _ = events.send(RuntimeEvent::Response {
                                     request_id,
@@ -523,6 +1081,8 @@ async fn run_claude(
                                     &mut worker,
                                     &agent_id,
                                     outcome.inbound,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -549,6 +1109,25 @@ async fn run_claude(
                         }
                     }
                     AgentCommand::Interrupt { request_id } => {
+                        if deny_all_worker_requests(
+                            &mut worker,
+                            &agent_id,
+                            &mut pending_requests,
+                            "interrupt",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            request_failed(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                PROVIDER_ERROR_CODE,
+                                "Claude pending request cancellation failed",
+                            );
+                            continue;
+                        }
                         if active_turn_id.is_none() {
                             let _ = events.send(RuntimeEvent::Response {
                                 request_id,
@@ -566,6 +1145,8 @@ async fn run_claude(
                                     &mut worker,
                                     &agent_id,
                                     outcome.inbound,
+                                    &mut pending_requests,
+                                    callback_timeout,
                                     &events,
                                 )
                                 .await
@@ -591,12 +1172,113 @@ async fn run_claude(
                             ),
                         }
                     }
-                    AgentCommand::Shutdown => break,
+                    AgentCommand::History { request_id, cursor, limit } => {
+                        let offset = cursor.and_then(|cursor| cursor.parse::<u64>().ok()).unwrap_or(0);
+                        match worker.request(
+                            "session/history",
+                            json!({
+                                "session_id": provider_session_id,
+                                "directory": cwd,
+                                "limit": limit,
+                                "offset": offset,
+                            }),
+                        ).await {
+                            Ok(outcome) => {
+                                let _ = events.send(RuntimeEvent::Response {
+                                    request_id,
+                                    result: history(Provider::Claude, &outcome.result),
+                                });
+                            }
+                            Err(_) => request_rejected(
+                                &events,
+                                request_id,
+                                &agent_id,
+                                "Claude history request failed",
+                            ),
+                        }
+                    }
+                    AgentCommand::Approval {
+                        request_id,
+                        action_id,
+                        decision,
+                        updated_input,
+                        message,
+                    } => {
+                        respond_worker_approval(
+                            &mut worker,
+                            &agent_id,
+                            request_id,
+                            &action_id,
+                            &decision,
+                            updated_input,
+                            message.as_deref(),
+                            &mut pending_requests,
+                            &events,
+                        )
+                        .await;
+                    }
+                    AgentCommand::Question {
+                        request_id,
+                        action_id,
+                        decision,
+                        answers,
+                        message,
+                    } => {
+                        respond_worker_question(
+                            &mut worker,
+                            &agent_id,
+                            request_id,
+                            &action_id,
+                            &decision,
+                            &answers,
+                            message.as_deref(),
+                            &mut pending_requests,
+                            &events,
+                        )
+                        .await;
+                    }
+                    AgentCommand::ClientDisconnected => {
+                        if deny_all_worker_requests(
+                            &mut worker,
+                            &agent_id,
+                            &mut pending_requests,
+                            "client_disconnect",
+                            &events,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            provider_failed(
+                                &events,
+                                &agent_id,
+                                "Claude client disconnect handling failed",
+                            );
+                            break;
+                        }
+                    }
+                    AgentCommand::Shutdown => {
+                        let _ = deny_all_worker_requests(
+                            &mut worker,
+                            &agent_id,
+                            &mut pending_requests,
+                            "shutdown",
+                            &events,
+                        )
+                        .await;
+                        break;
+                    }
                 }
             }
             inbound = worker.next_inbound(), if active_turn_id.is_some() => {
                 if let Ok(inbound) = inbound {
-                    match publish_worker_event(&mut worker, &agent_id, inbound, &events).await {
+                    match publish_worker_event(
+                        &mut worker,
+                        &agent_id,
+                        inbound,
+                        &mut pending_requests,
+                        callback_timeout,
+                        &events,
+                    ).await {
                         Ok(true) => active_turn_id = None,
                         Ok(false) => {}
                         Err(_) => {
@@ -609,9 +1291,31 @@ async fn run_claude(
                     break;
                 }
             }
+            () = wait_for_deadline(next_worker_deadline(&pending_requests)), if !pending_requests.is_empty() => {
+                if expire_worker_requests(
+                    &mut worker,
+                    &agent_id,
+                    &mut pending_requests,
+                    &events,
+                )
+                .await
+                .is_err()
+                {
+                    provider_failed(&events, &agent_id, "Claude callback timeout handling failed");
+                    break;
+                }
+            }
         }
     }
 
+    let _ = deny_all_worker_requests(
+        &mut worker,
+        &agent_id,
+        &mut pending_requests,
+        "provider_exit",
+        &events,
+    )
+    .await;
     let _ = worker.shutdown().await;
     let _ = events.send(RuntimeEvent::Stopped { agent_id });
 }
@@ -620,11 +1324,21 @@ async fn publish_worker_inbound(
     worker: &mut ClaudeWorker,
     agent_id: &str,
     inbound: Vec<WorkerInbound>,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    callback_timeout: Duration,
     events: &mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<bool, WorkerError> {
     let mut terminal = false;
     for event in inbound {
-        terminal |= publish_worker_event(worker, agent_id, event, events).await?;
+        terminal |= publish_worker_event(
+            worker,
+            agent_id,
+            event,
+            pending_requests,
+            callback_timeout,
+            events,
+        )
+        .await?;
     }
     Ok(terminal)
 }
@@ -633,12 +1347,27 @@ async fn publish_worker_event(
     worker: &mut ClaudeWorker,
     agent_id: &str,
     inbound: WorkerInbound,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    callback_timeout: Duration,
     events: &mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<bool, WorkerError> {
-    if let Some(callback_id) = inbound.id.as_ref() {
-        worker
-            .deny_callback(callback_id, "Agent Manager M1 has no approval UI")
-            .await?;
+    if inbound.is_callback() {
+        let action_id = Uuid::new_v4().to_string();
+        if let Some(request) = claude_request(agent_id, action_id, &inbound) {
+            let pending = PendingWorkerRequest {
+                kind: request.kind,
+                inbound,
+                deadline: Instant::now() + callback_timeout,
+            };
+            pending_requests.insert(request.id, pending);
+            let _ = events.send(RuntimeEvent::ProviderEvent(request.envelope));
+            return Ok(false);
+        }
+        if let Some(callback_id) = inbound.id.as_ref() {
+            worker
+                .deny_callback(callback_id, "Unsupported callback denied by Agent Manager")
+                .await?;
+        }
     }
     let normalized_type = normalized_worker_event_type(&inbound);
     let terminal = matches!(normalized_type, "turn.completed" | "turn.failed");
@@ -670,6 +1399,231 @@ async fn publish_worker_event(
     Ok(terminal)
 }
 
+struct PendingWorkerRequest {
+    kind: HumanRequestKind,
+    inbound: WorkerInbound,
+    deadline: Instant,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn respond_worker_approval(
+    worker: &mut ClaudeWorker,
+    agent_id: &str,
+    request_id: RequestId,
+    action_id: &str,
+    decision: &str,
+    updated_input: Option<Value>,
+    message: Option<&str>,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) {
+    let Some(pending_request) = pending_requests.get(action_id) else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "approval request is no longer pending",
+        );
+        return;
+    };
+    if pending_request.kind != HumanRequestKind::Approval {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "pending request is not an approval",
+        );
+        return;
+    }
+    let result = match claude_approval_response(decision, updated_input, message) {
+        Ok(result) => result,
+        Err(message) => {
+            request_rejected(events, request_id, agent_id, message);
+            return;
+        }
+    };
+    let Some(callback_id) = pending_request.inbound.id.as_ref() else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "provider callback omitted its identity",
+        );
+        return;
+    };
+    if worker.respond_callback(callback_id, result).await.is_err() {
+        request_failed(
+            events,
+            request_id,
+            agent_id,
+            PROVIDER_ERROR_CODE,
+            "Claude approval response failed",
+        );
+        return;
+    }
+    pending_requests.remove(action_id);
+    let _ = events.send(RuntimeEvent::Response {
+        request_id,
+        result: json!({ "resolved": true, "id": action_id, "decision": decision }),
+    });
+    let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+        agent_id,
+        Provider::Claude,
+        HumanRequestKind::Approval,
+        action_id,
+        decision,
+        None,
+    )));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn respond_worker_question(
+    worker: &mut ClaudeWorker,
+    agent_id: &str,
+    request_id: RequestId,
+    action_id: &str,
+    decision: &str,
+    answers: &Map<String, Value>,
+    message: Option<&str>,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) {
+    let Some(pending_request) = pending_requests.get(action_id) else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "question request is no longer pending",
+        );
+        return;
+    };
+    if pending_request.kind != HumanRequestKind::Question {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "pending request is not a question",
+        );
+        return;
+    }
+    let result = match claude_question_response(decision, answers, message) {
+        Ok(result) => result,
+        Err(message) => {
+            request_rejected(events, request_id, agent_id, message);
+            return;
+        }
+    };
+    let Some(callback_id) = pending_request.inbound.id.as_ref() else {
+        request_rejected(
+            events,
+            request_id,
+            agent_id,
+            "provider callback omitted its identity",
+        );
+        return;
+    };
+    if worker.respond_callback(callback_id, result).await.is_err() {
+        request_failed(
+            events,
+            request_id,
+            agent_id,
+            PROVIDER_ERROR_CODE,
+            "Claude question response failed",
+        );
+        return;
+    }
+    pending_requests.remove(action_id);
+    let _ = events.send(RuntimeEvent::Response {
+        request_id,
+        result: json!({ "resolved": true, "id": action_id, "decision": decision }),
+    });
+    let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+        agent_id,
+        Provider::Claude,
+        HumanRequestKind::Question,
+        action_id,
+        decision,
+        None,
+    )));
+}
+
+async fn deny_all_worker_requests(
+    worker: &mut ClaudeWorker,
+    agent_id: &str,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    reason: &'static str,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(), WorkerError> {
+    let mut failure = None;
+    let action_ids = pending_requests.keys().cloned().collect::<Vec<_>>();
+    for action_id in action_ids {
+        let Some(pending_request) = pending_requests.remove(&action_id) else {
+            continue;
+        };
+        if let Some(callback_id) = pending_request.inbound.id.as_ref()
+            && let Err(error) = worker
+                .deny_callback(callback_id, "Agent Manager closed the pending request")
+                .await
+        {
+            failure.get_or_insert(error);
+        }
+        let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+            agent_id,
+            Provider::Claude,
+            pending_request.kind,
+            &action_id,
+            "deny",
+            Some(reason),
+        )));
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn expire_worker_requests(
+    worker: &mut ClaudeWorker,
+    agent_id: &str,
+    pending_requests: &mut HashMap<String, PendingWorkerRequest>,
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(), WorkerError> {
+    let now = Instant::now();
+    let mut failure = None;
+    let expired = pending_requests
+        .iter()
+        .filter(|(_, request)| request.deadline <= now)
+        .map(|(action_id, _)| action_id.clone())
+        .collect::<Vec<_>>();
+    for action_id in expired {
+        let Some(pending_request) = pending_requests.remove(&action_id) else {
+            continue;
+        };
+        if let Some(callback_id) = pending_request.inbound.id.as_ref()
+            && let Err(error) = worker
+                .deny_callback(callback_id, "Agent Manager callback timed out")
+                .await
+        {
+            failure.get_or_insert(error);
+        }
+        let _ = events.send(RuntimeEvent::ProviderEvent(resolved_event(
+            agent_id,
+            Provider::Claude,
+            pending_request.kind,
+            &action_id,
+            "deny",
+            Some("timeout"),
+        )));
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn next_worker_deadline(
+    pending_requests: &HashMap<String, PendingWorkerRequest>,
+) -> Option<Instant> {
+    pending_requests
+        .values()
+        .map(|request| request.deadline)
+        .min()
+}
+
 fn normalized_worker_event_type(inbound: &WorkerInbound) -> &'static str {
     match inbound.method.as_str() {
         "approval/request" => "approval.requested",
@@ -677,9 +1631,14 @@ fn normalized_worker_event_type(inbound: &WorkerInbound) -> &'static str {
         "session/event" => match inbound.params["event_type"].as_str() {
             Some("message.assistant") => "message.completed",
             Some("stream.event") => "message.delta",
+            Some("file.changed" | "file_change") => "file.changed",
+            Some("diff.changed" | "diff") => "diff.changed",
             Some("result") if inbound.params["payload"]["is_error"] == true => "turn.failed",
             Some("result") => "turn.completed",
             Some("task.started") => "tool.started",
+            Some("hook.event") if worker_event_changes_file(&inbound.params["payload"]) => {
+                "file.changed"
+            }
             Some("task.progress" | "hook.event") => "tool.progress",
             Some("task.notification") => "tool.completed",
             Some("rate_limit") => "usage.updated",
@@ -688,6 +1647,15 @@ fn normalized_worker_event_type(inbound: &WorkerInbound) -> &'static str {
         },
         _ => "provider.notice",
     }
+}
+
+fn worker_event_changes_file(payload: &Value) -> bool {
+    let tool = payload
+        .get("tool_name")
+        .or_else(|| payload.get("toolName"))
+        .or_else(|| payload.get("tool"))
+        .and_then(Value::as_str);
+    matches!(tool, Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
 }
 
 fn synthetic_claude_event(
@@ -721,6 +1689,12 @@ fn start_failed(
     request_failed(events, request_id, agent_id, PROVIDER_ERROR_CODE, message);
 }
 
+fn runtime_stopped(events: &mpsc::UnboundedSender<RuntimeEvent>, agent_id: &str) {
+    let _ = events.send(RuntimeEvent::Stopped {
+        agent_id: agent_id.to_owned(),
+    });
+}
+
 fn request_failed(
     events: &mpsc::UnboundedSender<RuntimeEvent>,
     request_id: RequestId,
@@ -732,7 +1706,23 @@ fn request_failed(
         request_id,
         agent_id: agent_id.to_owned(),
         code,
-        message,
+        message: message.to_owned(),
+        fail_agent: true,
+    });
+}
+
+fn request_rejected(
+    events: &mpsc::UnboundedSender<RuntimeEvent>,
+    request_id: RequestId,
+    agent_id: &str,
+    message: &'static str,
+) {
+    let _ = events.send(RuntimeEvent::RequestFailed {
+        request_id,
+        agent_id: agent_id.to_owned(),
+        code: INVALID_STATE_CODE,
+        message: message.to_owned(),
+        fail_agent: false,
     });
 }
 

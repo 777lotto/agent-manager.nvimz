@@ -8,13 +8,17 @@ CONTENTS                                                   *agent-manager*
 3. Commands                                        |agent-manager-commands|
 4. Workspace                                      |agent-manager-workspace|
 5. Safety                                            |agent-manager-safety|
+6. UX integration                                       |agent-manager-ux|
 
 ==============================================================================
 1. Introduction                                      *agent-manager-intro*
 
-Agent Manager starts an embedded Rust broker and presents one Codex or Claude
-agent in native Neovim buffers. M1 streams conversation and tool activity and
-supports follow-up prompts, steering, and interrupt.
+Agent Manager presents Codex and Claude agents in native Neovim buffers. Its
+embedded Rust broker owns one live agent. Durable mode connects to a supervised,
+owner-only Unix socket and keeps multiple agents alive across SSH and Neovim
+restarts. M2 added safe interaction, M3 added the immutable `agent.manager` UX
+contracts, and M4 added replay/resync, metadata persistence, and writer
+isolation.
 
 ==============================================================================
 2. Setup                                              *agent-manager-setup*
@@ -36,6 +40,22 @@ A source checkout discovers target/release or target/debug broker artifacts
 and python/.venv/bin/python relative to the plugin root when present. Startup
 never builds or installs dependencies.
 
+Durable mode requires an already supervised broker plus absolute executable
+and socket paths:
+
+>lua
+    require("agent_manager").setup({
+      broker = {
+        mode = "durable",
+        command = { "/home/ai/.local/bin/agent-manager-broker", "serve-durable" },
+        socket = "/run/user/1000/agent-manager/broker.sock",
+      },
+    })
+<
+
+The durable client reconnects with capped backoff. Closing or tearing down the
+view disconnects Neovim only; it never shuts down the supervised broker.
+
 ==============================================================================
 3. Commands                                        *agent-manager-commands*
 
@@ -44,7 +64,11 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerStart*
 :AgentManagerStart [codex|claude]
-                           Start the one agent supported by M1.
+                           Select provider and shared/worktree strategy. Durable
+                           mode may own multiple agents; embedded mode owns one.
+
+                                                   *:AgentManagerAttach*
+:AgentManagerAttach        Select a broker agent or resumable provider session.
 
                                                    *:AgentManagerSend*
 :AgentManagerSend [text]   Send a prompt, or open native input without text.
@@ -54,6 +78,21 @@ never builds or installs dependencies.
 
                                                    *:AgentManagerInterrupt*
 :AgentManagerInterrupt     Confirm and interrupt the selected active turn.
+
+                                                   *:AgentManagerFork*
+:AgentManagerFork          Fork the selected idle or completed provider session.
+
+                                                   *:AgentManagerArchive*
+:AgentManagerArchive       Confirm and remove an inactive agent from the broker
+                           registry without deleting provider history.
+
+                                                   *:AgentManagerContext*
+:AgentManagerContext       Queue an explicit buffer, range, diagnostic, or diff
+                           snapshot for the selected agent's next input.
+
+                                                   *:AgentManagerDiff*
+:AgentManagerDiff          Show the workspace diff or resolve a dirty-buffer
+                           conflict caused by an external agent edit.
 
                                                    *:AgentManagerHealth*
 :AgentManagerHealth        Run |:checkhealth| for Agent Manager.
@@ -69,26 +108,68 @@ displays show all three. Medium and narrow displays use <Tab> and <S-Tab> to
 cycle panes.
 
     n       start an agent
+    h       attach to or resume a session
     p       prompt the selected agent
     s       steer an active turn
     x       confirm an interrupt
+    a / d   allow or deny only the focused human request
+    <CR>    answer a focused question or select an agent
+    c       queue explicit editor context
+    f       fork the selected provider session
+    A       archive the selected inactive agent
+    D       show a workspace diff or dirty-buffer conflict
     r       refresh broker state
-    <CR>    select the agent under the cursor
     ?       show mapping help
     q       close the workspace view
 
 Mappings are buffer-local. Closing the view does not approve, interrupt, or
-delete provider state.
+delete provider state. A provider approval or question opens a dedicated
+decision buffer that normal streaming redraws do not replace.
 
 ==============================================================================
 5. Safety                                            *agent-manager-safety*
 
 Live prompts may consume provider quota. Credentials stay in the installed
-provider runtimes and never enter Agent Manager configuration. M1 has no
-approval or question UI, so provider callbacks are denied automatically.
+provider runtimes and never enter Agent Manager configuration. Human callbacks
+fail closed on timeout, cancellation, disconnect, malformed response, or
+shutdown. The UI exposes only decisions advertised for the pending request.
 
-Embedded state ends when the broker exits. Durable reconnect, multiple agents,
-approvals, questions, resume, fork, history, diffs, and editor context belong
-to later milestones.
+Editor context is explicit and one-shot. Unsaved snapshots are marked but never
+written automatically. An external change never reloads a modified buffer; use
+|:AgentManagerDiff| to inspect, compare, explicitly reload, or keep it.
+
+Embedded state ends when its broker exits and supports one live runtime. The
+durable broker persists provider identity and transcript-free metadata, replays
+retained events, and reloads provider history when replay is too old. Shared
+Git checkouts permit one writable agent across all subdirectories. Additional
+writable agents require distinct, existing linked worktrees; Agent Manager
+validates but never creates or removes them. A fork keeps its source as a
+disconnected summary so writer ownership remains explicit.
+
+==============================================================================
+6. UX integration                                       *agent-manager-ux*
+
+Native presentation has no UX dependency. When UX Foundation schema v1 is on
+the runtimepath, Agent Manager registers the immutable `agent.manager` manifest
+and Foundation owns the AgentManager* groups and profile replay. UX Styling
+discovers `ux_styling_adapter.agent_manager` without loading the Agent Manager
+runtime, starting the broker, or reading domain data.
+
+Agent Manager does not write tabline, statusline, winbar, statuscolumn, fold,
+or scrollbar expressions owned by UX Chrome. Cached consumers may call:
+
+>lua
+    require("agent_manager").status()
+    require("agent_manager").running_count()
+    require("agent_manager").pending_approval_count()
+<
+
+These reads do not initialize the runtime. A scheduled
+`User AgentManagerStateChanged` event carries running_count,
+pending_approval_count, agent_ids, and a non-sensitive reason. It never carries
+prompt text, messages, tool payloads, or credentials. The current Chrome
+contract has no public segment API, so Agent Manager does not use Chrome
+internals. UX Panels is not available at the M3 compatibility pins; the view
+backend remains native and |:AgentManagerHealth| reports that choice.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

@@ -1,8 +1,10 @@
-//! Embedded public JSON-RPC broker served over stdio.
+//! Public JSON-RPC broker core and embedded stdio transport.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -22,13 +24,21 @@ use crate::protocol::{
     AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, PROTOCOL_VERSION,
     Provider, RequestId, WorkspaceStrategy,
 };
+use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
-use crate::runtime::{AgentCommand, RuntimeConfig, RuntimeEvent, spawn_agent};
+use crate::runtime::{
+    AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, discover_sessions, spawn_agent,
+};
+use crate::status::StatusStore;
 use crate::worker::{PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WorkerCommandSpec};
 
 const MAX_PUBLIC_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_REPLAY_CAPACITY: usize = 2_000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONTEXT_BYTES: usize = 512 * 1024;
+const MAX_CONTEXT_ITEMS: usize = 256;
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedConfig {
@@ -62,7 +72,23 @@ impl EmbeddedConfig {
     #[doc(hidden)]
     #[must_use]
     pub fn with_provider_commands(mut self, codex: CommandSpec, claude: WorkerCommandSpec) -> Self {
-        self.runtime = RuntimeConfig { codex, claude };
+        self.runtime.codex = codex;
+        self.runtime.claude = claude;
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_callback_timeout(mut self, timeout: Duration) -> Self {
+        self.runtime.callback_timeout = timeout;
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_replay_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "replay capacity must be positive");
+        self.replay_capacity = capacity;
         self
     }
 }
@@ -83,15 +109,27 @@ where
     W: AsyncWrite + Send + Unpin + 'static,
 {
     let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let input_handle = tokio::spawn(read_client(reader, input_tx));
+    let generation = 1;
     let (output_tx, output_rx) = mpsc::unbounded_channel();
+    let _ = input_tx.send(ClientInput::Connected {
+        generation,
+        output: output_tx,
+    });
+    let input_handle = tokio::spawn(read_client(reader, input_tx, generation));
     let output_handle = tokio::spawn(write_client(writer, output_rx));
     let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
 
-    let mut broker = Broker::new(config, output_tx, runtime_tx);
+    let mut broker = Broker::new(
+        config,
+        BrokerMode::Embedded,
+        runtime_tx,
+        None,
+        Vec::new(),
+        None,
+    );
     let broker_result = broker.run(input_rx, runtime_rx).await;
     broker.shutdown_agents().await;
-    drop(broker.output);
+    drop(broker.output.take());
 
     input_handle.abort();
     let _ = input_handle.await;
@@ -100,33 +138,52 @@ where
 }
 
 #[derive(Debug)]
-enum ClientInput {
-    Frame(Value),
-    ParseError,
-    FrameTooLarge,
-    Io(io::Error),
-    Closed,
+pub(crate) enum ClientInput {
+    Connected {
+        generation: u64,
+        output: mpsc::UnboundedSender<Value>,
+    },
+    Frame {
+        generation: u64,
+        value: Value,
+    },
+    ParseError {
+        generation: u64,
+    },
+    FrameTooLarge {
+        generation: u64,
+    },
+    Io {
+        generation: u64,
+        error: io::Error,
+    },
+    Closed {
+        generation: u64,
+    },
 }
 
-async fn read_client<R>(mut reader: R, input: mpsc::UnboundedSender<ClientInput>)
-where
+pub(crate) async fn read_client<R>(
+    mut reader: R,
+    input: mpsc::UnboundedSender<ClientInput>,
+    generation: u64,
+) where
     R: AsyncBufRead + Unpin,
 {
     loop {
         let frame = match read_bounded_line(&mut reader, MAX_PUBLIC_FRAME_BYTES).await {
             Ok(frame) => frame,
             Err(error) => {
-                let _ = input.send(ClientInput::Io(error));
+                let _ = input.send(ClientInput::Io { generation, error });
                 return;
             }
         };
         match frame {
             BoundedFrame::Closed => {
-                let _ = input.send(ClientInput::Closed);
+                let _ = input.send(ClientInput::Closed { generation });
                 return;
             }
             BoundedFrame::TooLarge => {
-                let _ = input.send(ClientInput::FrameTooLarge);
+                let _ = input.send(ClientInput::FrameTooLarge { generation });
                 return;
             }
             BoundedFrame::Data(mut data) => {
@@ -135,12 +192,15 @@ where
                 }
                 match serde_json::from_slice(&data) {
                     Ok(value) => {
-                        if input.send(ClientInput::Frame(value)).is_err() {
+                        if input
+                            .send(ClientInput::Frame { generation, value })
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     Err(_) => {
-                        if input.send(ClientInput::ParseError).is_err() {
+                        if input.send(ClientInput::ParseError { generation }).is_err() {
                             return;
                         }
                     }
@@ -150,7 +210,7 @@ where
     }
 }
 
-async fn write_client<W>(
+pub(crate) async fn write_client<W>(
     mut writer: W,
     mut output: mpsc::UnboundedReceiver<Value>,
 ) -> Result<(), EmbeddedError>
@@ -173,40 +233,102 @@ enum ConnectionPhase {
     Ready,
 }
 
-struct ManagedAgent {
-    summary: AgentSummary,
-    commands: mpsc::Sender<AgentCommand>,
-    task: Option<JoinHandle<()>>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrokerMode {
+    Embedded,
+    Durable,
 }
 
-struct Broker {
+impl BrokerMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Durable => "durable",
+        }
+    }
+}
+
+struct PendingRuntimeRequest {
+    generation: u64,
+    public_id: RequestId,
+}
+
+struct ManagedAgent {
+    summary: AgentSummary,
+    workspace_identity: PathBuf,
+    commands: mpsc::Sender<AgentCommand>,
+    task: Option<JoinHandle<()>>,
+    pending_contexts: Vec<Value>,
+    pending_questions: u64,
+}
+
+pub(crate) struct Broker {
     phase: ConnectionPhase,
+    mode: BrokerMode,
+    connection_generation: u64,
+    reconnect_cursor: u64,
     config: EmbeddedConfig,
     agents: HashMap<String, ManagedAgent>,
     agent_order: Vec<String>,
     replay: ReplayBuffer,
-    output: mpsc::UnboundedSender<Value>,
+    output: Option<mpsc::UnboundedSender<Value>>,
     runtime: mpsc::UnboundedSender<RuntimeEvent>,
+    next_runtime_request: u64,
+    pending_runtime_requests: HashMap<RequestId, PendingRuntimeRequest>,
+    registry: Option<RegistryStore>,
+    status: Option<StatusStore>,
 }
 
 impl Broker {
-    fn new(
+    pub(crate) fn new(
         config: EmbeddedConfig,
-        output: mpsc::UnboundedSender<Value>,
+        mode: BrokerMode,
         runtime: mpsc::UnboundedSender<RuntimeEvent>,
+        registry: Option<RegistryStore>,
+        restored_agents: Vec<AgentSummary>,
+        status: Option<StatusStore>,
     ) -> Self {
+        let mut agents = HashMap::new();
+        let mut agent_order = Vec::new();
+        for mut summary in restored_agents {
+            summary.capabilities = capabilities(summary.provider);
+            let (commands, commands_rx) = mpsc::channel(1);
+            drop(commands_rx);
+            agent_order.push(summary.id.clone());
+            agents.insert(
+                summary.id.clone(),
+                ManagedAgent {
+                    workspace_identity: checkout_identity(
+                        summary.workspace_strategy,
+                        Path::new(&summary.cwd),
+                    ),
+                    summary,
+                    commands,
+                    task: None,
+                    pending_contexts: Vec::new(),
+                    pending_questions: 0,
+                },
+            );
+        }
         Self {
             phase: ConnectionPhase::AwaitInitialize,
+            mode,
+            connection_generation: 0,
+            reconnect_cursor: 0,
             replay: ReplayBuffer::new(config.replay_capacity),
             config,
-            agents: HashMap::new(),
-            agent_order: Vec::new(),
-            output,
+            agents,
+            agent_order,
+            output: None,
             runtime,
+            next_runtime_request: 1,
+            pending_runtime_requests: HashMap::new(),
+            registry,
+            status,
         }
     }
 
-    async fn run(
+    pub(crate) async fn run(
         &mut self,
         mut input: mpsc::UnboundedReceiver<ClientInput>,
         mut runtime: mpsc::UnboundedReceiver<RuntimeEvent>,
@@ -218,28 +340,55 @@ impl Broker {
                         return Ok(());
                     };
                     match client {
-                        ClientInput::Frame(frame) => {
-                            if self.handle_client_frame(frame).await? {
+                        ClientInput::Connected { generation, output } => {
+                            self.connect(generation, output);
+                        }
+                        ClientInput::Frame { generation, value } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.handle_client_frame(value).await? {
                                 return Ok(());
                             }
                         }
-                        ClientInput::ParseError => self.send(error_response(
-                            None,
-                            -32_700,
-                            "Parse error",
-                            None,
-                        )),
-                        ClientInput::FrameTooLarge => {
+                        ClientInput::ParseError { generation } => {
+                            if generation == self.connection_generation {
+                                self.send(error_response(None, -32_700, "Parse error", None));
+                            }
+                        }
+                        ClientInput::FrameTooLarge { generation } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
                             self.send(error_response(
                                 None,
                                 -32_600,
                                 "Invalid Request",
                                 Some(json!({ "reason": "frame_too_large" })),
                             ));
-                            return Ok(());
+                            if self.mode == BrokerMode::Embedded {
+                                return Ok(());
+                            }
+                            self.disconnect(generation);
                         }
-                        ClientInput::Io(error) => return Err(EmbeddedError::Io(error)),
-                        ClientInput::Closed => return Ok(()),
+                        ClientInput::Io { generation, error } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.mode == BrokerMode::Embedded {
+                                return Err(EmbeddedError::Io(error));
+                            }
+                            self.disconnect(generation);
+                        }
+                        ClientInput::Closed { generation } => {
+                            if generation != self.connection_generation {
+                                continue;
+                            }
+                            if self.mode == BrokerMode::Embedded {
+                                return Ok(());
+                            }
+                            self.disconnect(generation);
+                        }
                     }
                 }
                 provider = runtime.recv() => {
@@ -249,6 +398,30 @@ impl Broker {
                     self.handle_runtime_event(provider);
                 }
             }
+        }
+    }
+
+    fn connect(&mut self, generation: u64, output: mpsc::UnboundedSender<Value>) {
+        if generation <= self.connection_generation {
+            return;
+        }
+        self.connection_generation = generation;
+        self.phase = ConnectionPhase::AwaitInitialize;
+        self.reconnect_cursor = 0;
+        self.output = Some(output);
+    }
+
+    fn disconnect(&mut self, generation: u64) {
+        if generation != self.connection_generation {
+            return;
+        }
+        self.output = None;
+        self.phase = ConnectionPhase::AwaitInitialize;
+        self.reconnect_cursor = 0;
+        self.pending_runtime_requests
+            .retain(|_, pending| pending.generation != generation);
+        for agent in self.agents.values() {
+            queue_client_disconnect(&agent.commands);
         }
     }
 
@@ -292,6 +465,18 @@ impl Broker {
             && params.as_object().is_some_and(serde_json::Map::is_empty)
         {
             self.phase = ConnectionPhase::Ready;
+            if self.mode == BrokerMode::Durable
+                && let ReplayResult::Events(events) =
+                    self.replay.replay_after(self.reconnect_cursor)
+            {
+                for event in events {
+                    self.send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "agent/event",
+                        "params": event,
+                    }));
+                }
+            }
             self.notify_state();
         }
     }
@@ -335,8 +520,10 @@ impl Broker {
                 request_id,
                 json!({ "agents": self.summaries() }),
             )),
-            "agent/start" => self.start_agent(request_id, params),
+            "provider/session/list" => self.provider_sessions(request_id, params).await,
+            "agent/start" => self.start_agent(request_id, params, SessionLaunch::Start),
             "agent/attach" => self.attach_agent(request_id, params),
+            "agent/history" => self.history(request_id, params).await,
             "agent/prompt" => {
                 self.send_agent_input(request_id, params, InputKind::Prompt)
                     .await;
@@ -346,28 +533,31 @@ impl Broker {
                     .await;
             }
             "agent/interrupt" => self.interrupt_agent(request_id, params).await,
+            "agent/resume" => self.resume_agent(request_id, params),
+            "agent/fork" => self.fork_agent(request_id, params).await,
+            "agent/archive" => self.archive_agent(request_id, params).await,
+            "agent/approval/respond" => self.respond_approval(request_id, params).await,
+            "agent/question/respond" => self.respond_question(request_id, params).await,
+            "agent/context/add" => self.add_context(request_id, params),
+            "agent/diff" => self.diff(request_id, params).await,
             "agent/replay" => self.replay(request_id, params),
             "broker/shutdown" => {
                 if !params.as_object().is_some_and(serde_json::Map::is_empty) {
                     self.send(invalid_params(request_id, "params must be empty"));
                     return Ok(false);
                 }
+                if self.mode == BrokerMode::Durable {
+                    self.send(error_response(
+                        Some(request_id),
+                        -32_010,
+                        "Durable broker shutdown is owned by the lifecycle manager",
+                        None,
+                    ));
+                    return Ok(false);
+                }
                 self.send(success_response(request_id, json!({ "shutdown": true })));
                 return Ok(true);
             }
-            "agent/history"
-            | "agent/resume"
-            | "agent/fork"
-            | "agent/archive"
-            | "agent/approval/respond"
-            | "agent/question/respond"
-            | "agent/context/add"
-            | "agent/diff" => self.send(error_response(
-                Some(request_id),
-                -32_010,
-                "Method is planned for a later milestone",
-                None,
-            )),
             _ => self.send(error_response(
                 Some(request_id),
                 -32_601,
@@ -394,12 +584,27 @@ impl Broker {
             return false;
         }
         self.phase = ConnectionPhase::AwaitInitialized;
+        self.reconnect_cursor = parsed.last_sequence.unwrap_or(0);
+        let (oldest, latest) = self
+            .replay
+            .bounds()
+            .map_or((None, None), |(oldest, latest)| {
+                (Some(oldest), Some(latest))
+            });
+        let resync_required = self.mode == BrokerMode::Durable
+            && matches!(
+                self.replay.replay_after(self.reconnect_cursor),
+                ReplayResult::ResyncRequired { .. }
+            );
+        if resync_required {
+            self.reconnect_cursor = latest.unwrap_or(self.reconnect_cursor);
+        }
         self.send(success_response(
             request_id,
             json!({
                 "protocol_version": PROTOCOL_VERSION,
                 "broker_version": BROKER_VERSION,
-                "mode": "embedded",
+                "mode": self.mode.name(),
                 "providers": {
                     "codex": { "app_server_version": PINNED_CODEX_VERSION },
                     "claude": {
@@ -407,22 +612,52 @@ impl Broker {
                         "claude_code_version": PINNED_CLAUDE_CODE_VERSION,
                     }
                 },
-                "replay": { "capacity": self.config.replay_capacity },
+                "replay": {
+                    "capacity": self.config.replay_capacity,
+                    "oldest": oldest,
+                    "latest": latest,
+                    "resync_required": resync_required,
+                },
+                "registry": {
+                    "path": self.registry.as_ref().map(RegistryStore::path),
+                    "metadata_only": true,
+                },
             }),
         ));
         false
     }
 
-    fn start_agent(&mut self, request_id: RequestId, params: Value) {
-        if !self.agents.is_empty() {
-            self.send(error_response(
-                Some(request_id),
-                -32_011,
-                "M1 embedded mode supports one agent",
-                None,
+    async fn provider_sessions(&self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ProviderSessionListParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid provider session list parameters",
             ));
             return;
+        };
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let limit = parsed.limit.unwrap_or(50).clamp(1, 1_000);
+        match discover_sessions(
+            parsed.provider,
+            &cwd,
+            parsed.cursor.as_deref(),
+            limit,
+            &self.config.runtime,
+        )
+        .await
+        {
+            Ok(result) => self.send(success_response(request_id, result)),
+            Err(message) => self.send(error_response(Some(request_id), -32_020, message, None)),
         }
+    }
+
+    fn start_agent(&mut self, request_id: RequestId, params: Value, launch: SessionLaunch) {
         let Ok(parsed) = serde_json::from_value::<StartParams>(params) else {
             self.send(invalid_params(request_id, "invalid start parameters"));
             return;
@@ -434,7 +669,7 @@ impl Broker {
         {
             self.send(invalid_params(
                 request_id,
-                "provider options are not available in M1",
+                "provider options are not available in M2",
             ));
             return;
         }
@@ -449,6 +684,7 @@ impl Broker {
             parsed.workspace_strategy,
             parsed.worktree_path.as_deref(),
             &cwd,
+            self.mode,
         ) {
             Ok(path) => path,
             Err(message) => {
@@ -457,46 +693,103 @@ impl Broker {
             }
         };
 
+        let _ = self.launch_agent(
+            request_id,
+            parsed.provider,
+            cwd,
+            parsed.workspace_strategy,
+            worktree_path,
+            launch,
+        );
+    }
+
+    fn launch_agent(
+        &mut self,
+        request_id: RequestId,
+        provider: Provider,
+        cwd: PathBuf,
+        workspace_strategy: WorkspaceStrategy,
+        worktree_path: Option<String>,
+        launch: SessionLaunch,
+    ) -> Option<String> {
+        if self.mode == BrokerMode::Embedded
+            && self.agents.values().any(|agent| agent.task.is_some())
+        {
+            self.send(error_response(
+                Some(request_id),
+                -32_011,
+                "M2 embedded mode supports one live agent",
+                None,
+            ));
+            return None;
+        }
+        let workspace_identity = checkout_identity(workspace_strategy, &cwd);
+        if self.agents.values().any(|agent| {
+            agent.task.is_some()
+                && !matches!(
+                    agent.summary.state,
+                    AgentState::Disconnected | AgentState::Failed
+                )
+                && agent.workspace_identity == workspace_identity
+        }) {
+            self.send(error_response(
+                Some(request_id),
+                -32_012,
+                "A writable agent already owns this checkout; select an isolated worktree",
+                Some(json!({
+                    "reason": "shared_checkout_writer_conflict",
+                    "cwd": cwd,
+                    "workspace_strategy": workspace_strategy,
+                })),
+            ));
+            return None;
+        }
         let agent_id = Uuid::new_v4().to_string();
         let now = timestamp();
         let title = cwd
             .file_name()
             .and_then(|name| name.to_str())
-            .map_or_else(|| parsed.provider.to_string(), str::to_owned);
+            .map_or_else(|| provider.to_string(), str::to_owned);
         let summary = AgentSummary {
             id: agent_id.clone(),
-            provider: parsed.provider,
+            provider,
             provider_session_id: None,
             cwd: cwd.to_string_lossy().into_owned(),
-            workspace_strategy: parsed.workspace_strategy,
+            workspace_strategy,
             worktree_path,
             title,
             state: AgentState::Starting,
             active_turn_id: None,
             pending_approvals: 0,
             unread_events: 0,
-            capabilities: capabilities(parsed.provider),
+            capabilities: capabilities(provider),
             created_at: now.clone(),
             updated_at: now,
         };
+        let runtime_request_id = self.runtime_request(request_id);
         let (commands, task) = spawn_agent(
-            parsed.provider,
+            provider,
             agent_id.clone(),
             cwd,
-            request_id,
+            runtime_request_id,
+            launch,
             self.config.runtime.clone(),
             self.runtime.clone(),
         );
         self.agent_order.push(agent_id.clone());
         self.agents.insert(
-            agent_id,
+            agent_id.clone(),
             ManagedAgent {
                 summary,
+                workspace_identity,
                 commands,
                 task: Some(task),
+                pending_contexts: Vec::new(),
+                pending_questions: 0,
             },
         );
         self.notify_state();
+        Some(agent_id)
     }
 
     fn attach_agent(&self, request_id: RequestId, params: Value) {
@@ -514,6 +807,207 @@ impl Broker {
         ));
     }
 
+    async fn history(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<HistoryParams>(params) else {
+            self.send(invalid_params(request_id, "invalid history parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if agent.task.is_none() {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent is not live; resume the provider session before reading history",
+                None,
+            ));
+            return;
+        }
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        let command_failed = self
+            .agents
+            .get_mut(&parsed.agent_id)
+            .expect("validated agent must remain present")
+            .commands
+            .send(AgentCommand::History {
+                request_id: runtime_request_id.clone(),
+                cursor: parsed.cursor,
+                limit: parsed.limit,
+            })
+            .await
+            .is_err();
+        if command_failed {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    fn resume_agent(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ResumeParams>(params) else {
+            self.send(invalid_params(request_id, "invalid resume parameters"));
+            return;
+        };
+        if parsed.provider_session_id.is_empty() {
+            self.send(invalid_params(
+                request_id,
+                "provider session id must not be empty",
+            ));
+            return;
+        }
+        if parsed
+            .provider_options
+            .as_ref()
+            .is_some_and(|options| !options.is_empty())
+        {
+            self.send(invalid_params(
+                request_id,
+                "provider options are not available in M2",
+            ));
+            return;
+        }
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let worktree_path = match validate_workspace(
+            parsed.workspace_strategy,
+            parsed.worktree_path.as_deref(),
+            &cwd,
+            self.mode,
+        ) {
+            Ok(path) => path,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let session_id = parsed.provider_session_id;
+        let _ = self.launch_agent(
+            request_id,
+            parsed.provider,
+            cwd,
+            parsed.workspace_strategy,
+            worktree_path,
+            SessionLaunch::Resume(session_id),
+        );
+    }
+
+    async fn fork_agent(&mut self, request_id: RequestId, params: Value) {
+        let Some(source_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(source) = self.agents.get(&source_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if !matches!(
+            source.summary.state,
+            AgentState::Idle | AgentState::Completed | AgentState::Interrupted
+        ) || source.summary.pending_approvals > 0
+            || source.pending_questions > 0
+        {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent must be idle with no pending human request before it can be forked",
+                None,
+            ));
+            return;
+        }
+        let Some(provider_session_id) = source.summary.provider_session_id.clone() else {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Agent has no provider session identity to fork",
+                None,
+            ));
+            return;
+        };
+        let provider = source.summary.provider;
+        let cwd = PathBuf::from(&source.summary.cwd);
+        let strategy = source.summary.workspace_strategy;
+        let worktree_path = source.summary.worktree_path.clone();
+        let pending_contexts = source.pending_contexts.clone();
+        self.retire_agent(&source_id).await;
+        let forked_id = self.launch_agent(
+            request_id,
+            provider,
+            cwd,
+            strategy,
+            worktree_path,
+            SessionLaunch::Fork(provider_session_id),
+        );
+        if let Some(agent) = forked_id.and_then(|agent_id| self.agents.get_mut(&agent_id)) {
+            agent.pending_contexts = pending_contexts;
+        }
+    }
+
+    async fn retire_agent(&mut self, agent_id: &str) {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return;
+        };
+        let _ = agent.commands.send(AgentCommand::Shutdown).await;
+        if let Some(mut task) = agent.task.take()
+            && tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        agent.summary.state = AgentState::Disconnected;
+        agent.summary.active_turn_id = None;
+        agent.summary.pending_approvals = 0;
+        agent.pending_questions = 0;
+        agent.pending_contexts.clear();
+        agent.summary.updated_at = timestamp();
+        self.notify_state();
+    }
+
+    async fn archive_agent(&mut self, request_id: RequestId, params: Value) {
+        let Some(agent_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get(&agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if matches!(
+            agent.summary.state,
+            AgentState::Starting
+                | AgentState::Running
+                | AgentState::WaitingInput
+                | AgentState::WaitingApproval
+        ) || agent.summary.pending_approvals > 0
+            || agent.pending_questions > 0
+        {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Only an inactive agent with no pending human request can be archived",
+                None,
+            ));
+            return;
+        }
+        if agent.task.is_some() {
+            self.retire_agent(&agent_id).await;
+        }
+        self.agents.remove(&agent_id);
+        self.agent_order.retain(|candidate| candidate != &agent_id);
+        self.send(success_response(
+            request_id,
+            json!({ "archived": true, "agent_id": agent_id }),
+        ));
+        self.notify_state();
+    }
+
     async fn send_agent_input(&mut self, request_id: RequestId, params: Value, kind: InputKind) {
         let Ok(parsed) = serde_json::from_value::<TurnInputParams>(params) else {
             self.send(invalid_params(request_id, "invalid turn input parameters"));
@@ -521,15 +1015,6 @@ impl Broker {
         };
         if parsed.input.text.is_empty() {
             self.send(invalid_params(request_id, "input text must not be empty"));
-            return;
-        }
-        if !parsed.input.attachments.is_empty() {
-            self.send(error_response(
-                Some(request_id),
-                -32_012,
-                "Editor attachments are planned for M2",
-                None,
-            ));
             return;
         }
         let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
@@ -552,17 +1037,47 @@ impl Broker {
             ));
             return;
         }
+        let cwd = Path::new(&agent.summary.cwd);
+        let mut attachments = agent.pending_contexts.clone();
+        for attachment in parsed.input.attachments {
+            let attachment = match validate_context(attachment, cwd) {
+                Ok(attachment) => attachment,
+                Err(message) => {
+                    self.send(invalid_params(request_id, message));
+                    return;
+                }
+            };
+            attachments.push(attachment);
+        }
+        if let Err(message) = validate_context_collection(&attachments) {
+            self.send(invalid_params(request_id, message));
+            return;
+        }
+        let commands = agent.commands.clone();
+        agent.pending_contexts.clear();
+        if kind == InputKind::Prompt {
+            agent.summary.state = AgentState::Running;
+            agent.summary.updated_at = timestamp();
+        }
+        let runtime_request_id = self.runtime_request(request_id.clone());
         let command = match kind {
             InputKind::Prompt => AgentCommand::Prompt {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
                 text: parsed.input.text,
+                attachments,
             },
             InputKind::Steer => AgentCommand::Steer {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
                 text: parsed.input.text,
+                attachments,
             },
         };
-        if agent.commands.send(command).await.is_err() {
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            let agent = self
+                .agents
+                .get_mut(&parsed.agent_id)
+                .expect("validated agent must remain present");
             agent.summary.state = AgentState::Disconnected;
             agent.summary.updated_at = timestamp();
             self.send(error_response(
@@ -575,8 +1090,6 @@ impl Broker {
             return;
         }
         if kind == InputKind::Prompt {
-            agent.summary.state = AgentState::Running;
-            agent.summary.updated_at = timestamp();
             self.notify_state();
         }
     }
@@ -586,18 +1099,24 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid agent id parameters"));
             return;
         };
-        let Some(agent) = self.agents.get_mut(&agent_id) else {
+        let Some(agent) = self.agents.get(&agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
-        if agent
-            .commands
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        if commands
             .send(AgentCommand::Interrupt {
-                request_id: request_id.clone(),
+                request_id: runtime_request_id.clone(),
             })
             .await
             .is_err()
         {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            let agent = self
+                .agents
+                .get_mut(&agent_id)
+                .expect("validated agent must remain present");
             agent.summary.state = AgentState::Disconnected;
             agent.summary.updated_at = timestamp();
             self.send(error_response(
@@ -608,6 +1127,187 @@ impl Broker {
             ));
             self.notify_state();
         }
+    }
+
+    async fn respond_approval(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ApprovalResponseParams>(params) else {
+            self.send(invalid_params(request_id, "invalid approval response"));
+            return;
+        };
+        if !matches!(parsed.decision.as_str(), "allow" | "deny" | "defer") {
+            self.send(invalid_params(request_id, "invalid approval decision"));
+            return;
+        }
+        if parsed.agent_id.is_empty()
+            || parsed.approval_id.is_empty()
+            || parsed
+                .updated_input
+                .as_ref()
+                .is_some_and(|value| !value.is_object())
+            || parsed
+                .message
+                .as_ref()
+                .is_some_and(|message| message.chars().count() > 4_096)
+        {
+            self.send(invalid_params(request_id, "invalid approval response"));
+            return;
+        }
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        let command = AgentCommand::Approval {
+            request_id: runtime_request_id.clone(),
+            action_id: parsed.approval_id,
+            decision: parsed.decision,
+            updated_input: parsed.updated_input,
+            message: parsed.message,
+        };
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    async fn respond_question(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<QuestionResponseParams>(params) else {
+            self.send(invalid_params(request_id, "invalid question response"));
+            return;
+        };
+        if !matches!(parsed.decision.as_str(), "answer" | "deny") {
+            self.send(invalid_params(request_id, "invalid question decision"));
+            return;
+        }
+        if parsed.agent_id.is_empty()
+            || parsed.question_id.is_empty()
+            || !valid_question_answers(&parsed.answers)
+            || parsed
+                .message
+                .as_ref()
+                .is_some_and(|message| message.chars().count() > 4_096)
+        {
+            self.send(invalid_params(request_id, "invalid question response"));
+            return;
+        }
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let commands = agent.commands.clone();
+        let runtime_request_id = self.runtime_request(request_id.clone());
+        let command = AgentCommand::Question {
+            request_id: runtime_request_id.clone(),
+            action_id: parsed.question_id,
+            decision: parsed.decision,
+            answers: parsed.answers,
+            message: parsed.message,
+        };
+        if commands.send(command).await.is_err() {
+            self.pending_runtime_requests.remove(&runtime_request_id);
+            self.command_channel_failed(&parsed.agent_id, request_id);
+        }
+    }
+
+    fn add_context(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ContextParams>(params) else {
+            self.send(invalid_params(request_id, "invalid editor context"));
+            return;
+        };
+        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        if agent.task.is_none() || agent.summary.state == AgentState::Disconnected {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Editor context requires a live agent",
+                None,
+            ));
+            return;
+        }
+        let context = match validate_context(parsed.context, Path::new(&agent.summary.cwd)) {
+            Ok(context) => context,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let mut contexts = agent.pending_contexts.clone();
+        contexts.push(context.clone());
+        if let Err(message) = validate_context_collection(&contexts) {
+            self.send(invalid_params(request_id, message));
+            return;
+        }
+        agent.pending_contexts = contexts;
+        let count = agent.pending_contexts.len();
+        self.send(success_response(
+            request_id,
+            json!({
+                "queued": true,
+                "count": count,
+                "context": context,
+            }),
+        ));
+    }
+
+    async fn diff(&self, request_id: RequestId, params: Value) {
+        let Some(agent_id) = parse_agent_id(params) else {
+            self.send(invalid_params(request_id, "invalid agent id parameters"));
+            return;
+        };
+        let Some(agent) = self.agents.get(&agent_id) else {
+            self.send(agent_not_found(request_id));
+            return;
+        };
+        let cwd = agent.summary.cwd.clone();
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args(["-C", &cwd, "diff", "--no-ext-diff", "--no-textconv", "--"])
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(DIFF_TIMEOUT, command.output()).await;
+        let Ok(Ok(output)) = output else {
+            self.send(error_response(
+                Some(request_id),
+                -32_020,
+                "Workspace diff timed out or could not be started",
+                None,
+            ));
+            return;
+        };
+        if !output.status.success() {
+            self.send(error_response(
+                Some(request_id),
+                -32_020,
+                "Workspace diff is unavailable for this directory",
+                None,
+            ));
+            return;
+        }
+        let truncated = output.stdout.len() > MAX_DIFF_BYTES;
+        let bytes = &output.stdout[..output.stdout.len().min(MAX_DIFF_BYTES)];
+        let diff = String::from_utf8_lossy(bytes).into_owned();
+        self.send(success_response(
+            request_id,
+            json!({ "cwd": cwd, "diff": diff, "truncated": truncated }),
+        ));
+    }
+
+    fn command_channel_failed(&mut self, agent_id: &str, request_id: RequestId) {
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.summary.state = AgentState::Disconnected;
+            agent.summary.updated_at = timestamp();
+            agent.pending_contexts.clear();
+        }
+        self.send(error_response(
+            Some(request_id),
+            -32_020,
+            "Provider command channel is unavailable",
+            None,
+        ));
+        self.notify_state();
     }
 
     fn replay(&self, request_id: RequestId, params: Value) {
@@ -644,73 +1344,109 @@ impl Broker {
                     agent.summary.updated_at = timestamp();
                     agent.summary.clone()
                 };
-                self.send(success_response(request_id, json!({ "agent": summary })));
+                self.send_runtime_response(&request_id, |public_id| {
+                    success_response(public_id, json!({ "agent": summary }))
+                });
                 self.notify_state();
             }
             RuntimeEvent::Response { request_id, result } => {
-                self.send(success_response(request_id, result));
+                self.send_runtime_response(&request_id, |public_id| {
+                    success_response(public_id, result)
+                });
             }
             RuntimeEvent::RequestFailed {
                 request_id,
                 agent_id,
                 code,
                 message,
+                fail_agent,
             } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                if fail_agent && let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.summary.state = AgentState::Failed;
                     agent.summary.active_turn_id = None;
                     agent.summary.updated_at = timestamp();
+                    let _ = agent.commands.try_send(AgentCommand::Shutdown);
                 }
-                self.send(error_response(Some(request_id), code, message, None));
-                self.notify_state();
-            }
-            RuntimeEvent::ProviderEvent(mut event) => {
-                let sequence = self.replay.push(event.clone());
-                event.sequence = sequence;
-                let state_changed = self.apply_event_state(&event);
-                self.send(json!({
-                    "jsonrpc": "2.0",
-                    "method": "agent/event",
-                    "params": event,
-                }));
-                if state_changed {
+                self.send_runtime_response(&request_id, |public_id| {
+                    error_response(Some(public_id), code, &message, None)
+                });
+                if fail_agent {
                     self.notify_state();
                 }
             }
+            RuntimeEvent::ProviderEvent(event) => self.handle_provider_event(event),
             RuntimeEvent::ProviderFailed { agent_id, message } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
-                    agent.summary.state = AgentState::Disconnected;
-                    agent.summary.active_turn_id = None;
-                    agent.summary.updated_at = timestamp();
-                    let mut event = EventEnvelope::new(
-                        timestamp(),
-                        agent_id,
-                        agent.summary.provider,
-                        "broker.error".to_owned(),
-                        json!({ "message": message }),
-                        json!({ "kind": "broker", "redacted": true }),
-                    );
-                    let sequence = self.replay.push(event.clone());
-                    event.sequence = sequence;
-                    self.send(json!({
-                        "jsonrpc": "2.0",
-                        "method": "agent/event",
-                        "params": event,
-                    }));
-                    self.notify_state();
-                }
+                self.handle_provider_failure(agent_id, message);
             }
             RuntimeEvent::Stopped { agent_id } => {
-                if let Some(agent) = self.agents.get_mut(&agent_id)
-                    && agent.summary.state != AgentState::Disconnected
-                {
-                    agent.summary.state = AgentState::Disconnected;
-                    agent.summary.active_turn_id = None;
-                    agent.summary.updated_at = timestamp();
-                    self.notify_state();
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    agent.task.take();
+                    agent.pending_contexts.clear();
+                    if agent.summary.state != AgentState::Disconnected {
+                        agent.summary.state = AgentState::Disconnected;
+                        agent.summary.active_turn_id = None;
+                        agent.summary.updated_at = timestamp();
+                        self.notify_state();
+                    }
                 }
             }
         }
+    }
+
+    fn handle_provider_event(&mut self, mut event: EventEnvelope) {
+        if self.mode == BrokerMode::Durable
+            && self.phase != ConnectionPhase::Ready
+            && matches!(
+                event.event_type.as_str(),
+                "approval.requested" | "question.requested"
+            )
+            && let Some(agent) = self.agents.get(&event.agent_id)
+        {
+            queue_client_disconnect(&agent.commands);
+        }
+        let sequence = self.replay.push(event.clone());
+        event.sequence = sequence;
+        let state_changed = self.apply_event_state(&event);
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "agent/event",
+                "params": event,
+            }));
+        }
+        if state_changed {
+            self.notify_state();
+        }
+    }
+
+    fn handle_provider_failure(&mut self, agent_id: String, message: &'static str) {
+        let Some(agent) = self.agents.get_mut(&agent_id) else {
+            return;
+        };
+        agent.summary.state = AgentState::Disconnected;
+        agent.summary.active_turn_id = None;
+        agent.summary.pending_approvals = 0;
+        agent.pending_questions = 0;
+        agent.summary.updated_at = timestamp();
+        agent.pending_contexts.clear();
+        let mut event = EventEnvelope::new(
+            timestamp(),
+            agent_id,
+            agent.summary.provider,
+            "broker.error".to_owned(),
+            json!({ "message": message }),
+            json!({ "kind": "broker", "redacted": true }),
+        );
+        let sequence = self.replay.push(event.clone());
+        event.sequence = sequence;
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "agent/event",
+                "params": event,
+            }));
+        }
+        self.notify_state();
     }
 
     fn apply_event_state(&mut self, event: &EventEnvelope) -> bool {
@@ -719,6 +1455,8 @@ impl Broker {
         };
         let previous_state = agent.summary.state;
         let previous_turn = agent.summary.active_turn_id.clone();
+        let previous_approvals = agent.summary.pending_approvals;
+        let previous_questions = agent.pending_questions;
         match event.event_type.as_str() {
             "turn.started" => {
                 agent.summary.state = AgentState::Running;
@@ -744,10 +1482,30 @@ impl Broker {
                 agent.summary.state = AgentState::Failed;
                 agent.summary.active_turn_id = None;
             }
+            "approval.requested" => {
+                agent.summary.pending_approvals = agent.summary.pending_approvals.saturating_add(1);
+                agent.summary.state = AgentState::WaitingApproval;
+            }
+            "question.requested" => {
+                agent.pending_questions = agent.pending_questions.saturating_add(1);
+                if agent.summary.pending_approvals == 0 {
+                    agent.summary.state = AgentState::WaitingInput;
+                }
+            }
+            "approval.resolved" => {
+                agent.summary.pending_approvals = agent.summary.pending_approvals.saturating_sub(1);
+                restore_waiting_state(agent);
+            }
+            "question.resolved" => {
+                agent.pending_questions = agent.pending_questions.saturating_sub(1);
+                restore_waiting_state(agent);
+            }
             _ => {}
         }
-        let changed =
-            previous_state != agent.summary.state || previous_turn != agent.summary.active_turn_id;
+        let changed = previous_state != agent.summary.state
+            || previous_turn != agent.summary.active_turn_id
+            || previous_approvals != agent.summary.pending_approvals
+            || previous_questions != agent.pending_questions;
         if changed {
             agent.summary.updated_at = timestamp();
         }
@@ -763,18 +1521,79 @@ impl Broker {
     }
 
     fn notify_state(&self) {
-        self.send(json!({
-            "jsonrpc": "2.0",
-            "method": "broker/state",
-            "params": { "agents": self.summaries() },
-        }));
+        let summaries = self.summaries();
+        let mut registry_failed = false;
+        let registry_bytes = if let Some(registry) = &self.registry {
+            if registry.persist(&summaries).is_err() {
+                registry_failed = true;
+                eprintln!("agent-manager-broker: durable registry persistence failed");
+            }
+            registry.bytes()
+        } else {
+            0
+        };
+        if let Some(status) = &self.status {
+            let result = if registry_failed {
+                status.failure(
+                    "registry_persistence_failed",
+                    summaries.len() as u64,
+                    registry_bytes,
+                )
+            } else {
+                status.success("running", summaries.len() as u64, registry_bytes)
+            };
+            if result.is_err() {
+                eprintln!("agent-manager-broker: durable status persistence failed");
+            }
+        }
+        if self.phase == ConnectionPhase::Ready {
+            self.send(json!({
+                "jsonrpc": "2.0",
+                "method": "broker/state",
+                "params": { "agents": summaries },
+            }));
+        }
     }
 
     fn send(&self, message: Value) {
-        let _ = self.output.send(message);
+        if let Some(output) = &self.output {
+            let _ = output.send(message);
+        }
     }
 
-    async fn shutdown_agents(&mut self) {
+    fn runtime_request(&mut self, public_id: RequestId) -> RequestId {
+        let request_id = RequestId::String(format!(
+            "broker:{}:{}",
+            self.connection_generation, self.next_runtime_request
+        ));
+        self.next_runtime_request = self
+            .next_runtime_request
+            .checked_add(1)
+            .expect("runtime request sequence overflow");
+        self.pending_runtime_requests.insert(
+            request_id.clone(),
+            PendingRuntimeRequest {
+                generation: self.connection_generation,
+                public_id,
+            },
+        );
+        request_id
+    }
+
+    fn send_runtime_response(
+        &mut self,
+        request_id: &RequestId,
+        response: impl FnOnce(RequestId) -> Value,
+    ) {
+        let Some(pending) = self.pending_runtime_requests.remove(request_id) else {
+            return;
+        };
+        if pending.generation == self.connection_generation && self.output.is_some() {
+            self.send(response(pending.public_id));
+        }
+    }
+
+    pub(crate) async fn shutdown_agents(&mut self) {
         for agent in self.agents.values() {
             let _ = agent.commands.send(AgentCommand::Shutdown).await;
         }
@@ -791,6 +1610,40 @@ impl Broker {
             }
         }
     }
+
+    pub(crate) fn durable_counts(&self) -> (u64, u64) {
+        (
+            self.agents.len() as u64,
+            self.registry.as_ref().map_or(0, RegistryStore::bytes),
+        )
+    }
+}
+
+fn queue_client_disconnect(commands: &mpsc::Sender<AgentCommand>) {
+    if commands.try_send(AgentCommand::ClientDisconnected).is_err() {
+        let commands = commands.clone();
+        tokio::spawn(async move {
+            let _ = commands.send(AgentCommand::ClientDisconnected).await;
+        });
+    }
+}
+
+fn restore_waiting_state(agent: &mut ManagedAgent) {
+    if matches!(
+        agent.summary.state,
+        AgentState::Disconnected | AgentState::Failed
+    ) {
+        return;
+    }
+    agent.summary.state = if agent.summary.pending_approvals > 0 {
+        AgentState::WaitingApproval
+    } else if agent.pending_questions > 0 {
+        AgentState::WaitingInput
+    } else if agent.summary.active_turn_id.is_some() {
+        AgentState::Running
+    } else {
+        AgentState::Idle
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -804,8 +1657,8 @@ enum InputKind {
 struct InitializeParams {
     protocol_version: u32,
     client: ClientIdentity,
-    #[serde(default, rename = "last_sequence")]
-    _last_sequence: Option<u64>,
+    #[serde(default)]
+    last_sequence: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,8 +1684,42 @@ struct StartParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ProviderSessionListParams {
+    provider: Provider,
+    cwd: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeParams {
+    provider: Provider,
+    provider_session_id: String,
+    cwd: String,
+    workspace_strategy: WorkspaceStrategy,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    provider_options: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentIdParams {
     agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryParams {
+    agent_id: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -847,6 +1734,57 @@ struct TurnInputParams {
 struct TurnInput {
     text: String,
     attachments: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalResponseParams {
+    agent_id: String,
+    approval_id: String,
+    decision: String,
+    #[serde(default)]
+    updated_input: Option<Value>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionResponseParams {
+    agent_id: String,
+    question_id: String,
+    #[serde(default = "answer_decision")]
+    decision: String,
+    answers: serde_json::Map<String, Value>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+fn answer_decision() -> String {
+    "answer".to_owned()
+}
+
+fn valid_question_answers(answers: &serde_json::Map<String, Value>) -> bool {
+    answers.len() <= 32
+        && answers.values().all(|answer| match answer {
+            Value::String(answer) => answer.chars().count() <= 16_384,
+            Value::Array(answers) => {
+                answers.len() <= 32
+                    && answers.iter().all(|answer| {
+                        answer
+                            .as_str()
+                            .is_some_and(|answer| answer.chars().count() <= 4_096)
+                    })
+            }
+            _ => false,
+        })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextParams {
+    agent_id: String,
+    context: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -878,6 +1816,7 @@ fn validate_workspace(
     strategy: WorkspaceStrategy,
     worktree_path: Option<&str>,
     cwd: &Path,
+    mode: BrokerMode,
 ) -> Result<Option<String>, &'static str> {
     match strategy {
         WorkspaceStrategy::Shared if worktree_path.is_none() => Ok(None),
@@ -888,29 +1827,155 @@ fn validate_workspace(
             };
             let worktree = canonical_directory(raw)?;
             if worktree != cwd {
-                return Err("M1 requires worktree_path to equal cwd");
+                return Err("worktree_path must equal the agent cwd");
+            }
+            if mode == BrokerMode::Durable && !is_linked_git_worktree(&worktree) {
+                return Err("durable worktree strategy requires a linked Git worktree");
             }
             Ok(Some(worktree.to_string_lossy().into_owned()))
         }
     }
 }
 
-fn capabilities(provider: Provider) -> Vec<Capability> {
-    let later = |name| Capability {
-        name,
-        available: false,
-        reason: Some("planned for a later milestone".to_owned()),
+fn checkout_identity(strategy: WorkspaceStrategy, cwd: &Path) -> PathBuf {
+    if strategy == WorkspaceStrategy::Worktree {
+        return cwd.to_owned();
+    }
+    git_top_level(cwd).unwrap_or_else(|| cwd.to_owned())
+}
+
+fn git_top_level(cwd: &Path) -> Option<PathBuf> {
+    git_rev_parse_path(cwd, "--show-toplevel")
+}
+
+fn git_rev_parse_path(cwd: &Path, argument: &str) -> Option<PathBuf> {
+    let output = StdCommand::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", argument])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = Path::new(raw.trim());
+    let path = if raw.is_absolute() {
+        raw.to_owned()
+    } else {
+        cwd.join(raw)
     };
+    path.canonicalize().ok()
+}
+
+fn is_linked_git_worktree(path: &Path) -> bool {
+    let marker = path.join(".git");
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() > 8_192 {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return false;
+    };
+    if !contents.starts_with("gitdir: ") {
+        return false;
+    }
+    let Some(root) = git_top_level(path) else {
+        return false;
+    };
+    let Some(git_directory) = git_rev_parse_path(path, "--git-dir") else {
+        return false;
+    };
+    let Some(common_directory) = git_rev_parse_path(path, "--git-common-dir") else {
+        return false;
+    };
+    root == path && git_directory != common_directory
+}
+
+fn validate_context(context: Value, cwd: &Path) -> Result<Value, &'static str> {
+    let object = context.as_object().ok_or("context must be an object")?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("context.kind must be a non-empty string")?;
+    if !matches!(kind, "buffer" | "range" | "diagnostics" | "diff") {
+        return Err("context kind must be buffer, range, diagnostics, or diff");
+    }
+    let payload = object
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or("context.payload must be an object")?;
+    let raw_path = payload
+        .get("path")
+        .or_else(|| payload.get("cwd"))
+        .and_then(Value::as_str)
+        .ok_or("editor context must identify its path")?;
+    let path = canonical_context_path(raw_path)?;
+    if !path.starts_with(cwd) {
+        return Err("editor context path escapes the agent cwd");
+    }
+    match kind {
+        "buffer" | "range" if !payload.get("text").is_some_and(Value::is_string) => {
+            return Err("buffer and range context require text");
+        }
+        "diagnostics" if !payload.get("diagnostics").is_some_and(Value::is_array) => {
+            return Err("diagnostics context requires a diagnostics array");
+        }
+        "diff" if !payload.get("diff").is_some_and(Value::is_string) => {
+            return Err("diff context requires diff text");
+        }
+        _ => {}
+    }
+    if serde_json::to_vec(&context).map_or(true, |encoded| encoded.len() > MAX_CONTEXT_BYTES) {
+        return Err("editor context exceeds the size limit");
+    }
+    Ok(context)
+}
+
+fn validate_context_collection(contexts: &[Value]) -> Result<(), &'static str> {
+    if contexts.len() > MAX_CONTEXT_ITEMS {
+        return Err("too many editor context items");
+    }
+    if serde_json::to_vec(contexts).map_or(true, |encoded| encoded.len() > MAX_CONTEXT_BYTES) {
+        return Err("combined editor context exceeds the size limit");
+    }
+    Ok(())
+}
+
+fn canonical_context_path(raw: &str) -> Result<PathBuf, &'static str> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err("editor context path must be absolute");
+    }
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map_err(|_| "editor context path could not be resolved");
+    }
+    let parent = path
+        .parent()
+        .ok_or("editor context path has no parent")?
+        .canonicalize()
+        .map_err(|_| "editor context parent does not exist")?;
+    let name = path
+        .file_name()
+        .ok_or("editor context path has no file name")?;
+    Ok(parent.join(name))
+}
+
+fn capabilities(provider: Provider) -> Vec<Capability> {
     vec![
         available(CapabilityName::Streaming),
         available(CapabilityName::MultiTurn),
-        later(CapabilityName::History),
-        later(CapabilityName::Resume),
-        later(CapabilityName::Fork),
+        available(CapabilityName::History),
+        available(CapabilityName::Resume),
+        available(CapabilityName::Fork),
         available(CapabilityName::Interrupt),
         available(CapabilityName::Steer),
-        later(CapabilityName::Approvals),
-        later(CapabilityName::Questions),
+        available(CapabilityName::Approvals),
+        available(CapabilityName::Questions),
         Capability {
             name: CapabilityName::Usage,
             available: true,
@@ -918,11 +1983,12 @@ fn capabilities(provider: Provider) -> Vec<Capability> {
         },
         Capability {
             name: CapabilityName::FileChanges,
-            available: provider == Provider::Codex,
-            reason: (provider == Provider::Claude)
-                .then(|| "Claude file projection is planned for M2".to_owned()),
+            available: true,
+            reason: (provider == Provider::Claude).then(|| {
+                "Projected from Claude tool and hook events when paths are supplied".to_owned()
+            }),
         },
-        later(CapabilityName::Diff),
+        available(CapabilityName::Diff),
         available(CapabilityName::Replay),
     ]
 }
@@ -986,5 +2052,171 @@ impl std::fmt::Display for Provider {
             Self::Codex => "codex",
             Self::Claude => "claude",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::{
+        Broker, BrokerMode, EmbeddedConfig, MAX_CONTEXT_BYTES, MAX_CONTEXT_ITEMS,
+        valid_question_answers, validate_context, validate_context_collection,
+    };
+    use crate::protocol::{EventEnvelope, Provider};
+
+    fn fixture_cwd() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .expect("canonical fixture cwd")
+    }
+
+    #[test]
+    fn validates_context_shape_and_rejects_workspace_escape() {
+        let cwd = fixture_cwd();
+        let valid = json!({
+            "kind": "range",
+            "payload": {
+                "path": cwd.join("Cargo.toml"),
+                "start_line": 1,
+                "end_line": 1,
+                "text": "[package]"
+            }
+        });
+        assert!(validate_context(valid, &cwd).is_ok());
+
+        let outside = cwd.parent().expect("workspace root").join("Cargo.toml");
+        let escaped = json!({
+            "kind": "buffer",
+            "payload": { "path": outside, "text": "[workspace]" }
+        });
+        assert_eq!(
+            validate_context(escaped, &cwd),
+            Err("editor context path escapes the agent cwd")
+        );
+        assert_eq!(
+            validate_context(
+                json!({ "kind": "buffer", "payload": { "path": cwd.join("Cargo.toml") } }),
+                &cwd,
+            ),
+            Err("buffer and range context require text")
+        );
+    }
+
+    #[test]
+    fn bounds_context_item_count_and_encoded_size() {
+        let cwd = fixture_cwd();
+        let oversized = json!({
+            "kind": "buffer",
+            "payload": {
+                "path": cwd.join("Cargo.toml"),
+                "text": "x".repeat(MAX_CONTEXT_BYTES)
+            }
+        });
+        assert_eq!(
+            validate_context(oversized, &cwd),
+            Err("editor context exceeds the size limit")
+        );
+
+        let items = (0..=MAX_CONTEXT_ITEMS)
+            .map(|_| json!({ "kind": "buffer", "payload": {} }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_context_collection(&items),
+            Err("too many editor context items")
+        );
+    }
+
+    #[test]
+    fn validates_public_question_answer_shapes() {
+        let valid = serde_json::from_value(json!({
+            "mode": "safe",
+            "checks": ["format", "test"]
+        }))
+        .expect("answer map");
+        assert!(valid_question_answers(&valid));
+
+        let invalid = serde_json::from_value(json!({ "mode": 7 })).expect("answer map");
+        assert!(!valid_question_answers(&invalid));
+        let too_many = serde_json::from_value(json!({
+            "checks": (0..=32).map(|index| index.to_string()).collect::<Vec<_>>()
+        }))
+        .expect("answer map");
+        assert!(!valid_question_answers(&too_many));
+    }
+
+    #[tokio::test]
+    async fn resync_replays_events_created_during_the_initialize_handshake() {
+        let (runtime, _runtime_rx) = mpsc::unbounded_channel();
+        let mut broker = Broker::new(
+            EmbeddedConfig::default().with_replay_capacity(2),
+            BrokerMode::Durable,
+            runtime,
+            None,
+            Vec::new(),
+            None,
+        );
+        let (output, mut messages) = mpsc::unbounded_channel();
+        broker.connect(1, output);
+        for kind in ["one", "two", "three"] {
+            broker.replay.push(EventEnvelope::new(
+                "2026-09-02T00:00:00Z".to_owned(),
+                "agent-1".to_owned(),
+                Provider::Codex,
+                kind.to_owned(),
+                json!({}),
+                json!({}),
+            ));
+        }
+
+        broker
+            .handle_client_frame(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocol_version": 1,
+                    "client": { "name": "resync-test", "version": "0.1.0" },
+                    "last_sequence": 0,
+                },
+            }))
+            .await
+            .expect("initialize frame");
+        let initialized = messages.recv().await.expect("initialize response");
+        assert_eq!(initialized["result"]["replay"]["resync_required"], true);
+        assert_eq!(initialized["result"]["replay"]["latest"], 3);
+
+        broker.handle_provider_event(EventEnvelope::new(
+            "2026-09-02T00:00:01Z".to_owned(),
+            "agent-1".to_owned(),
+            Provider::Codex,
+            "during-handshake".to_owned(),
+            json!({}),
+            json!({}),
+        ));
+        assert!(
+            messages.try_recv().is_err(),
+            "provider events must wait for initialized"
+        );
+
+        broker
+            .handle_client_frame(json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {},
+            }))
+            .await
+            .expect("initialized frame");
+        let replayed = messages.recv().await.expect("event after resync baseline");
+        assert_eq!(replayed["method"], "agent/event");
+        assert_eq!(replayed["params"]["sequence"], 4);
+        assert_eq!(replayed["params"]["type"], "during-handshake");
+        assert_eq!(
+            messages.recv().await.expect("current broker state")["method"],
+            "broker/state"
+        );
     }
 }

@@ -1,5 +1,10 @@
 :AgentManager	agent-manager.txt	/*:AgentManager*
+:AgentManagerArchive	agent-manager.txt	/*:AgentManagerArchive*
+:AgentManagerAttach	agent-manager.txt	/*:AgentManagerAttach*
 :AgentManagerClose	agent-manager.txt	/*:AgentManagerClose*
+:AgentManagerContext	agent-manager.txt	/*:AgentManagerContext*
+:AgentManagerDiff	agent-manager.txt	/*:AgentManagerDiff*
+:AgentManagerFork	agent-manager.txt	/*:AgentManagerFork*
 :AgentManagerHealth	agent-manager.txt	/*:AgentManagerHealth*
 :AgentManagerInterrupt	agent-manager.txt	/*:AgentManagerInterrupt*
 :AgentManagerSend	agent-manager.txt	/*:AgentManagerSend*
@@ -10,5 +15,6 @@ agent-manager-commands	agent-manager.txt	/*agent-manager-commands*
 agent-manager-intro	agent-manager.txt	/*agent-manager-intro*
 agent-manager-safety	agent-manager.txt	/*agent-manager-safety*
 agent-manager-setup	agent-manager.txt	/*agent-manager-setup*
+agent-manager-ux	agent-manager.txt	/*agent-manager-ux*
 agent-manager-workspace	agent-manager.txt	/*agent-manager-workspace*
 agent-manager.txt	agent-manager.txt	/*agent-manager.txt*

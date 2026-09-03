@@ -38,8 +38,12 @@ run = [
 ]
 
 [tasks.verify]
-description = "Run the complete M1 handoff gate"
+description = "Run the complete M4 handoff gate"
 run = "scripts/verify.sh"
+
+[tasks."ux-test"]
+description = "Run pinned Foundation, Styling, and Chrome integration tests"
+run = "scripts/test-ux.sh"
 
 [tasks."codex-schema"]
 description = "Regenerate the pinned Codex App Server schema bundle"
