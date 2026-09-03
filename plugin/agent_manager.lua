@@ -24,13 +24,13 @@ end, {
   complete = function()
     return { "codex", "claude" }
   end,
-  desc = "Start a Codex or Claude agent",
+  desc = "Start a new Codex or Claude session",
 })
 
 vim.api.nvim_create_user_command("AgentManagerAttach", function()
   manager().open()
   manager().attach_ui()
-end, { desc = "Attach to a broker agent or resume a provider session" })
+end, { desc = "Open an active session or continue a saved session" })
 
 vim.api.nvim_create_user_command("AgentManagerSend", function(args)
   manager().prompt_ui(args.args)

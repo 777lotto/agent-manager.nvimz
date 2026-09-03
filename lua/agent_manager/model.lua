@@ -139,11 +139,28 @@ function Model:apply_state(agents)
   if type(agents) ~= "table" then
     return false
   end
+  local observed_activity = {}
+  for _, agent in pairs(self.agents) do
+    if type(agent.provider) == "string" and type(agent.provider_session_id) == "string" then
+      observed_activity[provider_session_key(agent.provider, agent.provider_session_id)] = {
+        external_active = agent.external_active,
+        activity_known = agent.activity_known,
+      }
+    end
+  end
   local next_agents = {}
   local next_order = {}
   for _, agent in ipairs(agents) do
     if type(agent) == "table" and type(agent.id) == "string" then
-      next_agents[agent.id] = deep_copy(agent)
+      local projected = deep_copy(agent)
+      local activity = type(agent.provider_session_id) == "string"
+          and observed_activity[provider_session_key(agent.provider, agent.provider_session_id)]
+        or nil
+      if activity then
+        projected.external_active = activity.external_active
+        projected.activity_known = activity.activity_known
+      end
+      next_agents[agent.id] = projected
       table.insert(next_order, agent.id)
       self.conversations[agent.id] = self.conversations[agent.id] or {}
       self.activities[agent.id] = self.activities[agent.id] or {}
@@ -163,14 +180,19 @@ function Model:_dedupe_external_sessions()
   local managed = {}
   for _, agent in pairs(self.agents) do
     if type(agent.provider) == "string" and type(agent.provider_session_id) == "string" then
-      managed[provider_session_key(agent.provider, agent.provider_session_id)] = true
+      managed[provider_session_key(agent.provider, agent.provider_session_id)] = agent
     end
   end
   local next_order = {}
   for _, key in ipairs(self.external_order) do
-    if not managed[key] and self.external_sessions[key] then
+    local session = self.external_sessions[key]
+    if not managed[key] and session then
       table.insert(next_order, key)
     else
+      if managed[key] and session then
+        managed[key].external_active = session.active == true
+        managed[key].activity_known = session.activity_known
+      end
       self.external_sessions[key] = nil
     end
   end
@@ -188,8 +210,12 @@ function Model:apply_external_sessions(provider, sessions, activity_available, e
   end
   local managed = {}
   for _, agent in pairs(self.agents) do
+    if agent.provider == provider then
+      agent.external_active = false
+      agent.activity_known = activity_available == true
+    end
     if type(agent.provider) == "string" and type(agent.provider_session_id) == "string" then
-      managed[provider_session_key(agent.provider, agent.provider_session_id)] = true
+      managed[provider_session_key(agent.provider, agent.provider_session_id)] = agent
     end
   end
   for _, session in ipairs(sessions) do
@@ -199,11 +225,12 @@ function Model:apply_external_sessions(provider, sessions, activity_available, e
       type(session_id) == "string"
       and session_id ~= ""
       and type(cwd) == "string"
-      and cwd ~= ""
-      and session.active == true
     then
       local key = provider_session_key(provider, session_id)
-      if not managed[key] then
+      if managed[key] then
+        managed[key].external_active = session.active == true
+        managed[key].activity_known = activity_available == true
+      else
         local projected = deep_copy(session)
         projected.key = key
         projected.provider = provider
@@ -211,8 +238,9 @@ function Model:apply_external_sessions(provider, sessions, activity_available, e
         projected.cwd = cwd
         projected.title = type(session.title) == "string" and session.title ~= "" and session.title
           or (provider .. " " .. session_id:sub(1, 12))
-        projected.state = "cli-running"
-        projected.active = true
+        projected.active = session.active == true
+        projected.activity_known = activity_available == true
+        projected.state = projected.active and "running" or "resumable"
         projected.external = true
         projected.managed = false
         self.external_sessions[key] = projected

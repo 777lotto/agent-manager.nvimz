@@ -8,8 +8,8 @@ while Neovim, agent processes, and repository files remain container-local.
 M4 is complete. Durable mode keeps multiple Codex and Claude agents alive
 across SSH and Neovim restarts through an owner-only Unix socket, bounded
 replay, provider-backed history resync, and an archivable metadata-only
-registry. New sessions default to lifecycle-managed task worktrees selected by
-repository and stable task ID. Shared-checkout starts are disabled by default;
+registry. New sessions default to lifecycle-managed worktrees selected by
+repository and a stable session name. Shared-checkout starts are disabled by default;
 an administrator may explicitly re-enable them. Embedded mode remains available as the
 single-agent, Neovim-owned fallback. The M3 Foundation, Styling, Chrome, and
 native presentation contracts remain unchanged. Ordinary verification uses
@@ -127,10 +127,10 @@ To start a session from the workspace:
 1. Press `1` to focus Agents and place the cursor on the desired directory.
    The project where Agent Manager was opened is marked `[cwd]`; registered or
    already managed repositories are marked `[repo]`.
-2. Press `n`, choose Codex or Claude, then choose `New isolated task`.
-3. Enter the stable lowercase task ID. Agent Manager creates or resumes the
-   lifecycle-managed worktree for that repository and reports when the agent is
-   ready.
+2. Press `n` and choose Codex or Claude. `n` always means “start a new
+   session”; continuing old work is not mixed into this flow.
+3. Enter a stable lowercase session name. Agent Manager creates the safe
+   worktree for that repository and reports when the agent is ready.
 4. Press `2`, then `p`, to compose the first prompt.
 
 Starting from another pane still works; Agent Manager asks which registered
@@ -141,21 +141,22 @@ input that cannot be sent.
 
 The workspace maps `1`, `2`, and `3` directly to Agents, Conversation, and
 Activity. `<Tab>` and `<S-Tab>` still cycle panes. It also maps `n` to start,
-`h` to attach or resume, `p` to prompt, `s` to steer, `x` to confirm an
+`h` to open or continue the focused session, `p` to prompt, `s` to steer, `x` to confirm an
 interrupt, `a`/`d` to decide only a focused human request, `<CR>` to answer a
 focused question, `c` to queue explicit context, `f` to fork, `A` to archive an
 inactive agent, `D` to inspect diffs/conflicts, and `q` to close only the view.
 Wide displays show agents, conversation, and activity together; medium and
 narrow displays switch the same buffers without losing model state.
 
-The Agents pane groups registered repositories, broker-owned agents, and
-currently active Codex/Claude CLI sessions in a directory tree. Codex rows use
+The Agents pane groups registered repositories and every discovered
+Codex/Claude session—live or saved—in a directory tree. Codex rows use
 a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
 identity remains clear even when a theme does not preserve the intended color.
-CLI sessions are discovered across the AI container when the workspace opens
-and whenever `r` refreshes the view. They are labeled `cli-running` and are
-read-only in Agent Manager while their original terminal owns them; after a
-session stops, `h` can resume its provider history for the current project. Set
+Green `● ACTIVE` labels identify live writers. Dark `○ RESUME` labels identify
+saved sessions with no live writer; focus one and press `<CR>` or `h` to
+continue it. A `? CHECK` label means activity could not be verified, so Agent
+Manager will not risk opening a second writer. Sessions are discovered across
+the AI container when the workspace opens and whenever `r` refreshes the view. Set
 `ui.external_sessions = false` to disable discovery, or lower
 `ui.external_session_limit` from its default of 1000 to cap each provider
 query.
@@ -248,12 +249,14 @@ The promoted schema-v1 integrations are:
 
 ### Managed worktrees and administrator policy
 
-The normal start flow offers `New isolated task` and `Resume isolated task`.
-Repository choices and existing task mappings come from the installed
-`zemrip-agent-workspace audit --json` interface. A new task asks for one stable
-lowercase kebab-case ID; the broker atomically claims the resulting
-`agent/<task-id>` branch, lease, and `~/worktrees/<repo>/<task-id>` checkout
-before it starts a provider. No raw worktree path is requested.
+The normal `n` flow only starts a new session. Repository choices and existing
+workspace mappings come from the installed `zemrip-agent-workspace audit
+--json` interface. A new session asks for one stable lowercase kebab-case name;
+the broker atomically claims the resulting `agent/<name>` branch, lease, and
+`~/worktrees/<repo>/<name>` checkout before it starts a provider. Continuing a
+saved row reuses its mapped workspace; if its history came from a canonical
+checkout, Agent Manager asks for a workspace name and safely moves the resumed
+provider into that worktree. No raw worktree path is requested.
 
 The lifecycle command remains the authority for Git fetches, branches, leases,
 handoff, and cleanup. Agent Manager exposes inventory, claim/resume, and

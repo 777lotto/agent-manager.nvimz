@@ -34,6 +34,36 @@ local function action_has_choice(action, choice)
   return false
 end
 
+local function session_is_active(session)
+  if session.external_active == true then
+    return true
+  end
+  if session.external then
+    return session.active == true
+  end
+  return session.state ~= "disconnected" and session.state ~= "failed"
+end
+
+local function broker_session_is_active(session)
+  return session.managed
+    and session.external_active ~= true
+    and session.state ~= "disconnected"
+    and session.state ~= "failed"
+end
+
+local function session_badge(session)
+  if session_is_active(session) then
+    return "● ACTIVE", "AgentManagerStatusSuccess"
+  end
+  if not broker_session_is_active(session) and session.activity_known == false then
+    return "? CHECK", "AgentManagerStatusWaiting"
+  end
+  if type(session.provider_session_id) == "string" and session.provider_session_id ~= "" then
+    return "○ RESUME", "AgentManagerInput"
+  end
+  return "× ENDED", "AgentManagerMuted"
+end
+
 local function usage_lines(value, prefix, lines, depth)
   if depth > 4 or #lines >= 16 then
     return
@@ -193,6 +223,7 @@ function View.new(model, actions, opts)
     active_pane = "conversation",
     pane_index = 2,
     agent_rows = {},
+    session_rows = {},
     directory_rows = {},
     directory_hints = {},
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
@@ -314,9 +345,9 @@ function View:_map_buffer(buffer)
   end, map_opts("Agent Manager: interrupt"))
   vim.keymap.set("n", "h", function()
     if self.actions.attach then
-      self.actions.attach()
+      self.actions.attach(self:_focused_session())
     end
-  end, map_opts("Agent Manager: attach or resume"))
+  end, map_opts("Agent Manager: open or continue session"))
   vim.keymap.set("n", "f", function()
     if self.actions.fork then
       self.actions.fork()
@@ -466,17 +497,25 @@ function View:_start_context()
   if directory then
     return vim.deepcopy(directory)
   end
-  local agent_id = self.agent_rows[row]
-  local agent = agent_id and self.model.agents[agent_id] or nil
-  if agent then
+  local session = self.session_rows[row]
+  if session then
     return {
-      cwd = agent.cwd,
-      repository = agent.managed_workspace and agent.managed_workspace ~= vim.NIL
-          and agent.managed_workspace.repository
+      cwd = session.cwd,
+      provider = session.provider,
+      repository = session.managed_workspace and session.managed_workspace ~= vim.NIL
+          and session.managed_workspace.repository
         or nil,
     }
   end
   return nil
+end
+
+function View:_focused_session()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.agents then
+    return nil
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  return vim.deepcopy(self.session_rows[row])
 end
 
 function View:_activate_row()
@@ -492,9 +531,14 @@ function View:_activate_row()
     return
   end
   local row = vim.api.nvim_win_get_cursor(0)[1]
-  local agent_id = self.agent_rows[row]
-  if agent_id and self.model:select(agent_id) then
+  local session = self.session_rows[row]
+  if not session then
+    return
+  end
+  if session.id and broker_session_is_active(session) and self.model:select(session.id) then
     self:render()
+  elseif self.actions.resume then
+    self.actions.resume(vim.deepcopy(session))
   end
 end
 
@@ -560,6 +604,7 @@ function View:_render_agents()
     { line = 2, group = "AgentManagerMuted" },
   }
   self.agent_rows = {}
+  self.session_rows = {}
   self.directory_rows = {}
   local repositories = self.model:workspace_list()
   if #sessions == 0 and #repositories == 0 and not next(self.directory_hints) then
@@ -590,17 +635,19 @@ function View:_render_agents()
         local session = item.session
         local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
         local provider = session.provider == "claude" and "◆ CLAUDE" or "● CODEX"
+        local badge, badge_group = session_badge(session)
         local pending = session.managed and #self.model:pending(session.id) or 0
         local marker = pending > 0 and (" !" .. tostring(pending)) or ""
         local lead = string.format("%s%s%s ", prefix, connector, selected)
         table.insert(lines, string.format(
-          "%s%s · %s · %s%s",
+          "%s%s %s · %s%s",
           lead,
           provider,
-          inline(session.state),
+          badge,
           inline(session.title),
           marker
         ))
+        self.session_rows[#lines] = vim.deepcopy(session)
         table.insert(
           highlights,
           {
@@ -611,6 +658,12 @@ function View:_render_agents()
             finish = #lead + #provider,
           }
         )
+        table.insert(highlights, {
+          line = #lines,
+          group = badge_group,
+          start = #lead + #provider + 1,
+          finish = #lead + #provider + 1 + #badge,
+        })
         if session.managed then
           self.agent_rows[#lines] = session.id
         end
@@ -637,9 +690,9 @@ function View:_render_agents()
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
 
-  if #self.model:external_session_list() > 0 then
+  if #sessions > 0 then
     table.insert(lines, "")
-    table.insert(lines, " CLI sessions are read-only here. Press r to refresh.")
+    table.insert(lines, " Enter/h: open ACTIVE or continue RESUME · r: refresh")
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
   for _, provider in ipairs({ "codex", "claude" }) do
@@ -946,8 +999,8 @@ function View:show_help()
   local lines = {
     " HELP",
     "",
-    " n       start agent from focused directory",
-    " h       attach or resume session",
+    " n       start a new session in focused directory",
+    " h       open or continue focused session",
     " p       prompt selected agent",
     " s       steer active turn",
     " x       interrupt active turn",

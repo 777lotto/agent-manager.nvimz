@@ -279,52 +279,43 @@ class Broker:
             )
         elif method == "provider/session/list":
             provider = params["provider"]
-            if params.get("active_only"):
-                sessions = {
-                    "codex": [
-                        {
-                            "provider": "codex",
-                            "provider_session_id": "codex-cli-running",
-                            "cwd": "/workspace/repos/alpha/api",
-                            "title": "Codex terminal session",
-                            "updated_at": "2026-09-01T00:00:02Z",
-                            "active": True,
-                            "state": "running",
-                        }
-                    ],
-                    "claude": [
-                        {
-                            "provider": "claude",
-                            "provider_session_id": "claude-cli-running",
-                            "cwd": "/workspace/repos/alpha/web",
-                            "title": "Claude terminal session",
-                            "updated_at": "2026-09-01T00:00:01Z",
-                            "active": True,
-                            "state": "running",
-                        }
-                    ],
-                }
-                respond(
-                    request,
-                    {
-                        "sessions": sessions[provider],
-                        "cursor": None,
-                        "activity_available": True,
-                    },
-                )
-                return True
+            active_sessions = {
+                "codex": {
+                    "provider": "codex",
+                    "provider_session_id": "codex-cli-running",
+                    "cwd": "/workspace/repos/alpha/api",
+                    "title": "Codex terminal session",
+                    "updated_at": "2026-09-01T00:00:02Z",
+                    "active": True,
+                    "state": "running",
+                },
+                "claude": {
+                    "provider": "claude",
+                    "provider_session_id": "claude-cli-running",
+                    "cwd": "/workspace/repos/alpha/web",
+                    "title": "Claude terminal session",
+                    "updated_at": "2026-09-01T00:00:01Z",
+                    "active": True,
+                    "state": "running",
+                },
+            }
+            cwd = params.get("cwd", "/workspace/agent-manager")
+            resumable = {
+                "provider": provider,
+                "provider_session_id": f"{provider}-resumable-lua",
+                "cwd": cwd,
+                "title": f"{provider} resumable fixture",
+                "updated_at": "2026-09-01T00:00:00Z",
+                "active": False,
+                "state": "resumable",
+            }
+            sessions = [active_sessions[provider]] if params.get("active_only") else [resumable]
+            if "cwd" not in params and not params.get("active_only"):
+                sessions.insert(0, active_sessions[provider])
             respond(
                 request,
                 {
-                    "sessions": [
-                        {
-                            "provider": provider,
-                            "provider_session_id": f"{provider}-resumable-lua",
-                            "cwd": params["cwd"],
-                            "title": f"{provider} resumable fixture",
-                            "updated_at": "2026-09-01T00:00:00Z",
-                        }
-                    ],
+                    "sessions": sessions,
                     "cursor": None,
                     "activity_available": True,
                 },
@@ -358,13 +349,33 @@ class Broker:
                     "lua fixture",
                 )
         elif method == "agent/resume":
-            self.launch(
-                request,
-                params["provider_session_id"],
-                params["provider"],
-                params["cwd"],
-                "resumed lua fixture",
-            )
+            managed = params.get("managed_workspace")
+            if managed:
+                task_id = managed["task_id"]
+                path = f"/workspace/worktrees/{managed['repository']}/{task_id}"
+                self.launch(
+                    request,
+                    params["provider_session_id"],
+                    params["provider"],
+                    path,
+                    "resumed lua fixture",
+                    "worktree",
+                    path,
+                    {
+                        "repository": managed["repository"],
+                        "task_id": task_id,
+                        "branch": f"agent/{task_id}",
+                        "base_branch": "bluff",
+                    },
+                )
+            else:
+                self.launch(
+                    request,
+                    params["provider_session_id"],
+                    params["provider"],
+                    params["cwd"],
+                    "resumed lua fixture",
+                )
         elif method == "agent/attach":
             record = next(record for record in self.records if record["id"] == params["agent_id"])
             self.current = record

@@ -38,8 +38,9 @@ generated bundle is a review baseline, not a required installed CLI version.
   support metadata-only cross-project CLI discovery; omitting the flag retains
   resumable-session behavior.
 - Additive managed-workspace fields preserve the explicit path-based v1 calls.
-  `workspace/list`, managed `agent/start`, and `workspace/handoff` delegate to
-  the external lifecycle authority and expose no destructive Git operation.
+  `workspace/list`, managed `agent/start`, managed `agent/resume`, and
+  `workspace/handoff` delegate to the external lifecycle authority and expose
+  no destructive Git operation.
 - Agent summaries report the actual provider runtime and compatibility profile
   learned during startup. A resumed session is opened by the currently
   configured compatible runtime; a live provider process is never hot-swapped.
