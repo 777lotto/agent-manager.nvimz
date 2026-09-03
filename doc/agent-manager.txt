@@ -75,9 +75,11 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 
                                                    *:AgentManagerStart*
 :AgentManagerStart [codex|claude]
-                           Select a provider, then create a lifecycle-managed
-                           task or resume an existing task mapping. Durable mode
-                           may own multiple agents; embedded mode owns one.
+                           Use the current project as a directory hint, select
+                           a provider when omitted, then create a
+                           lifecycle-managed task or resume an existing task
+                           mapping. Durable mode may own multiple agents;
+                           embedded mode owns one.
 
                                                    *:AgentManagerAttach*
 :AgentManagerAttach        Select a broker agent or resumable provider session.
@@ -115,17 +117,29 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 ==============================================================================
 4. Workspace                                      *agent-manager-workspace*
 
-The native workspace uses agents, conversation, and activity buffers. Wide
-displays show all three. Medium and narrow displays use <Tab> and <S-Tab> to
-cycle panes.
+The native workspace uses agents, conversation, and activity buffers. Their
+headings are numbered: 1 focuses Agents, 2 focuses Conversation, and 3 focuses
+Activity. Wide displays show all three. Medium and narrow displays may also use
+<Tab> and <S-Tab> to cycle panes.
 
-The Agents pane is a working-directory tree containing broker-owned agents and
-active sessions started by the standalone Codex or Claude CLI. External rows
-are labeled "cli-running" and remain read-only while the originating terminal
-owns them. The tree is refreshed when the workspace opens and with `r`.
-Set `ui.external_sessions` to false to hide external CLI sessions;
-`ui.external_session_limit` caps each provider query from 1 to 1000.
+The Agents pane is a working-directory tree containing registered repositories,
+broker-owned agents, and active sessions started by the standalone Codex or
+Claude CLI. The project where Agent Manager was opened carries a `[cwd]` marker;
+known registered or managed repository directories carry `[repo]`. Place the
+cursor on a directory and press `n` to use it as the start-flow hint; if it
+cannot be matched to one registered repository, the flow asks which repository
+to use. Choose a provider and workspace action, enter the stable task ID, wait
+for the ready notice, then press `2` and `p` to send the first prompt.
 
+Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
+badge. The different shapes and labels preserve provider identity under themes
+that alter colors. External rows are labeled "cli-running" and remain read-only
+while the originating terminal owns them. The tree is refreshed when the
+workspace opens and with `r`. Set `ui.external_sessions` to false to hide
+external CLI sessions; `ui.external_session_limit` caps each provider query
+from 1 to 1000.
+
+    1 / 2 / 3 focus Agents / Conversation / Activity
     n       start an agent
     h       attach to or resume a session
     p       prompt the selected agent
@@ -138,6 +152,7 @@ Set `ui.external_sessions` to false to hide external CLI sessions;
     A       archive the selected inactive agent
     D       show a workspace diff or dirty-buffer conflict
     r       refresh agents and external CLI sessions
+    <Tab>   cycle panes
     ?       show mapping help
     q       close the workspace view
 

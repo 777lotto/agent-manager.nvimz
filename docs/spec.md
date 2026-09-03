@@ -296,27 +296,27 @@ The initialization response includes:
 
 ### Required requests
 
-| Method                   | Purpose                                                    |
-| ------------------------ | ---------------------------------------------------------- |
-| `provider/session/list`  | Discover provider sessions, optionally globally or active. |
-| `agent/list`             | List known agents and live status.                         |
-| `workspace/list`         | List registered repositories and managed task mappings.    |
+| Method                   | Purpose                                                     |
+| ------------------------ | ----------------------------------------------------------- |
+| `provider/session/list`  | Discover provider sessions, optionally globally or active.  |
+| `agent/list`             | List known agents and live status.                          |
+| `workspace/list`         | List registered repositories and managed task mappings.     |
 | `workspace/handoff`      | Release a managed task lease without deleting its checkout. |
 | `agent/start`            | Start in a managed task or explicit working directory.      |
-| `agent/attach`           | Subscribe to an agent owned by the broker.                 |
-| `agent/history`          | Fetch provider-backed projected history.                   |
-| `agent/prompt`           | Start the next normal user turn.                           |
-| `agent/steer`            | Add context or redirect an active turn when supported.     |
-| `agent/interrupt`        | Cancel the active turn without deleting its session.       |
-| `agent/resume`           | Reopen a persisted provider session by ID.                 |
-| `agent/fork`             | Create an alternate session from provider history.         |
-| `agent/archive`          | Hide a completed session; preserve provider history.       |
-| `agent/approval/respond` | Allow, deny, or defer a pending request.                   |
-| `agent/question/respond` | Return structured or free-text clarification.              |
-| `agent/context/add`      | Add an explicit editor-context snapshot.                   |
-| `agent/diff`             | Return the current agent/workspace diff projection.        |
-| `agent/replay`           | Replay events after the supplied sequence number.          |
-| `broker/shutdown`        | Embedded-only and subject to shutdown policy.              |
+| `agent/attach`           | Subscribe to an agent owned by the broker.                  |
+| `agent/history`          | Fetch provider-backed projected history.                    |
+| `agent/prompt`           | Start the next normal user turn.                            |
+| `agent/steer`            | Add context or redirect an active turn when supported.      |
+| `agent/interrupt`        | Cancel the active turn without deleting its session.        |
+| `agent/resume`           | Reopen a persisted provider session by ID.                  |
+| `agent/fork`             | Create an alternate session from provider history.          |
+| `agent/archive`          | Hide a completed session; preserve provider history.        |
+| `agent/approval/respond` | Allow, deny, or defer a pending request.                    |
+| `agent/question/respond` | Return structured or free-text clarification.               |
+| `agent/context/add`      | Add an explicit editor-context snapshot.                    |
+| `agent/diff`             | Return the current agent/workspace diff projection.         |
+| `agent/replay`           | Replay events after the supplied sequence number.           |
+| `broker/shutdown`        | Embedded-only and subject to shutdown policy.               |
 
 Deleting provider transcripts or terminating the durable broker is not an
 ordinary workspace action in the first release.
@@ -598,9 +598,12 @@ maintaining a competing set.
 ### Views
 
 - **Agents:** provider, title, cwd/worktree, precise status, unread marker, and
-  pending-approval count. Broker-owned and external CLI sessions are grouped
-  in a directory tree; external sessions are marked read-only and de-duplicated
-  by provider session ID.
+  pending-approval count. Registered repositories, broker-owned agents, and
+  external CLI sessions are grouped in a directory tree. The opening project
+  and a focused directory supply repository context to the start flow. Provider
+  badges use distinct labels and shapes in addition to semantic blue/orange
+  styling; external sessions are marked read-only and de-duplicated by provider
+  session ID.
 - **Conversation:** user and assistant messages with incremental updates,
   compaction boundaries, and provider notices.
 - **Activity:** ordered tool, command, file, and usage events with expandable
@@ -623,7 +626,7 @@ Final command names follow the selected package name. The working surface is:
 | ------------------------------- | ---------------------------------------------------- |
 | `:AgentManager`                 | Open or focus the full-tab workspace.                |
 | `:AgentManagerSplit`            | Open the compact split.                              |
-| `:AgentManagerStart [provider]` | Start an agent rooted at the current project.        |
+| `:AgentManagerStart [provider]` | Start or resume with the current project as a hint.  |
 | `:AgentManagerSend`             | Open prompt input for the selected agent.            |
 | `:AgentManagerSteer`            | Add input to the selected active turn.               |
 | `:AgentManagerAttach`           | Select a broker-owned or resumable provider session. |
@@ -643,9 +646,10 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | Key                 | Action                                                    |
 | ------------------- | --------------------------------------------------------- |
 | `j` / `k`           | Move through the focused view.                            |
+| `1` / `2` / `3`     | Focus Agents, Conversation, or Activity directly.         |
 | `<Tab>` / `<S-Tab>` | Cycle visible panes.                                      |
 | `<CR>`              | Open, expand, or act on the stable item under the cursor. |
-| `n`                 | Start a new agent.                                        |
+| `n`                 | Start an agent, using the focused repository when set.    |
 | `p`                 | Compose a prompt for the selected agent.                  |
 | `s`                 | Steer an active turn when supported.                      |
 | `x`                 | Confirm and interrupt active work.                        |

@@ -35,6 +35,15 @@ local function buffer_has_line(buffer, expected)
   return false
 end
 
+local function buffer_line_number(buffer, needle)
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(buffer, 0, -1, false)) do
+    if line:find(needle, 1, true) then
+      return index
+    end
+  end
+  return nil
+end
+
 local function pure_client_resync_test()
   local Client = require("agent_manager.client")
   local observed_resync = nil
@@ -100,6 +109,17 @@ local function pure_model_test()
   assert_equal(#model:external_session_list(), 1, "managed provider sessions are de-duplicated")
   assert_equal(model:external_session_list()[1].state, "cli-running", "external session state")
   assert_equal(#model:session_list(), 2, "combined session projection")
+  assert(model:apply_workspace_inventory({
+    {
+      slug = "agent-manager",
+      canonical_path = "/workspace/agent-manager",
+      base_branch = "bluff",
+    },
+  }))
+  local repositories = model:workspace_list()
+  assert_equal(repositories[1].slug, "agent-manager", "workspace inventory projection")
+  repositories[1].slug = "corrupted"
+  assert_equal(model:workspace_list()[1].slug, "agent-manager", "workspace inventory is defensive")
   assert(model:record_user_input("agent-1", "question", "prompt"))
   assert(model:apply_event({
     sequence = 1,
@@ -178,6 +198,68 @@ local function layout_test()
   assert_equal(View.layout_for(160).mode, "wide", "wide layout")
   assert_equal(View.layout_for(100).mode, "medium", "medium layout")
   assert_equal(View.layout_for(80).mode, "narrow", "narrow layout")
+end
+
+local function workspace_view_navigation_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local model = Model.new({ max_events = 8 })
+  model:apply_workspace_inventory({
+    {
+      slug = "agent-manager",
+      canonical_path = "/workspace/agent-manager",
+      worktree_root = "/workspace/worktrees/agent-manager",
+    },
+  })
+  model:apply_state({
+    {
+      id = "agent-codex",
+      provider = "codex",
+      provider_session_id = "codex-view",
+      cwd = "/workspace/agent-manager",
+      workspace_strategy = "shared",
+      title = "codex fixture",
+      state = "idle",
+      capabilities = {},
+    },
+    {
+      id = "agent-claude",
+      provider = "claude",
+      provider_session_id = "claude-view",
+      cwd = "/workspace/agent-manager",
+      workspace_strategy = "shared",
+      title = "claude fixture",
+      state = "idle",
+      capabilities = {},
+    },
+  })
+  local start_context = nil
+  local view = View.new(model, {
+    start = function(context)
+      start_context = context
+    end,
+  }, {})
+  assert(view:open())
+  view:render()
+  local status = view:status()
+  assert(buffer_contains(status.buffers.agents, "● CODEX"), "Codex badge")
+  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "Claude badge")
+
+  for index, pane in ipairs({ "agents", "conversation", "activity" }) do
+    vim.api.nvim_feedkeys(tostring(index), "x", false)
+    assert_equal(view:status().active_pane, pane, "numbered pane navigation")
+  end
+
+  assert(view:focus("agents"))
+  local repository_row = assert(
+    buffer_line_number(status.buffers.agents, "agent-manager  [repo]"),
+    "registered repository row"
+  )
+  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
+  vim.api.nvim_feedkeys("n", "x", false)
+  assert_equal(start_context.repository, "agent-manager", "directory start repository")
+  assert_equal(start_context.cwd, "/workspace/agent-manager", "directory start cwd")
+  view:teardown()
 end
 
 local function native_presentation_test()
@@ -398,6 +480,7 @@ local function integration_test()
   assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "directory tree parent")
   assert(buffer_contains(external_status.view.buffers.agents, "api"), "Codex session directory")
   assert(buffer_contains(external_status.view.buffers.agents, "web"), "Claude session directory")
+  assert(buffer_contains(external_status.view.buffers.agents, "[cwd]"), "opening project directory hint")
   assert(buffer_has_line(external_status.view.buffers.agents, " └─ workspace"), "tree root child")
   assert(buffer_has_line(external_status.view.buffers.agents, "    └─ repos"), "tree nested repo root")
   assert(buffer_has_line(external_status.view.buffers.agents, "       └─ alpha"), "tree repository")
@@ -625,17 +708,43 @@ local function managed_workspace_ui_test()
   assert_equal(inventory.repositories[1].base_branch, "bluff", "managed base branch")
   assert_equal(inventory.repositories[1].tasks[1].task_id, "existing-task", "managed task")
 
-  local original_select = vim.ui.select
+  local prompt_input_opened = false
   local original_input = vim.ui.input
+  vim.ui.input = function()
+    prompt_input_opened = true
+  end
+  local prompt_ok, prompt_err = manager.prompt_ui()
+  vim.ui.input = original_input
+  assert_equal(prompt_ok, nil, "prompt without an agent")
+  assert_equal(prompt_err.kind, "input", "prompt without an agent error")
+  assert_equal(prompt_input_opened, false, "prompt should fail before opening input")
+
+  local original_select = vim.ui.select
   local select_count = 0
+  local ui_active = false
   vim.ui.select = function(items, _, callback)
+    assert_equal(ui_active, false, "start picker nesting")
+    ui_active = true
     select_count = select_count + 1
     callback(items[1])
+    ui_active = false
   end
-  vim.ui.input = function(_, callback)
+  local input_prompt = nil
+  vim.ui.input = function(opts, callback)
+    assert_equal(ui_active, false, "start input nesting")
+    ui_active = true
+    input_prompt = opts.prompt
     callback("new-managed-task")
+    ui_active = false
   end
-  manager.start_ui()
+  local status = manager.status()
+  assert(status.model.workspace_repositories[1], "workspace inventory model")
+  assert(manager.status().view.active_pane == "conversation")
+  vim.api.nvim_feedkeys("1", "x", false)
+  local agents_buffer = status.view.buffers.agents
+  local repository_row = assert(buffer_line_number(agents_buffer, "agent-manager  [repo]"))
+  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
+  vim.api.nvim_feedkeys("n", "x", false)
   await("managed agent startup", function()
     local agent = manager.list()[1]
     return agent and agent.state == "idle"
@@ -644,7 +753,8 @@ local function managed_workspace_ui_test()
   vim.ui.input = original_input
 
   local agent = manager.list()[1]
-  assert_equal(select_count, 3, "managed start picker depth")
+  assert_equal(select_count, 2, "contextual start picker depth")
+  assert(input_prompt:find("agent-manager", 1, true), "contextual task prompt")
   assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
   assert_equal(agent.managed_workspace.task_id, "new-managed-task", "managed task ID")
@@ -767,6 +877,7 @@ local function run()
   pure_client_resync_test()
   pure_model_test()
   layout_test()
+  workspace_view_navigation_test()
   native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()

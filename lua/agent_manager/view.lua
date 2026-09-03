@@ -86,21 +86,53 @@ local function directory_parts(path, home)
   for part in remainder:gmatch("[^/]+") do
     table.insert(parts, part)
   end
-  return root, parts
+  local root_path = root
+  if root == "~" then
+    root_path = normalized_home
+  end
+  return root, root_path, parts
 end
 
-local function session_tree(sessions, home)
+local function join_path(parent, child)
+  if parent == "/" then
+    return "/" .. child
+  end
+  return tostring(parent):gsub("/+$", "") .. "/" .. child
+end
+
+local function tree_node(roots, path, home)
+  local root_name, root_path, parts = directory_parts(path, home)
+  roots[root_name] = roots[root_name]
+    or { path = root_path, directories = {}, sessions = {} }
+  local node = roots[root_name]
+  for _, part in ipairs(parts) do
+    node.directories[part] = node.directories[part]
+      or {
+        path = join_path(node.path, part),
+        directories = {},
+        sessions = {},
+      }
+    node = node.directories[part]
+  end
+  return node
+end
+
+local function session_tree(sessions, repositories, directory_hints, home)
   local roots = {}
   for _, session in ipairs(sessions) do
-    local root_name, parts = directory_parts(session.cwd, home)
-    roots[root_name] = roots[root_name] or { directories = {}, sessions = {} }
-    local node = roots[root_name]
-    for _, part in ipairs(parts) do
-      node.directories[part] = node.directories[part]
-        or { directories = {}, sessions = {} }
-      node = node.directories[part]
-    end
+    local node = tree_node(roots, session.cwd, home)
     table.insert(node.sessions, session)
+    if session.managed_workspace and session.managed_workspace ~= vim.NIL then
+      node.repository = session.managed_workspace.repository
+    end
+  end
+  for _, repository in ipairs(repositories or {}) do
+    local node = tree_node(roots, repository.canonical_path, home)
+    node.repository = repository.slug
+  end
+  for path in pairs(directory_hints or {}) do
+    local node = tree_node(roots, path, home)
+    node.directory_hint = true
   end
   return roots
 end
@@ -161,12 +193,23 @@ function View.new(model, actions, opts)
     active_pane = "conversation",
     pane_index = 2,
     agent_rows = {},
+    directory_rows = {},
+    directory_hints = {},
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
     render_pending = false,
     last_action_id = nil,
   }, View)
   self:_create_autocmds()
   return self
+end
+
+function View:add_directory_hint(path)
+  if type(path) ~= "string" or path == "" then
+    return false
+  end
+  self.directory_hints[vim.fs.normalize(path)] = true
+  self:schedule_render()
+  return true
 end
 
 function View:_create_autocmds()
@@ -225,6 +268,12 @@ function View:_map_buffer(buffer)
   vim.keymap.set("n", "<S-Tab>", function()
     self:cycle(-1)
   end, map_opts("Agent Manager: previous pane"))
+  for index, pane in ipairs(pane_names) do
+    local target = pane
+    vim.keymap.set("n", tostring(index), function()
+      self:focus(target)
+    end, map_opts("Agent Manager: focus " .. target .. " pane"))
+  end
   vim.keymap.set("n", "q", function()
     self:close()
   end, map_opts("Agent Manager: close workspace"))
@@ -245,7 +294,7 @@ function View:_map_buffer(buffer)
   end, map_opts("Agent Manager: deny focused request"))
   vim.keymap.set("n", "n", function()
     if self.actions.start then
-      self.actions.start()
+      self.actions.start(self:_start_context())
     end
   end, map_opts("Agent Manager: start agent"))
   vim.keymap.set("n", "p", function()
@@ -365,20 +414,34 @@ end
 
 function View:cycle(direction)
   if not valid_tab(self.tab) then
-    return
+    return false
   end
-  self.pane_index = ((self.pane_index - 1 + direction) % #pane_names) + 1
-  local pane = pane_names[self.pane_index]
+  local index = ((self.pane_index - 1 + direction) % #pane_names) + 1
+  return self:focus(pane_names[index])
+end
+
+function View:focus(pane)
+  local index = type(pane) == "number" and pane or nil
+  if not index then
+    for candidate, name in ipairs(pane_names) do
+      if name == pane then
+        index = candidate
+        break
+      end
+    end
+  end
+  if not index or not valid_tab(self.tab) then
+    return false
+  end
+  pane = pane_names[index]
+  self.pane_index = index
   self.active_pane = pane
   local window = self.windows[pane]
   if valid_window(window) then
     vim.api.nvim_win_set_buf(window, self:_buffer(pane))
-    vim.w[window].agent_manager = {
-      plugin_id = "agent.manager",
-      pane = pane,
-    }
+    set_window_options(window, pane ~= "agents", pane)
     vim.api.nvim_set_current_win(window)
-    return
+    return true
   end
   local content = self.windows.conversation
   if not valid_window(content) then
@@ -389,7 +452,31 @@ function View:cycle(direction)
     self.windows.conversation = content
     vim.api.nvim_set_current_win(content)
     set_window_options(content, pane ~= "agents", pane)
+    return true
   end
+  return false
+end
+
+function View:_start_context()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.agents then
+    return nil
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local directory = self.directory_rows[row]
+  if directory then
+    return vim.deepcopy(directory)
+  end
+  local agent_id = self.agent_rows[row]
+  local agent = agent_id and self.model.agents[agent_id] or nil
+  if agent then
+    return {
+      cwd = agent.cwd,
+      repository = agent.managed_workspace and agent.managed_workspace ~= vim.NIL
+          and agent.managed_workspace.repository
+        or nil,
+    }
+  end
+  return nil
 end
 
 function View:_activate_row()
@@ -464,7 +551,7 @@ end
 function View:_render_agents()
   local sessions = self.model:session_list()
   local lines = {
-    " AGENTS · BY DIRECTORY",
+    " 1 AGENTS · BY DIRECTORY",
     string.format(" broker: %s · sessions: %d", inline(self.model.client_state), #sessions),
     "",
   }
@@ -473,8 +560,10 @@ function View:_render_agents()
     { line = 2, group = "AgentManagerMuted" },
   }
   self.agent_rows = {}
-  if #sessions == 0 then
-    table.insert(lines, " No sessions. Press n to start one.")
+  self.directory_rows = {}
+  local repositories = self.model:workspace_list()
+  if #sessions == 0 and #repositories == 0 and not next(self.directory_hints) then
+    table.insert(lines, " No directory context is available.")
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
 
@@ -484,45 +573,68 @@ function View:_render_agents()
       local last = index == #items
       local connector = last and "└─ " or "├─ "
       if item.kind == "directory" then
-        table.insert(lines, prefix .. connector .. inline(item.name))
-        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+        local suffix = item.node.repository and "  [repo]"
+          or item.node.directory_hint and "  [cwd]"
+          or ""
+        table.insert(lines, prefix .. connector .. inline(item.name) .. suffix)
+        self.directory_rows[#lines] = {
+          cwd = item.node.path,
+          repository = item.node.repository,
+        }
+        table.insert(highlights, {
+          line = #lines,
+          group = item.node.repository and "AgentManagerTitle" or "AgentManagerMuted",
+        })
         render_node(item.node, prefix .. (last and "   " or "│  "))
       else
         local session = item.session
         local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
-        local provider = string.upper(inline(session.provider))
+        local provider = session.provider == "claude" and "◆ CLAUDE" or "● CODEX"
         local pending = session.managed and #self.model:pending(session.id) or 0
         local marker = pending > 0 and (" !" .. tostring(pending)) or ""
+        local lead = string.format("%s%s%s ", prefix, connector, selected)
+        table.insert(lines, string.format(
+          "%s%s · %s · %s%s",
+          lead,
+          provider,
+          inline(session.state),
+          inline(session.title),
+          marker
+        ))
         table.insert(
-          lines,
-          string.format(
-            "%s%s%s %s · %s · %s%s",
-            prefix,
-            connector,
-            selected,
-            provider,
-            inline(session.state),
-            inline(session.title),
-            marker
-          )
+          highlights,
+          {
+            line = #lines,
+            group = session.provider == "claude" and "AgentManagerProviderClaude"
+              or "AgentManagerProviderCodex",
+            start = #lead,
+            finish = #lead + #provider,
+          }
         )
         if session.managed then
           self.agent_rows[#lines] = session.id
         end
-        table.insert(highlights, {
-          line = #lines,
-          group = session.provider == "claude" and "AgentManagerProviderClaude"
-            or "AgentManagerProviderCodex",
-        })
       end
     end
   end
 
-  local tree = session_tree(sessions, vim.env.HOME)
+  local tree = session_tree(sessions, repositories, self.directory_hints, vim.env.HOME)
   for _, root_name in ipairs(sorted_keys(tree)) do
-    table.insert(lines, " " .. inline(root_name))
-    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
-    render_node(tree[root_name], " ")
+    local root = tree[root_name]
+    local suffix = root.repository and "  [repo]" or root.directory_hint and "  [cwd]" or ""
+    table.insert(lines, " " .. inline(root_name) .. suffix)
+    self.directory_rows[#lines] = { cwd = root.path, repository = root.repository }
+    table.insert(highlights, {
+      line = #lines,
+      group = "AgentManagerTitle",
+    })
+    render_node(root, " ")
+  end
+
+  if #repositories > 0 or next(self.directory_hints) then
+    table.insert(lines, "")
+    table.insert(lines, " Start: place cursor on a [repo] or [cwd] directory and press n.")
+    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
 
   if #self.model:external_session_list() > 0 then
@@ -596,14 +708,18 @@ end
 function View:_render_conversation()
   local agent = self.model:selected_agent()
   local title = agent and (inline(agent.provider) .. " · " .. inline(agent.state)) or "no agent selected"
-  local lines = { " CONVERSATION", " " .. title, "" }
+  local lines = { " 2 CONVERSATION", " " .. title, "" }
   local highlights = {
     { line = 1, group = "AgentManagerTitle" },
     { line = 2, group = "AgentManagerMuted" },
   }
   local messages = self.model:conversation()
   if #messages == 0 then
-    table.insert(lines, " Press p to compose a prompt.")
+    if agent then
+      table.insert(lines, " Press p to compose a prompt.")
+    else
+      table.insert(lines, " Start a session in pane 1, then press p here to prompt it.")
+    end
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
   for _, message in ipairs(messages) do
@@ -634,7 +750,7 @@ function View:_render_conversation()
 end
 
 function View:_render_activity()
-  local lines = { " ACTIVITY", "" }
+  local lines = { " 3 ACTIVITY", "" }
   local highlights = { { line = 1, group = "AgentManagerTitle" } }
   local activity = self.model:activity()
   local usage = self.model:usage_for()
@@ -830,7 +946,7 @@ function View:show_help()
   local lines = {
     " HELP",
     "",
-    " n       start agent",
+    " n       start agent from focused directory",
     " h       attach or resume session",
     " p       prompt selected agent",
     " s       steer active turn",
@@ -841,6 +957,7 @@ function View:show_help()
     " c       add explicit editor context",
     " D       show workspace diff or dirty-buffer conflict",
     " r       refresh agents and CLI sessions",
+    " 1 / 2 / 3 focus agents / conversation / activity",
     " <Tab>   cycle panes",
     " <CR>    select agent or answer focused question",
     " q       close workspace",
@@ -850,9 +967,7 @@ function View:show_help()
     table.insert(highlights, { line = line, group = "AgentManagerHelpDescription" })
   end
   self:_set_lines("activity", lines, highlights)
-  local activity_index = 3
-  self.pane_index = activity_index - 1
-  self:cycle(1)
+  self:focus("activity")
 end
 
 function View:close()
