@@ -10,11 +10,12 @@ use uuid::Uuid;
 
 use crate::BROKER_VERSION;
 use crate::framing::{BoundedFrame, read_bounded_line};
-use crate::protocol::RequestId;
+use crate::protocol::{ProviderRuntime, RequestId};
 
 pub const WORKER_PROTOCOL_VERSION: u32 = 1;
-pub const PINNED_CLAUDE_SDK_VERSION: &str = "0.2.148";
-pub const PINNED_CLAUDE_CODE_VERSION: &str = "2.1.251";
+pub const CLAUDE_COMPATIBILITY_PROFILE: &str = "claude-agent-sdk-v1";
+pub const TESTED_CLAUDE_SDK_VERSION: &str = "0.2.148";
+pub const TESTED_CLAUDE_CODE_VERSION: &str = "2.1.251";
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,17 +142,7 @@ impl ClaudeWorker {
         if outcome.result.get("nonce").and_then(Value::as_str) != Some(nonce.as_str()) {
             return Err(WorkerError::Negotiation("nonce mismatch"));
         }
-        let diagnostics = &outcome.result["diagnostics"];
-        if diagnostics["sdk"]["compatible"] != true
-            || diagnostics["sdk"]["version"] != PINNED_CLAUDE_SDK_VERSION
-        {
-            return Err(WorkerError::Negotiation("Claude SDK version mismatch"));
-        }
-        if diagnostics["claude_runtime"]["compatible"] != true
-            || diagnostics["claude_runtime"]["version"] != PINNED_CLAUDE_CODE_VERSION
-        {
-            return Err(WorkerError::Negotiation("Claude runtime version mismatch"));
-        }
+        runtime_identity(&outcome.result)?;
         Ok(outcome.result)
     }
 
@@ -261,6 +252,43 @@ impl ClaudeWorker {
     }
 }
 
+pub fn runtime_identity(initialize: &Value) -> Result<ProviderRuntime, WorkerError> {
+    let diagnostics = initialize
+        .get("diagnostics")
+        .ok_or(WorkerError::Negotiation("worker diagnostics are missing"))?;
+    if diagnostics["compatibility_profile"].as_str() != Some(CLAUDE_COMPATIBILITY_PROFILE) {
+        return Err(WorkerError::Negotiation(
+            "Claude compatibility profile mismatch",
+        ));
+    }
+    if diagnostics["sdk"]["compatible"] != true {
+        return Err(WorkerError::Negotiation("Claude SDK is incompatible"));
+    }
+    if diagnostics["claude_runtime"]["compatible"] != true {
+        return Err(WorkerError::Negotiation("Claude runtime is incompatible"));
+    }
+    let sdk_version = diagnostics["sdk"]["version"]
+        .as_str()
+        .filter(|version| !version.is_empty())
+        .ok_or(WorkerError::Negotiation("Claude SDK version is missing"))?;
+    let runtime_version = diagnostics["claude_runtime"]["version"]
+        .as_str()
+        .filter(|version| !version.is_empty())
+        .ok_or(WorkerError::Negotiation(
+            "Claude runtime version is missing",
+        ))?;
+    let executable = diagnostics["claude_runtime"]["executable"]
+        .as_str()
+        .filter(|path| path.starts_with('/'))
+        .map(str::to_owned);
+    Ok(ProviderRuntime {
+        compatibility_profile: CLAUDE_COMPATIBILITY_PROFILE.to_owned(),
+        provider_version: runtime_version.to_owned(),
+        adapter_version: Some(sdk_version.to_owned()),
+        executable,
+    })
+}
+
 impl Drop for ClaudeWorker {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -293,5 +321,44 @@ fn response_error(error: &Value) -> WorkerError {
             .and_then(Value::as_str)
             .unwrap_or("unknown Claude worker error")
             .to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{CLAUDE_COMPATIBILITY_PROFILE, WorkerError, runtime_identity};
+
+    #[test]
+    fn profile_accepts_actual_sdk_and_bundled_runtime_versions() {
+        let runtime = runtime_identity(&json!({
+            "diagnostics": {
+                "compatibility_profile": CLAUDE_COMPATIBILITY_PROFILE,
+                "sdk": { "compatible": true, "version": "0.3.0" },
+                "claude_runtime": {
+                    "compatible": true,
+                    "version": "2.2.0",
+                    "executable": "/fixture/claude"
+                }
+            }
+        }))
+        .expect("compatible Claude runtime");
+        assert_eq!(runtime.provider_version, "2.2.0");
+        assert_eq!(runtime.adapter_version.as_deref(), Some("0.3.0"));
+    }
+
+    #[test]
+    fn profile_rejects_an_incompatible_worker_report() {
+        assert!(matches!(
+            runtime_identity(&json!({
+                "diagnostics": {
+                    "compatibility_profile": CLAUDE_COMPATIBILITY_PROFILE,
+                    "sdk": { "compatible": false, "version": "0.1.0" },
+                    "claude_runtime": { "compatible": true, "version": "2.1.0" }
+                }
+            })),
+            Err(WorkerError::Negotiation("Claude SDK is incompatible"))
+        ));
     }
 }

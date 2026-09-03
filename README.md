@@ -8,8 +8,9 @@ while Neovim, agent processes, and repository files remain container-local.
 M4 is complete. Durable mode keeps multiple Codex and Claude agents alive
 across SSH and Neovim restarts through an owner-only Unix socket, bounded
 replay, provider-backed history resync, and an archivable metadata-only
-registry. Shared checkouts allow one writable agent; additional writers require
-explicit, pre-existing linked worktrees. Embedded mode remains available as the
+registry. New sessions default to lifecycle-managed task worktrees selected by
+repository and stable task ID. Shared-checkout starts are disabled by default;
+an administrator may explicitly re-enable them. Embedded mode remains available as the
 single-agent, Neovim-owned fallback. The M3 Foundation, Styling, Chrome, and
 native presentation contracts remain unchanged. Ordinary verification uses
 fake provider processes and never consumes provider quota.
@@ -68,9 +69,16 @@ require("agent_manager").setup({
     command = { "/absolute/path/to/agent-manager-broker", "serve" },
   },
   providers = {
+    codex = {
+      executable = "/absolute/path/to/codex",
+    },
     claude = {
       python = "/absolute/path/to/agent-manager-worker-venv/bin/python",
     },
+  },
+  worktrees = {
+    lifecycle = "/absolute/path/to/zemrip-agent-workspace",
+    allow_shared = false,
   },
 })
 ```
@@ -215,7 +223,47 @@ The promoted schema-v1 integrations are:
   segment extension, so external owners consume Agent Manager's non-blocking
   cache when desired.
 - UX Panels is not yet available. The existing native view remains the narrow
-  backend and health reports that decision explicitly.
+backend and health reports that decision explicitly.
+
+### Managed worktrees and administrator policy
+
+The normal start flow offers `New isolated task` and `Resume isolated task`.
+Repository choices and existing task mappings come from the installed
+`zemrip-agent-workspace audit --json` interface. A new task asks for one stable
+lowercase kebab-case ID; the broker atomically claims the resulting
+`agent/<task-id>` branch, lease, and `~/worktrees/<repo>/<task-id>` checkout
+before it starts a provider. No raw worktree path is requested.
+
+The lifecycle command remains the authority for Git fetches, branches, leases,
+handoff, and cleanup. Agent Manager exposes inventory, claim/resume, and
+non-destructive lease handoff only. It deliberately has no reset, delete,
+force-clean, or garbage-collection API. Set `worktrees.lifecycle = false` to
+disable managed starts. Set `worktrees.allow_shared = true` only when the
+administrator intends to permit writable agents in coordination checkouts; the
+embedded broker enforces the setting, and durable deployments enforce it with
+the corresponding service flag.
+
+### Provider runtime compatibility
+
+Agent Manager no longer requires the executable on `PATH` to equal one exact
+Codex release. The vendored 0.152.0 schemas are the reviewed lower-bound
+baseline for the `codex-app-server-stable-v1` profile. At every start, the
+adapter performs the stable App Server initialization handshake with
+`experimentalApi = false`, reads the actual runtime version, and rejects a
+runtime older than the baseline. Newer stable App Server releases remain usable
+without changing a hard-coded pin; actual version, profile, and resolved
+executable are recorded in the agent summary and durable registry.
+
+The Claude worker follows the same pattern with the `claude-agent-sdk-v1`
+profile. Its locked environment remains the reproducible tested baseline, while
+the handshake reports and validates the SDK and SDK-bundled Claude Code versions
+that are actually running. A different reviewed worker environment can be
+selected with `providers.claude.python` without changing the public protocol.
+
+Running provider processes are never hot-swapped. After an executable or worker
+environment is upgraded, existing processes finish on their original runtime;
+resuming a persisted provider session launches it through the currently
+configured compatible runtime.
 
 Cached consumers can call `status()`, `running_count()`, or
 `pending_approval_count()`. State changes emit a coalesced

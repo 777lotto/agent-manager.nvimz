@@ -79,6 +79,7 @@ class FakeAdapter:
     async def diagnostics(self) -> JsonObject:
         return {
             "python_version": "3.13.test",
+            "compatibility_profile": "claude-agent-sdk-v1",
             "sdk": {"available": True, "compatible": True, "version": "0.2.148"},
             "claude_runtime": {
                 "available": True,

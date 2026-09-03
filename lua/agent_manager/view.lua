@@ -544,6 +544,31 @@ function View:_render_agents()
     table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
     table.insert(lines, " " .. inline(selected.cwd))
     table.insert(lines, " " .. inline(selected.workspace_strategy))
+    if selected.managed_workspace and selected.managed_workspace ~= vim.NIL then
+      table.insert(
+        lines,
+        " "
+          .. inline(selected.managed_workspace.repository)
+          .. "/"
+          .. inline(selected.managed_workspace.task_id)
+      )
+      table.insert(
+        lines,
+        " "
+          .. inline(selected.managed_workspace.branch)
+          .. " ← "
+          .. inline(selected.managed_workspace.base_branch)
+      )
+    end
+    if selected.runtime and selected.runtime ~= vim.NIL then
+      table.insert(
+        lines,
+        " runtime "
+          .. inline(selected.runtime.provider_version)
+          .. " · "
+          .. inline(selected.runtime.compatibility_profile)
+      )
+    end
     local conflicts = self.model:file_conflict_list(selected.id)
     if #conflicts > 0 then
       table.insert(lines, " ! " .. tostring(#conflicts) .. " dirty buffer conflict(s)")
@@ -668,6 +693,17 @@ function View:_render_decision(action)
     { line = 5, group = "AgentManagerMuted" },
     { line = 6, group = "AgentManagerMuted" },
   }
+  if agent.managed_workspace and agent.managed_workspace ~= vim.NIL then
+    table.insert(
+      lines,
+      7,
+      " Task:      "
+        .. inline(agent.managed_workspace.repository)
+        .. "/"
+        .. inline(agent.managed_workspace.task_id)
+    )
+    table.insert(highlights, { line = 7, group = "AgentManagerMuted" })
+  end
   if action.kind == "approval" then
     table.insert(lines, " Action:  " .. inline(payload.tool_name))
     table.insert(lines, " Summary: " .. inline(payload.summary))

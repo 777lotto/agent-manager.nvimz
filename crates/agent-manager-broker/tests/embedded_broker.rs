@@ -1,5 +1,8 @@
+use std::fs;
 use std::future::Future;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use agent_manager_broker::codex::CommandSpec;
@@ -51,6 +54,10 @@ impl Harness {
         let config = EmbeddedConfig::default()
             .with_provider_commands(codex, claude)
             .with_callback_timeout(callback_timeout);
+        Self::start_with_config(config)
+    }
+
+    fn start_with_config(config: EmbeddedConfig) -> Self {
         let (client, server) = duplex(1024 * 1024);
         let (client_reader, client_writer) = split(client);
         let (server_reader, server_writer) = split(server);
@@ -129,6 +136,110 @@ impl Harness {
             .expect("broker task panicked")
             .expect("broker shutdown failed");
     }
+}
+
+struct ManagedWorkspaceFixture {
+    root: PathBuf,
+    lifecycle: PathBuf,
+    worktree: PathBuf,
+    marker: PathBuf,
+}
+
+impl ManagedWorkspaceFixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "agent-manager-managed-workspace-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let canonical = root.join("canonical");
+        let worktree = root.join("worktrees/agent-manager/managed-task");
+        fs::create_dir_all(&canonical).expect("create canonical fixture");
+        run_git(&canonical, &["init", "--initial-branch=bluff"]);
+        run_git(&canonical, &["config", "user.name", "Agent Manager Test"]);
+        run_git(
+            &canonical,
+            &["config", "user.email", "agent-manager@example.invalid"],
+        );
+        fs::write(canonical.join("README.md"), "fixture\n").expect("write Git fixture");
+        run_git(&canonical, &["add", "README.md"]);
+        run_git(&canonical, &["commit", "-m", "fixture"]);
+        fs::create_dir_all(worktree.parent().expect("worktree parent"))
+            .expect("create worktree root");
+        run_git(
+            &canonical,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "agent/managed-task",
+                worktree.to_str().expect("UTF-8 worktree"),
+            ],
+        );
+
+        let marker = root.join("lifecycle-calls.txt");
+        let lifecycle = root.join("fake-workspace-lifecycle.py");
+        let audit = json!({
+            "schema_version": 1,
+            "generated_at": "2026-09-03T00:00:00Z",
+            "registry": root.join("repositories.toml"),
+            "repositories": [{
+                "slug": "agent-manager",
+                "github": "owner/agent-manager.nvimz",
+                "canonical": {
+                    "path": canonical,
+                    "base_branch": "bluff",
+                    "branch": "bluff",
+                    "clean": true
+                },
+                "worktree_root": worktree.parent().expect("worktree root"),
+                "worktrees": [{
+                    "task_id": "managed-task",
+                    "branch": "agent/managed-task",
+                    "path": worktree,
+                    "head": "fixture",
+                    "upstream": null,
+                    "lease_identity": ["launcher:test"],
+                    "lease_keep": null,
+                    "lease_transition": "claim-acquired",
+                    "cleanup_candidate": false,
+                    "reasons": []
+                }]
+            }]
+        });
+        let script = format!(
+            "#!/usr/bin/env python3\nimport pathlib, sys\nAUDIT = {audit:?}\nMARKER = pathlib.Path({marker:?})\ncommand = sys.argv[1]\nif command == 'audit':\n    print(AUDIT)\nelif command in ('claim', 'handoff'):\n    with MARKER.open('a', encoding='utf-8') as target:\n        target.write(' '.join(sys.argv[1:]) + '\\n')\nelse:\n    raise SystemExit(2)\n",
+            audit = serde_json::to_string(&audit).expect("encode audit"),
+            marker = marker.to_string_lossy(),
+        );
+        fs::write(&lifecycle, script).expect("write lifecycle fixture");
+        fs::set_permissions(&lifecycle, fs::Permissions::from_mode(0o700))
+            .expect("make lifecycle fixture executable");
+        Self {
+            root,
+            lifecycle,
+            worktree,
+            marker,
+        }
+    }
+}
+
+impl Drop for ManagedWorkspaceFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn run_git(cwd: &std::path::Path, arguments: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .status()
+        .expect("start fixture Git command");
+    assert!(
+        status.success(),
+        "fixture Git command failed: {arguments:?}"
+    );
 }
 
 fn fixture_command(name: &str) -> PathBuf {
@@ -256,6 +367,21 @@ async fn prove_embedded_flow(provider: Provider) {
         .expect("agent id")
         .to_owned();
     assert_eq!(started["result"]["agent"]["provider"], json!(provider));
+    let runtime = &started["result"]["agent"]["runtime"];
+    match provider {
+        Provider::Codex => {
+            assert_eq!(
+                runtime["compatibility_profile"],
+                "codex-app-server-stable-v1"
+            );
+            assert_eq!(runtime["provider_version"], "0.152.0");
+        }
+        Provider::Claude => {
+            assert_eq!(runtime["compatibility_profile"], "claude-agent-sdk-v1");
+            assert_eq!(runtime["provider_version"], "2.1.251");
+            assert_eq!(runtime["adapter_version"], "0.2.148");
+        }
+    }
     harness.state("idle").await;
 
     harness
@@ -679,6 +805,132 @@ async fn provider_discovery_lists_active_cli_sessions_without_a_cwd_filter() {
     })
     .await
     .expect("global active session discovery timed out");
+}
+
+async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
+    let codex = fixture_command("fake_m1_codex_app_server.py");
+    let claude = fixture_command("fake_m1_claude_worker.py");
+    let config = EmbeddedConfig::default()
+        .with_provider_commands(
+            CommandSpec {
+                program: "python".to_owned(),
+                args: vec![codex.to_string_lossy().into_owned()],
+            },
+            WorkerCommandSpec {
+                program: "python".to_owned(),
+                args: vec![claude.to_string_lossy().into_owned()],
+            },
+        )
+        .with_workspace_lifecycle(fixture.lifecycle.to_string_lossy())
+        .with_shared_workspaces(false);
+    let mut harness = Harness::start_with_config(config);
+    harness
+        .send(request(
+            1,
+            "initialize",
+            json!({
+                "protocol_version": 1,
+                "client": { "name": "managed-test", "version": "0.1.0" }
+            }),
+        ))
+        .await;
+    let initialized = harness.response(1).await;
+    assert_eq!(initialized["result"]["workspaces"]["managed_tasks"], true);
+    assert_eq!(initialized["result"]["workspaces"]["shared_starts"], false);
+    harness
+        .send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+    harness
+        .wait_for(|message| message["method"] == "broker/state")
+        .await;
+    harness
+}
+
+#[tokio::test]
+async fn managed_workspace_start_uses_lifecycle_inventory_claim_and_handoff() {
+    completes_within(async {
+        let fixture = ManagedWorkspaceFixture::new();
+        let mut harness = start_managed_harness(&fixture).await;
+
+        harness.send(request(2, "workspace/list", json!({}))).await;
+        let inventory = harness.response(2).await;
+        assert_eq!(
+            inventory["result"]["repositories"][0]["base_branch"],
+            "bluff"
+        );
+        assert_eq!(
+            inventory["result"]["repositories"][0]["tasks"][0]["task_id"],
+            "managed-task"
+        );
+
+        harness
+            .send(request(
+                20,
+                "agent/start",
+                json!({
+                    "provider": "codex",
+                    "cwd": fixture.worktree,
+                    "workspace_strategy": "shared"
+                }),
+            ))
+            .await;
+        assert_eq!(harness.response(20).await["error"]["code"], -32_031);
+
+        harness
+            .send(request(
+                3,
+                "agent/start",
+                json!({
+                    "provider": "codex",
+                    "managed_workspace": {
+                        "repository": "agent-manager",
+                        "task_id": "managed-task",
+                        "resume": true
+                    }
+                }),
+            ))
+            .await;
+        let started = harness.response(3).await;
+        let agent = &started["result"]["agent"];
+        let agent_id = agent["id"].as_str().expect("managed agent id").to_owned();
+        assert_eq!(agent["cwd"], fixture.worktree.to_string_lossy().as_ref());
+        assert_eq!(agent["workspace_strategy"], "worktree");
+        assert_eq!(agent["managed_workspace"]["repository"], "agent-manager");
+        assert_eq!(agent["managed_workspace"]["base_branch"], "bluff");
+        assert_eq!(
+            agent["runtime"]["compatibility_profile"],
+            "codex-app-server-stable-v1"
+        );
+        assert_eq!(agent["runtime"]["provider_version"], "0.152.0");
+
+        harness
+            .send(request(
+                4,
+                "workspace/handoff",
+                json!({ "repository": "agent-manager", "task_id": "managed-task" }),
+            ))
+            .await;
+        assert_eq!(harness.response(4).await["error"]["code"], -32_013);
+
+        harness
+            .send(request(5, "agent/archive", json!({ "agent_id": agent_id })))
+            .await;
+        assert_eq!(harness.response(5).await["result"]["archived"], true);
+        harness
+            .send(request(
+                6,
+                "workspace/handoff",
+                json!({ "repository": "agent-manager", "task_id": "managed-task" }),
+            ))
+            .await;
+        assert_eq!(harness.response(6).await["result"]["handed_off"], true);
+        let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
+        assert!(lifecycle_calls.contains("claim agent-manager managed-task --owner-pid"));
+        assert!(lifecycle_calls.contains("handoff agent-manager managed-task --owner-pid"));
+        harness.shutdown(7).await;
+    })
+    .await
+    .expect("managed workspace flow timed out");
 }
 
 #[tokio::test]

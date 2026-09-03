@@ -10,6 +10,8 @@
         "cwd": "/workspace/project",
         "workspace_strategy": "worktree",
         "worktree_path": "/workspace/project",
+        "managed_workspace": null,
+        "runtime": null,
         "title": "Contract review",
         "state": "waiting_approval",
         "active_turn_id": "turn-7",

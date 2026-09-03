@@ -29,9 +29,16 @@ isolation.
         command = { "/path/to/agent-manager-broker", "serve" },
       },
       providers = {
+        codex = {
+          executable = "/path/to/codex",
+        },
         claude = {
           python = "/path/to/worker-venv/bin/python",
         },
+      },
+      worktrees = {
+        lifecycle = "/path/to/zemrip-agent-workspace",
+        allow_shared = false,
       },
       ui = {
         external_sessions = true,
@@ -68,8 +75,9 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 
                                                    *:AgentManagerStart*
 :AgentManagerStart [codex|claude]
-                           Select provider and shared/worktree strategy. Durable
-                           mode may own multiple agents; embedded mode owns one.
+                           Select a provider, then create a lifecycle-managed
+                           task or resume an existing task mapping. Durable mode
+                           may own multiple agents; embedded mode owns one.
 
                                                    *:AgentManagerAttach*
 :AgentManagerAttach        Select a broker agent or resumable provider session.
@@ -151,11 +159,24 @@ written automatically. An external change never reloads a modified buffer; use
 
 Embedded state ends when its broker exits and supports one live runtime. The
 durable broker persists provider identity and transcript-free metadata, replays
-retained events, and reloads provider history when replay is too old. Shared
-Git checkouts permit one writable agent across all subdirectories. Additional
-writable agents require distinct, existing linked worktrees; Agent Manager
-validates but never creates or removes them. A fork keeps its source as a
-disconnected summary so writer ownership remains explicit.
+retained events, and reloads provider history when replay is too old. Normal
+starts select a registered repository and stable task ID. The broker asks the
+installed lifecycle authority to claim or resume the matching `agent/**`
+branch, lease, and linked worktree; it never duplicates that Git logic.
+
+Shared-checkout starts are disabled by default. An administrator may set
+`worktrees.allow_shared = true`; the embedded broker enforces the resulting
+policy, while durable service policy is configured on the supervised broker.
+Agent Manager exposes no reset, delete, force-clean, or garbage-collection
+control. A fork keeps its source as a disconnected summary so writer ownership
+remains explicit.
+
+Codex and Claude sessions record the actual runtime versions returned by their
+startup handshakes and the compatibility profile used to validate them. The
+Codex stable-v1 profile accepts the reviewed 0.152.0 schema baseline and newer
+stable releases with experimental APIs disabled. Running processes are not
+hot-upgraded; resuming a persisted session uses the currently configured
+compatible runtime.
 
 External CLI discovery projects metadata only. Prompt previews and tool
 payloads do not cross into the Neovim model. Agent Manager does not attach to,

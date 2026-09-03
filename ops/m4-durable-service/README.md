@@ -6,6 +6,11 @@ the locked Claude environment; those stable M5 artifact paths must already
 exist. The unit keeps provider processes alive across SSH and Neovim exits,
 while the broker exposes only an owner-only Unix socket.
 
+The service passes absolute Codex, Claude worker, and workspace-lifecycle
+paths. Its broker policy permits lifecycle-managed task worktrees and rejects
+shared-checkout starts. Changing that policy is an explicit unit change; the
+plugin exposes no reset, delete, force-clean, or garbage-collection control.
+
 All parameters are reviewed in `m4.env`. The service writes transcript-free
 registry metadata under the user's state directory and stable monitoring JSON
 to `/var/lib/zemrip/status/agent-manager.json`.

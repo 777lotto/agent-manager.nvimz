@@ -16,13 +16,14 @@ provider-authenticated probes remain explicit operations.
 | Rust | 1.98.0 | broker and native Codex adapter |
 | Python | 3.13.15 | isolated Claude worker runtime |
 | uv | 0.12.7 | Python environment and dependency lock |
-| Codex CLI | 0.152.0 | exact App Server provider contract |
-| Claude Code | 2.1.251 | SDK-bundled worker runtime |
-| Claude Agent SDK | 0.2.148 | exact Python SDK boundary |
+| Codex CLI | 0.152.0 | reviewed stable-v1 schema lower bound |
+| Claude Code | 2.1.251 | tested SDK-bundled runtime baseline |
+| Claude Agent SDK | 0.2.148 | tested worker-profile baseline |
 
-Mise pins the toolchain. `python/uv.lock` pins Python artifacts. The curated
-Codex bundle includes generated schema checksums, and its update script refuses
-a different CLI release.
+Mise pins the toolchain. `python/uv.lock` pins the reproducible Python test
+environment. The curated Codex bundle includes generated schema checksums, and
+its update script refuses a different CLI release because changing the review
+baseline is separate from running a newer compatible stable runtime.
 
 ## Framing decision
 
@@ -69,12 +70,12 @@ worker distinguishes the tool name and exposes two typed broker callbacks,
 `approval/request` and `question/request`. A disconnect, timeout, malformed
 response, or shutdown returns denial; it never synthesizes approval.
 
-SDK 0.2.148 is the exact M0 package baseline recorded by
+SDK 0.2.148 is the tested M0 package baseline recorded by
 [PyPI release metadata](https://pypi.org/project/claude-agent-sdk/). It supports
 Python 3.13 and includes the session metadata/history and callback types used by
 the worker. That release's
 [bundled CLI metadata](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.148/src/claude_agent_sdk/_cli_version.py)
-pins Claude Code 2.1.251, so the worker uses and verifies the bundled runtime
+pins Claude Code 2.1.251, so the worker uses and reports the bundled runtime
 instead of whichever `claude` executable happens to appear on `PATH`.
 
 For M0, `setting_sources=[]` and strict MCP configuration prevent a target
@@ -124,10 +125,20 @@ No live provider probe is part of `mise run verify`.
 
 ## Upgrade rule
 
-Provider upgrades are contract changes, not background dependency refreshes.
-An upgrade must:
+The broker's public protocol is not tied to one provider patch release. Codex
+App Server 0.152.0 and newer runtimes enter the `codex-app-server-stable-v1`
+profile only after the initialization handshake succeeds with experimental APIs
+disabled. The Claude worker similarly advertises `claude-agent-sdk-v1`, actual
+SDK and bundled-runtime versions, and structural compatibility. Agent summaries
+and the durable registry record those actual identities.
 
-1. update the pinned runtime/package version;
+Moving an installed executable within an existing compatibility profile does
+not require a broker release. Running processes are not hot-upgraded; a later
+resume uses the currently configured compatible runtime. Changing the schema
+lower bound, enabling an experimental API, or changing a compatibility profile
+is a reviewed contract change. Such a change must:
+
+1. update the tested runtime/package baseline or compatibility profile;
 2. regenerate or relock the provider artifacts;
 3. review schema and SDK type diffs;
 4. update adapters and golden fixtures;
