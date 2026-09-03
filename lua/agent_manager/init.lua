@@ -492,27 +492,38 @@ function M.sessions(opts, callback)
     finish(callback, nil, err)
     return nil, err
   end
-  local cwd = opts.cwd or project_root()
-  if type(cwd) ~= "string" then
-    local err = structured_error("input", "cwd must be a directory path")
+  if opts.active_only ~= nil and type(opts.active_only) ~= "boolean" then
+    local err = structured_error("input", "active_only must be a boolean")
     finish(callback, nil, err)
     return nil, err
   end
-  cwd = vim.uv.fs_realpath(vim.fs.normalize(cwd))
-  if not cwd then
-    local err = structured_error("input", "cwd does not identify an existing directory")
-    finish(callback, nil, err)
-    return nil, err
+  local cwd = nil
+  if opts.cwd ~= nil then
+    if type(opts.cwd) ~= "string" then
+      local err = structured_error("input", "cwd must be a directory path")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    cwd = vim.uv.fs_realpath(vim.fs.normalize(opts.cwd))
+    if not cwd then
+      local err = structured_error("input", "cwd does not identify an existing directory")
+      finish(callback, nil, err)
+      return nil, err
+    end
   end
   return with_client(function()
+    local params = {
+      provider = opts.provider,
+      cursor = opts.cursor or vim.NIL,
+      limit = opts.limit or 50,
+      active_only = opts.active_only == true,
+    }
+    if cwd then
+      params.cwd = cwd
+    end
     local _, request_err = runtime.client:request(
       "provider/session/list",
-      {
-        provider = opts.provider,
-        cwd = cwd,
-        cursor = opts.cursor or vim.NIL,
-        limit = opts.limit or 50,
-      },
+      params,
       function(result, rpc_err)
         if rpc_err then
           report(rpc_err)
@@ -874,6 +885,50 @@ function M.diff(agent_id, callback)
   end, callback)
 end
 
+local function refresh_external_sessions(callback)
+  if not runtime.config.ui.external_sessions then
+    runtime.model:clear_external_sessions()
+    callback({ sessions = {}, activity = {} })
+    return
+  end
+  local remaining = 2
+  local activity = {}
+  local function settle(provider, result, err)
+    local sessions = result and result.sessions or {}
+    local available = result and result.activity_available == true or false
+    runtime.model:apply_external_sessions(provider, sessions, available, err)
+    activity[provider] = {
+      available = available,
+      error = err,
+    }
+    remaining = remaining - 1
+    if remaining == 0 then
+      callback({
+        sessions = runtime.model:external_session_list(),
+        activity = activity,
+      })
+    end
+  end
+  for _, provider in ipairs({ "codex", "claude" }) do
+    local current_provider = provider
+    local _, request_err = runtime.client:request(
+      "provider/session/list",
+      {
+        provider = current_provider,
+        cursor = vim.NIL,
+        limit = runtime.config.ui.external_session_limit,
+        active_only = true,
+      },
+      function(result, rpc_err)
+        settle(current_provider, result, rpc_err)
+      end
+    )
+    if request_err then
+      settle(current_provider, nil, request_err)
+    end
+  end
+end
+
 function M.refresh(callback)
   local ok, setup_err = ensure_setup()
   if not ok then
@@ -889,8 +944,16 @@ function M.refresh(callback)
       end
       if rpc_err then
         report(rpc_err)
+        finish(callback, nil, rpc_err)
+        return
       end
-      finish(callback, result, rpc_err)
+      refresh_external_sessions(function(external)
+        result = result or {}
+        result.external_sessions = external.sessions
+        result.external_activity = external.activity
+        runtime.view:schedule_render()
+        finish(callback, result, nil)
+      end)
     end)
     if request_err then
       report(request_err)
@@ -951,9 +1014,21 @@ local function choose_provider_session(provider)
     if err then
       return
     end
-    local sessions = result and result.sessions or {}
+    if not result or result.activity_available ~= true then
+      vim.notify(
+        "Agent Manager: cannot verify whether " .. provider .. " sessions are still active",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    local sessions = {}
+    for _, session in ipairs(result and result.sessions or {}) do
+      if session.active ~= true then
+        table.insert(sessions, session)
+      end
+    end
     if #sessions == 0 then
-      vim.notify("Agent Manager: no " .. provider .. " sessions found for this project")
+      vim.notify("Agent Manager: no resumable " .. provider .. " sessions found for this project")
       return
     end
     vim.ui.select(sessions, {

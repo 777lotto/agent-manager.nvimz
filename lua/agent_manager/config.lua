@@ -59,8 +59,10 @@ local function defaults()
     },
     ui = {
       max_events = 2000,
-      agent_width = 28,
+      agent_width = 40,
       activity_width = 38,
+      external_sessions = true,
+      external_session_limit = 1000,
     },
     root = root,
   }
@@ -152,6 +154,20 @@ function M.resolve(opts)
   end
   if type(config.ui.max_events) ~= "number" or config.ui.max_events < 1 then
     return nil, { kind = "configuration", message = "ui.max_events must be positive" }
+  end
+  if type(config.ui.external_sessions) ~= "boolean" then
+    return nil, { kind = "configuration", message = "ui.external_sessions must be a boolean" }
+  end
+  if
+    type(config.ui.external_session_limit) ~= "number"
+    or config.ui.external_session_limit < 1
+    or config.ui.external_session_limit > 1000
+    or config.ui.external_session_limit % 1 ~= 0
+  then
+    return nil, {
+      kind = "configuration",
+      message = "ui.external_session_limit must be an integer from 1 to 1000",
+    }
   end
   return config
 end

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import platform
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Final, cast
 
+import claude_agent_sdk
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -33,6 +35,9 @@ from .protocol import JsonObject, JsonValue, ProtocolFault, require_object
 SDK_DISTRIBUTION: Final = "claude-agent-sdk"
 PINNED_SDK_VERSION: Final = "0.2.148"
 PINNED_CLAUDE_CODE_VERSION: Final = "2.1.251"
+ACTIVE_SESSION_TIMEOUT_SECONDS: Final = 5.0
+MAX_ACTIVE_SESSION_BYTES: Final = 1024 * 1024
+MAX_ACTIVE_SESSIONS: Final = 1000
 
 
 @dataclass(slots=True)
@@ -105,6 +110,23 @@ class ClaudeSdkAdapter:
             include_worktrees=True,
         )
         return [encode_json_value(record) for record in records]
+
+    async def list_active_sessions(self, directory: str | None) -> tuple[list[JsonValue], bool]:
+        cli_path = _bundled_cli_path()
+        if cli_path is None:
+            return [], False
+        payload = await _active_session_payload(cli_path, directory)
+        if not isinstance(payload, list):
+            return [], False
+        records = cast(list[object], payload)
+        if len(records) > MAX_ACTIVE_SESSIONS:
+            return [], False
+        sessions: list[JsonValue] = []
+        for record in records:
+            projected = _project_active_session(record)
+            if projected is not None:
+                sessions.append(projected)
+        return sessions, True
 
     async def history(
         self, session_id: str, directory: str | None, limit: int | None, offset: int
@@ -215,6 +237,91 @@ def _extract_session_id(server_info: dict[str, Any] | None) -> str | None:
         return None
     for key in ("session_id", "sessionId"):
         value = server_info.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _bundled_cli_path() -> Path | None:
+    executable = "claude.exe" if platform.system() == "Windows" else "claude"
+    path = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled" / executable
+    return path if path.is_file() else None
+
+
+async def _active_session_payload(cli_path: Path, directory: str | None) -> object | None:
+    argv = [str(cli_path), "agents", "--json"]
+    if directory is not None:
+        argv.extend(("--cwd", directory))
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    assert process.stdout is not None
+    try:
+        async with asyncio.timeout(ACTIVE_SESSION_TIMEOUT_SECONDS):
+            try:
+                encoded = await process.stdout.readexactly(MAX_ACTIVE_SESSION_BYTES + 1)
+            except asyncio.IncompleteReadError as error:
+                encoded = error.partial
+            if len(encoded) > MAX_ACTIVE_SESSION_BYTES:
+                await _stop_process(process)
+                return None
+            return_code = await process.wait()
+    except TimeoutError:
+        await _stop_process(process)
+        return None
+    except asyncio.CancelledError:
+        await _stop_process(process)
+        raise
+    if return_code != 0:
+        return None
+    try:
+        return cast(object, json.loads(encoded))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return None
+
+
+async def _stop_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        process.kill()
+    with contextlib.suppress(Exception):
+        await process.wait()
+
+
+def _project_active_session(value: object) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    outer = cast(dict[object, object], value)
+    nested = outer.get("session")
+    record = cast(dict[object, object], nested) if isinstance(nested, dict) else outer
+    session_id = _first_string(
+        record, ("session_id", "sessionId", "id", "uuid", "provider_session_id")
+    )
+    cwd = _first_string(record, ("cwd", "directory", "project_path", "projectPath"))
+    if session_id is None or cwd is None or not Path(cwd).is_absolute():
+        return None
+    projected: JsonObject = {
+        "session_id": session_id,
+        "cwd": cwd,
+        "active": True,
+    }
+    name = _first_string(record, ("name", "title"))
+    if name is not None:
+        projected["name"] = name
+    updated_at = record.get("updated_at", record.get("updatedAt", record.get("startedAt")))
+    if isinstance(updated_at, (int, float, str)) and not isinstance(updated_at, bool):
+        projected["updated_at"] = updated_at
+    return projected
+
+
+def _first_string(record: dict[object, object], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = record.get(key)
         if isinstance(value, str) and value:
             return value
     return None

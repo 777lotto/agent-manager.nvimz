@@ -73,6 +73,7 @@ impl EmbeddedConfig {
     #[must_use]
     pub fn with_provider_commands(mut self, codex: CommandSpec, claude: WorkerCommandSpec) -> Self {
         self.runtime.codex = codex;
+        self.runtime.codex_thread_locks = None;
         self.runtime.claude = claude;
         self
     }
@@ -635,19 +636,23 @@ impl Broker {
             ));
             return;
         };
-        let cwd = match canonical_directory(&parsed.cwd) {
-            Ok(cwd) => cwd,
-            Err(message) => {
-                self.send(invalid_params(request_id, message));
-                return;
-            }
+        let cwd = match parsed.cwd.as_deref() {
+            Some(cwd) => match canonical_directory(cwd) {
+                Ok(cwd) => Some(cwd),
+                Err(message) => {
+                    self.send(invalid_params(request_id, message));
+                    return;
+                }
+            },
+            None => None,
         };
         let limit = parsed.limit.unwrap_or(50).clamp(1, 1_000);
         match discover_sessions(
             parsed.provider,
-            &cwd,
+            cwd.as_deref(),
             parsed.cursor.as_deref(),
             limit,
+            parsed.active_only.unwrap_or(false),
             &self.config.runtime,
         )
         .await
@@ -1686,11 +1691,14 @@ struct StartParams {
 #[serde(deny_unknown_fields)]
 struct ProviderSessionListParams {
     provider: Provider,
-    cwd: String,
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     cursor: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
+    #[serde(default)]
+    active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

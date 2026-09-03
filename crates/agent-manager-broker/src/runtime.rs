@@ -1,6 +1,6 @@
 //! Provider tasks owned by the embedded or durable broker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,7 +14,8 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::codex::{
-    CodexAppServer, CodexError, CommandSpec, ProviderEvent, normalize_event, thread_id, turn_id,
+    CodexAppServer, CodexError, CommandSpec, ProviderEvent, active_thread_ids,
+    default_thread_lock_directory, normalize_event, thread_id, turn_id,
 };
 use crate::human::{
     HumanRequestKind, claude_approval_response, claude_question_response, claude_request,
@@ -104,6 +105,7 @@ pub(crate) enum RuntimeEvent {
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
     pub codex: CommandSpec,
+    pub codex_thread_locks: Option<PathBuf>,
     pub claude: WorkerCommandSpec,
     pub callback_timeout: Duration,
 }
@@ -112,6 +114,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             codex: CommandSpec::default(),
+            codex_thread_locks: default_thread_lock_directory(),
             claude: WorkerCommandSpec::default(),
             callback_timeout: DEFAULT_CALLBACK_TIMEOUT,
         }
@@ -155,9 +158,10 @@ pub(crate) fn spawn_agent(
 
 pub(crate) async fn discover_sessions(
     provider: Provider,
-    cwd: &Path,
+    cwd: Option<&Path>,
     cursor: Option<&str>,
     limit: u32,
+    active_only: bool,
     config: &RuntimeConfig,
 ) -> Result<Value, &'static str> {
     match provider {
@@ -168,12 +172,23 @@ pub(crate) async fn discover_sessions(
                 let _ = server.shutdown().await;
                 return Err("Codex App Server initialization failed");
             }
-            let outcome = server
-                .list_threads_for_directory(cwd, cursor, limit)
-                .await
-                .map_err(|_| "Codex session discovery failed");
+            let outcome = match cwd {
+                Some(cwd) => server.list_threads_for_directory(cwd, cursor, limit).await,
+                None => server.list_threads(cursor, limit).await,
+            }
+            .map_err(|_| "Codex session discovery failed");
             let _ = server.shutdown().await;
-            outcome.map(|outcome| provider_sessions(provider, &outcome.result))
+            let (active, activity_available) =
+                active_thread_ids(config.codex_thread_locks.as_deref());
+            outcome.map(|outcome| {
+                provider_sessions(
+                    provider,
+                    &outcome.result,
+                    &active,
+                    activity_available,
+                    active_only,
+                )
+            })
         }
         Provider::Claude => {
             let mut worker = ClaudeWorker::spawn(&config.claude)
@@ -189,12 +204,24 @@ pub(crate) async fn discover_sessions(
                         "directory": cwd,
                         "limit": limit,
                         "offset": cursor.and_then(|cursor| cursor.parse::<u64>().ok()).unwrap_or(0),
+                        "active_only": active_only,
                     }),
                 )
                 .await
                 .map_err(|_| "Claude session discovery failed");
             let _ = worker.shutdown().await;
-            outcome.map(|outcome| provider_sessions(provider, &outcome.result))
+            outcome.map(|outcome| {
+                let activity_available = outcome.result["activity_available"]
+                    .as_bool()
+                    .unwrap_or(false);
+                provider_sessions(
+                    provider,
+                    &outcome.result,
+                    &HashSet::new(),
+                    activity_available,
+                    active_only,
+                )
+            })
         }
     }
 }
