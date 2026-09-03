@@ -26,6 +26,15 @@ local function buffer_contains(buffer, needle)
   return table.concat(lines, "\n"):find(needle, 1, true) ~= nil
 end
 
+local function buffer_has_line(buffer, expected)
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(buffer, 0, -1, false)) do
+    if line == expected then
+      return true
+    end
+  end
+  return false
+end
+
 local function pure_client_resync_test()
   local Client = require("agent_manager.client")
   local observed_resync = nil
@@ -74,6 +83,23 @@ local function pure_model_test()
       capabilities = { { name = "approvals", available = true } },
     },
   })
+  assert(model:apply_external_sessions("codex", {
+    {
+      provider_session_id = "thread-1",
+      cwd = "/tmp",
+      title = "managed duplicate",
+      active = true,
+    },
+    {
+      provider_session_id = "external-codex",
+      cwd = "/workspace/repos/alpha/api",
+      title = "external fixture",
+      active = true,
+    },
+  }, true))
+  assert_equal(#model:external_session_list(), 1, "managed provider sessions are de-duplicated")
+  assert_equal(model:external_session_list()[1].state, "cli-running", "external session state")
+  assert_equal(#model:session_list(), 2, "combined session projection")
   assert(model:record_user_input("agent-1", "question", "prompt"))
   assert(model:apply_event({
     sequence = 1,
@@ -143,6 +169,7 @@ local function pure_model_test()
   assert_equal(model:snapshot().sequence_gap, nil, "history resync closes sequence gap")
   model:set_client_state("disconnected", { message = "fixture disconnect" })
   assert_equal(model:list()[1].state, "disconnected", "disconnect projection")
+  assert_equal(model:external_session_list(), {}, "disconnect clears stale external sessions")
   assert_equal(model:pending(), {}, "disconnect clears unactionable requests")
 end
 
@@ -209,6 +236,10 @@ local function public_input_validation_test()
   result, err = manager.sessions({ provider = "codex", cwd = 42 })
   assert_equal(result, nil, "invalid discovery cwd result")
   assert_equal(err.kind, "input", "invalid discovery cwd error")
+
+  result, err = manager.sessions({ provider = "codex", active_only = "yes" })
+  assert_equal(result, nil, "invalid active-only discovery result")
+  assert_equal(err.kind, "input", "invalid active-only discovery error")
 
   result, err = manager.resume({
     provider = "claude",
@@ -292,6 +323,7 @@ local function durable_reconnect_test()
       },
     },
     providers = { claude = { python = false } },
+    ui = { external_sessions = false },
   })
   assert(ok, vim.inspect(setup_err))
   assert(manager.open())
@@ -358,6 +390,24 @@ local function integration_test()
   await("broker handshake", function()
     return manager.status().client.state == "connected"
   end)
+  await("external CLI session discovery", function()
+    return #(manager.status().model.external_sessions or {}) == 2
+  end)
+  local external_status = manager.status()
+  assert_equal(manager.list(), {}, "external CLI sessions are not broker-owned agents")
+  assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "directory tree parent")
+  assert(buffer_contains(external_status.view.buffers.agents, "api"), "Codex session directory")
+  assert(buffer_contains(external_status.view.buffers.agents, "web"), "Claude session directory")
+  assert(buffer_has_line(external_status.view.buffers.agents, " └─ workspace"), "tree root child")
+  assert(buffer_has_line(external_status.view.buffers.agents, "    └─ repos"), "tree nested repo root")
+  assert(buffer_has_line(external_status.view.buffers.agents, "       └─ alpha"), "tree repository")
+  assert(buffer_has_line(external_status.view.buffers.agents, "          ├─ api"), "tree sibling branch")
+  assert(buffer_has_line(external_status.view.buffers.agents, "          └─ web"), "tree final branch")
+  assert(buffer_contains(external_status.view.buffers.agents, "cli-running"), "external state label")
+  assert(
+    buffer_contains(external_status.view.buffers.agents, "CLI sessions are read-only"),
+    "external ownership note"
+  )
 
   local sessions = nil
   assert(manager.sessions({ provider = "codex", cwd = "/tmp" }, function(result, err)

@@ -92,6 +92,15 @@ class FakeAdapter:
     ) -> list[JsonValue]:
         return [{"session_id": "session-1", "cwd": directory, "offset": offset, "limit": limit}]
 
+    async def list_active_sessions(self, directory: str | None) -> tuple[list[JsonValue], bool]:
+        return [
+            {
+                "session_id": "active-session",
+                "cwd": directory or "/workspace/external",
+                "active": True,
+            }
+        ], True
+
     async def history(
         self, session_id: str, directory: str | None, limit: int | None, offset: int
     ) -> list[JsonValue]:
@@ -243,6 +252,16 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             )
             sessions = cast(list[JsonValue], cast(JsonObject, listed["result"])["sessions"])
             self.assertEqual(cast(JsonObject, sessions[0])["offset"], 3)
+
+            active = await send_and_wait(
+                worker,
+                writer,
+                request(20, "session/list", {"active_only": True, "limit": 20, "offset": 0}),
+            )
+            active_result = cast(JsonObject, active["result"])
+            active_sessions = cast(list[JsonValue], active_result["sessions"])
+            self.assertEqual(cast(JsonObject, active_sessions[0])["session_id"], "active-session")
+            self.assertIs(active_result["activity_available"], True)
 
             history = await send_and_wait(
                 worker,

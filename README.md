@@ -122,6 +122,15 @@ diffs/conflicts, `<Tab>` to cycle panes, and `q` to close only the view. Wide
 displays show agents, conversation, and activity together; medium and narrow
 displays cycle the same buffers without losing model state.
 
+The Agents pane groups broker-owned agents and currently active Codex/Claude
+CLI sessions in a directory tree. CLI sessions are discovered across the AI
+container when the workspace opens and whenever `r` refreshes the view. They
+are labeled `cli-running` and are read-only in Agent Manager while their
+original terminal owns them; after a session stops, `h` can resume its
+provider history for the current project. Set `ui.external_sessions = false`
+to disable discovery, or lower `ui.external_session_limit` from its default of
+1000 to cap each provider query.
+
 ### Runtime safety boundary
 
 Live prompts use the provider account already configured for Codex or Claude
@@ -147,6 +156,10 @@ the provider fork so writer ownership remains unambiguous.
 Opening the workspace and running the default test suite are non-spending. The
 diagnostic `codex-probe` performs only initialization and thread discovery;
 `codex-trace` starts a paid/live turn and therefore requires an explicit flag.
+External CLI discovery is metadata-only: Agent Manager projects provider,
+session ID, working directory, optional provider-supplied title, timestamp, and active
+state. Prompt previews and tool payloads are discarded at the provider
+boundary.
 
 ## Development
 
@@ -184,6 +197,9 @@ pins, and acceptance evidence. See
 [M4 durable multi-agent runtime](docs/architecture/m4-durable-multi-agent-runtime.md)
 for socket lifecycle, replay/resync, registry privacy, writer isolation, and
 acceptance evidence.
+See
+[external CLI session discovery](docs/architecture/external-cli-session-discovery.md)
+for the cross-process activity checks and read-only ownership boundary.
 
 ## UX integration
 

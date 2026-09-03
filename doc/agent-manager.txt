@@ -33,6 +33,10 @@ isolation.
           python = "/path/to/worker-venv/bin/python",
         },
       },
+      ui = {
+        external_sessions = true,
+        external_session_limit = 1000,
+      },
     })
 <
 
@@ -107,6 +111,13 @@ The native workspace uses agents, conversation, and activity buffers. Wide
 displays show all three. Medium and narrow displays use <Tab> and <S-Tab> to
 cycle panes.
 
+The Agents pane is a working-directory tree containing broker-owned agents and
+active sessions started by the standalone Codex or Claude CLI. External rows
+are labeled "cli-running" and remain read-only while the originating terminal
+owns them. The tree is refreshed when the workspace opens and with `r`.
+Set `ui.external_sessions` to false to hide external CLI sessions;
+`ui.external_session_limit` caps each provider query from 1 to 1000.
+
     n       start an agent
     h       attach to or resume a session
     p       prompt the selected agent
@@ -118,7 +129,7 @@ cycle panes.
     f       fork the selected provider session
     A       archive the selected inactive agent
     D       show a workspace diff or dirty-buffer conflict
-    r       refresh broker state
+    r       refresh agents and external CLI sessions
     ?       show mapping help
     q       close the workspace view
 
@@ -145,6 +156,11 @@ Git checkouts permit one writable agent across all subdirectories. Additional
 writable agents require distinct, existing linked worktrees; Agent Manager
 validates but never creates or removes them. A fork keeps its source as a
 disconnected summary so writer ownership remains explicit.
+
+External CLI discovery projects metadata only. Prompt previews and tool
+payloads do not cross into the Neovim model. Agent Manager does not attach to,
+resume, interrupt, or otherwise seize a session while its standalone CLI owns
+the provider writer.
 
 ==============================================================================
 6. UX integration                                       *agent-manager-ux*

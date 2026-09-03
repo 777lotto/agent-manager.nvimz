@@ -129,7 +129,7 @@ async fn probe_codex(cwd: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     ensure_directory(&cwd)?;
     let mut server = CodexAppServer::spawn(&CommandSpec::default())?;
     let initialize = server.initialize().await?;
-    let threads = server.list_threads(1).await?;
+    let threads = server.list_threads(None, 1).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({

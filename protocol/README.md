@@ -31,6 +31,9 @@ the Rust adapter translates it at the provider boundary.
   contract never invents a persistent approval choice.
 - The additive question `decision` field defaults to `answer` when omitted by
   an older protocol-v1 client; denial is always explicit.
+- The additive `provider/session/list` `active_only` flag and optional `cwd`
+  support metadata-only cross-project CLI discovery; omitting the flag retains
+  resumable-session behavior.
 - Malformed frames, duplicate callback responses, and unknown callback IDs fail
   closed.
 

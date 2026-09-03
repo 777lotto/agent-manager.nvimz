@@ -25,9 +25,11 @@ Neovim decision/context/diff views
 ## Session lifecycle
 
 `provider/session/list` starts a transient provider adapter and returns
-redacted session metadata for one canonical cwd. Codex uses App Server thread
-list filtering; Claude uses the worker's SDK-backed session discovery. Prompt
-previews and transcript bodies are not returned by discovery.
+redacted session metadata. Its original flow filters one canonical cwd; the
+additive global `active_only` flow used by the Agents tree is described in
+[external CLI session discovery](external-cli-session-discovery.md). Codex uses
+App Server thread-list metadata; Claude uses worker-owned discovery. Prompt
+previews and transcript bodies are not returned by either flow.
 
 `agent/resume` opens exactly the selected provider session ID. `agent/history`
 projects provider history into user, assistant, and system messages without

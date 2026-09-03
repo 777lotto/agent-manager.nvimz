@@ -1,6 +1,10 @@
 local Model = {}
 Model.__index = Model
 
+local function provider_session_key(provider, session_id)
+  return tostring(provider) .. ":" .. tostring(session_id)
+end
+
 local function deep_copy(value, seen)
   if type(value) ~= "table" then
     return value
@@ -73,6 +77,9 @@ function Model.new(opts)
   return setmetatable({
     agents = {},
     order = {},
+    external_sessions = {},
+    external_order = {},
+    external_activity = {},
     selected_agent_id = nil,
     events = {},
     conversations = {},
@@ -110,6 +117,9 @@ function Model:set_client_state(state, err)
     end
     self.pending_actions = {}
     self.pending_order = {}
+    self.external_sessions = {}
+    self.external_order = {}
+    self.external_activity = {}
   end
   self:_changed("client_state")
 end
@@ -140,11 +150,99 @@ function Model:apply_state(agents)
   end
   self.agents = next_agents
   self.order = next_order
+  self:_dedupe_external_sessions()
   if not self.selected_agent_id or not next_agents[self.selected_agent_id] then
     self.selected_agent_id = next_order[1]
   end
   self:_changed("broker_state")
   return true
+end
+
+function Model:_dedupe_external_sessions()
+  local managed = {}
+  for _, agent in pairs(self.agents) do
+    if type(agent.provider) == "string" and type(agent.provider_session_id) == "string" then
+      managed[provider_session_key(agent.provider, agent.provider_session_id)] = true
+    end
+  end
+  local next_order = {}
+  for _, key in ipairs(self.external_order) do
+    if not managed[key] and self.external_sessions[key] then
+      table.insert(next_order, key)
+    else
+      self.external_sessions[key] = nil
+    end
+  end
+  self.external_order = next_order
+end
+
+function Model:apply_external_sessions(provider, sessions, activity_available, err)
+  if (provider ~= "codex" and provider ~= "claude") or type(sessions) ~= "table" then
+    return false
+  end
+  for key, session in pairs(self.external_sessions) do
+    if session.provider == provider then
+      self.external_sessions[key] = nil
+    end
+  end
+  local managed = {}
+  for _, agent in pairs(self.agents) do
+    if type(agent.provider) == "string" and type(agent.provider_session_id) == "string" then
+      managed[provider_session_key(agent.provider, agent.provider_session_id)] = true
+    end
+  end
+  for _, session in ipairs(sessions) do
+    local session_id = type(session) == "table" and session.provider_session_id or nil
+    local cwd = type(session) == "table" and session.cwd or nil
+    if
+      type(session_id) == "string"
+      and session_id ~= ""
+      and type(cwd) == "string"
+      and cwd ~= ""
+      and session.active == true
+    then
+      local key = provider_session_key(provider, session_id)
+      if not managed[key] then
+        local projected = deep_copy(session)
+        projected.key = key
+        projected.provider = provider
+        projected.provider_session_id = session_id
+        projected.cwd = cwd
+        projected.title = type(session.title) == "string" and session.title ~= "" and session.title
+          or (provider .. " " .. session_id:sub(1, 12))
+        projected.state = "cli-running"
+        projected.active = true
+        projected.external = true
+        projected.managed = false
+        self.external_sessions[key] = projected
+      end
+    end
+  end
+  self.external_order = vim.tbl_keys(self.external_sessions)
+  table.sort(self.external_order, function(left, right)
+    local left_session = self.external_sessions[left]
+    local right_session = self.external_sessions[right]
+    if left_session.cwd ~= right_session.cwd then
+      return left_session.cwd < right_session.cwd
+    end
+    if left_session.provider ~= right_session.provider then
+      return left_session.provider < right_session.provider
+    end
+    return left_session.provider_session_id < right_session.provider_session_id
+  end)
+  self.external_activity[provider] = {
+    available = activity_available == true,
+    error = deep_copy(err),
+  }
+  self:_changed("external_sessions")
+  return true
+end
+
+function Model:clear_external_sessions()
+  self.external_sessions = {}
+  self.external_order = {}
+  self.external_activity = {}
+  self:_changed("external_sessions")
 end
 
 function Model:apply_event(event)
@@ -404,6 +502,29 @@ function Model:list()
   return agents
 end
 
+function Model:external_session_list()
+  local sessions = {}
+  for _, key in ipairs(self.external_order) do
+    local session = self.external_sessions[key]
+    if session then
+      table.insert(sessions, deep_copy(session))
+    end
+  end
+  return sessions
+end
+
+function Model:session_list()
+  local sessions = {}
+  for _, agent in ipairs(self:list()) do
+    agent.external = false
+    agent.managed = true
+    agent.key = "agent:" .. agent.id
+    table.insert(sessions, agent)
+  end
+  vim.list_extend(sessions, self:external_session_list())
+  return sessions
+end
+
 function Model:running_count()
   local count = 0
   for _, agent in pairs(self.agents) do
@@ -425,6 +546,8 @@ end
 function Model:snapshot()
   return deep_copy({
     agents = self:list(),
+    external_sessions = self:external_session_list(),
+    external_activity = self.external_activity,
     selected_agent_id = self.selected_agent_id,
     events = self.events,
     conversations = self.conversations,

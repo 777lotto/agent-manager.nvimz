@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "broker-2",
+  "method": "session/list",
+  "params": {
+    "directory": null,
+    "limit": 1000,
+    "offset": 0,
+    "active_only": true
+  }
+}

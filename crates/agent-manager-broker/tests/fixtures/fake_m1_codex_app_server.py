@@ -188,6 +188,7 @@ def main() -> None:
                         "name": "Resumable Codex session",
                         "preview": "must not leave the broker",
                         "updatedAt": 1,
+                        "status": {"type": "active"},
                     }
                 ],
                 "nextCursor": None,
