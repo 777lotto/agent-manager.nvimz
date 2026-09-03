@@ -64,8 +64,17 @@ def agent(record: dict[str, Any]) -> dict[str, Any]:
         "provider": record["provider"],
         "provider_session_id": record["session_id"],
         "cwd": record["cwd"],
-        "workspace_strategy": "shared",
-        "worktree_path": None,
+        "workspace_strategy": record.get("workspace_strategy", "shared"),
+        "worktree_path": record.get("worktree_path"),
+        "managed_workspace": record.get("managed_workspace"),
+        "runtime": {
+            "compatibility_profile": "codex-app-server-stable-v1"
+            if record["provider"] == "codex"
+            else "claude-agent-sdk-v1",
+            "provider_version": "0.153.0" if record["provider"] == "codex" else "2.1.251",
+            "adapter_version": None if record["provider"] == "codex" else "0.2.148",
+            "executable": "/fixture/provider",
+        },
         "title": record["title"],
         "state": record["state"],
         "active_turn_id": record.get("turn_id"),
@@ -139,6 +148,9 @@ class Broker:
         provider: str,
         cwd: str,
         title: str,
+        workspace_strategy: str = "shared",
+        worktree_path: str | None = None,
+        managed_workspace: dict[str, Any] | None = None,
     ) -> None:
         record = {
             "id": f"agent-lua-{len(self.records) + 1}",
@@ -149,6 +161,9 @@ class Broker:
             "state": "idle",
             "turn_id": None,
             "pending_approvals": 0,
+            "workspace_strategy": workspace_strategy,
+            "worktree_path": worktree_path,
+            "managed_workspace": managed_workspace,
         }
         self.records.append(record)
         self.current = record
@@ -219,6 +234,49 @@ class Broker:
         params = request.get("params", {})
         if method == "agent/list":
             respond(request, {"agents": [agent(record) for record in self.records]})
+        elif method == "workspace/list":
+            respond(
+                request,
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-09-03T00:00:00Z",
+                    "registry": "/fixture/repositories.toml",
+                    "repositories": [
+                        {
+                            "slug": "agent-manager",
+                            "github": "owner/agent-manager.nvimz",
+                            "canonical_path": "/workspace/agent-manager",
+                            "base_branch": "bluff",
+                            "canonical_branch": "bluff",
+                            "canonical_clean": True,
+                            "worktree_root": "/workspace/worktrees/agent-manager",
+                            "tasks": [
+                                {
+                                    "task_id": "existing-task",
+                                    "branch": "agent/existing-task",
+                                    "path": "/workspace/worktrees/agent-manager/existing-task",
+                                    "head": "abc123",
+                                    "upstream": None,
+                                    "lease_identity": ["launcher:dead-released"],
+                                    "lease_keep": None,
+                                    "lease_transition": "claim-handed-off",
+                                    "cleanup_candidate": False,
+                                    "reasons": [],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        elif method == "workspace/handoff":
+            respond(
+                request,
+                {
+                    "handed_off": True,
+                    "repository": params["repository"],
+                    "task_id": params["task_id"],
+                },
+            )
         elif method == "provider/session/list":
             provider = params["provider"]
             if params.get("active_only"):
@@ -272,7 +330,33 @@ class Broker:
                 },
             )
         elif method == "agent/start":
-            self.launch(request, "thread-lua-1", params["provider"], params["cwd"], "lua fixture")
+            managed = params.get("managed_workspace")
+            if managed:
+                task_id = managed["task_id"]
+                path = f"/workspace/worktrees/{managed['repository']}/{task_id}"
+                self.launch(
+                    request,
+                    "thread-lua-managed",
+                    params["provider"],
+                    path,
+                    task_id,
+                    "worktree",
+                    path,
+                    {
+                        "repository": managed["repository"],
+                        "task_id": task_id,
+                        "branch": f"agent/{task_id}",
+                        "base_branch": "bluff",
+                    },
+                )
+            else:
+                self.launch(
+                    request,
+                    "thread-lua-1",
+                    params["provider"],
+                    params["cwd"],
+                    "lua fixture",
+                )
         elif method == "agent/resume":
             self.launch(
                 request,
@@ -402,11 +486,21 @@ def main() -> None:
             "broker_version": "0.2.0",
             "mode": "embedded",
             "providers": {
-                "codex": {"app_server_version": "0.152.0"},
-                "claude": {
-                    "agent_sdk_version": "0.2.148",
-                    "claude_code_version": "2.1.251",
+                "codex": {
+                    "compatibility_profile": "codex-app-server-stable-v1",
+                    "schema_baseline_version": "0.152.0",
                 },
+                "claude": {
+                    "compatibility_profile": "claude-agent-sdk-v1",
+                    "tested_agent_sdk_version": "0.2.148",
+                    "tested_claude_code_version": "2.1.251",
+                },
+            },
+            "workspaces": {
+                "managed_tasks": True,
+                "shared_starts": True,
+                "authority": "external_lifecycle",
+                "destructive_controls": False,
             },
             "replay": {"capacity": 2000},
         },

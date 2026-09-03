@@ -71,7 +71,7 @@ only:
 - workspace agent and provider session IDs;
 - provider, canonical cwd, workspace strategy, and worktree path;
 - title, lifecycle state, and timestamps; and
-- the last known pinned provider/runtime version.
+- the last known actual provider runtime and compatibility profile.
 
 Active turn IDs, prompts, attachments, tool/approval payloads, model responses,
 credentials, and replay events are excluded. On broker restart, registry
@@ -96,10 +96,17 @@ keyed by their canonical cwd.
 
 An explicit `worktree` strategy is accepted only when `cwd` and
 `worktree_path` resolve to the same linked Git worktree. Main checkouts and
-directories containing a fabricated `.git` directory do not qualify. Agent
-Manager displays the selected strategy but does not create, delete, or clean
-worktrees. Worktree lifecycle stays with the installed Git/worktree authority,
-which can show branch, dirty state, cleanup consequences, and ownership.
+directories containing a fabricated `.git` directory do not qualify. The
+preferred managed start takes a registered repository and stable task ID; the
+broker delegates inventory, claim/resume, and lease handoff to the installed
+Git/worktree authority and records repository, task, `agent/**` branch, base,
+and path in its summary. It does not reproduce Git lifecycle logic.
+
+Shared-checkout starts are an explicit broker policy and are disabled by the
+production unit. The plugin exposes that opt-in as `worktrees.allow_shared` for
+embedded mode. Neither policy surface exposes reset, delete, force-clean, or
+garbage collection; cleanup consequences and proof remain wholly owned by the
+external lifecycle authority.
 
 Embedded stdio mode deliberately retains its one-live-agent limit and shutdown
 ownership. `broker/shutdown` is rejected in durable mode because only the

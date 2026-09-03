@@ -3,13 +3,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use agent_manager_broker::codex::{
-    CodexAppServer, CommandSpec, PINNED_CODEX_VERSION, normalize_event, thread_id,
+    CODEX_COMPATIBILITY_PROFILE, CODEX_SCHEMA_BASELINE_VERSION, CodexAppServer, CommandSpec,
+    normalize_event, runtime_identity as codex_runtime_identity, thread_id,
 };
 use agent_manager_broker::durable::{self, DurableConfig};
 use agent_manager_broker::embedded::{self, EmbeddedConfig};
 use agent_manager_broker::protocol::PROTOCOL_VERSION;
 use agent_manager_broker::worker::{
-    PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WORKER_PROTOCOL_VERSION,
+    CLAUDE_COMPATIBILITY_PROFILE, TESTED_CLAUDE_CODE_VERSION, TESTED_CLAUDE_SDK_VERSION,
+    WORKER_PROTOCOL_VERSION,
 };
 use agent_manager_broker::{BROKER_VERSION, codex};
 use serde_json::{Value, json};
@@ -38,10 +40,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string_pretty(&json!({
                     "broker_version": BROKER_VERSION,
                     "broker_protocol_version": PROTOCOL_VERSION,
-                    "codex_app_server_version": PINNED_CODEX_VERSION,
+                    "codex_compatibility_profile": CODEX_COMPATIBILITY_PROFILE,
+                    "codex_schema_baseline_version": CODEX_SCHEMA_BASELINE_VERSION,
                     "claude_worker_protocol_version": WORKER_PROTOCOL_VERSION,
-                    "claude_agent_sdk_version": PINNED_CLAUDE_SDK_VERSION,
-                    "claude_code_version": PINNED_CLAUDE_CODE_VERSION
+                    "claude_compatibility_profile": CLAUDE_COMPATIBILITY_PROFILE,
+                    "tested_claude_agent_sdk_version": TESTED_CLAUDE_SDK_VERSION,
+                    "tested_claude_code_version": TESTED_CLAUDE_CODE_VERSION
                 }))?
             );
             Ok(())
@@ -79,6 +83,24 @@ async fn serve_durable(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 broker = broker.with_claude_python(python.to_string_lossy());
                 index += 2;
             }
+            "--codex-bin" => {
+                let executable = absolute_option(args, index, "--codex-bin")?;
+                broker = broker.with_codex_program(executable.to_string_lossy());
+                index += 2;
+            }
+            "--workspace-lifecycle" => {
+                let executable = absolute_option(args, index, "--workspace-lifecycle")?;
+                broker = broker.with_workspace_lifecycle(executable.to_string_lossy());
+                index += 2;
+            }
+            "--disable-workspace-lifecycle" => {
+                broker = broker.without_workspace_lifecycle();
+                index += 1;
+            }
+            "--deny-shared-workspaces" => {
+                broker = broker.with_shared_workspaces(false);
+                index += 1;
+            }
             option => {
                 return Err(
                     invalid_input(format!("unknown serve-durable option: {option}")).into(),
@@ -111,6 +133,36 @@ async fn serve_embedded(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 config = config.with_claude_python(python);
                 index += 2;
             }
+            "--codex-bin" => {
+                let executable = args
+                    .get(index + 1)
+                    .ok_or_else(|| invalid_input("--codex-bin requires an absolute path"))?;
+                if !Path::new(executable).is_absolute() {
+                    return Err(invalid_input("--codex-bin requires an absolute path").into());
+                }
+                config = config.with_codex_program(executable);
+                index += 2;
+            }
+            "--workspace-lifecycle" => {
+                let executable = args.get(index + 1).ok_or_else(|| {
+                    invalid_input("--workspace-lifecycle requires an absolute path")
+                })?;
+                if !Path::new(executable).is_absolute() {
+                    return Err(
+                        invalid_input("--workspace-lifecycle requires an absolute path").into(),
+                    );
+                }
+                config = config.with_workspace_lifecycle(executable);
+                index += 2;
+            }
+            "--disable-workspace-lifecycle" => {
+                config = config.without_workspace_lifecycle();
+                index += 1;
+            }
+            "--deny-shared-workspaces" => {
+                config = config.with_shared_workspaces(false);
+                index += 1;
+            }
             option => {
                 return Err(invalid_input(format!("unknown serve option: {option}")).into());
             }
@@ -127,13 +179,16 @@ async fn serve_embedded(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 async fn probe_codex(cwd: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     ensure_directory(&cwd)?;
-    let mut server = CodexAppServer::spawn(&CommandSpec::default())?;
+    let spec = CommandSpec::default();
+    let mut server = CodexAppServer::spawn(&spec)?;
     let initialize = server.initialize().await?;
+    let runtime = codex_runtime_identity(&initialize, &spec)?;
     let threads = server.list_threads(None, 1).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "initialized": true,
+            "runtime": runtime,
             "user_agent": initialize.get("userAgent"),
             "platform_family": initialize.get("platformFamily"),
             "platform_os": initialize.get("platformOs"),
@@ -156,8 +211,10 @@ async fn trace_codex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let prompt = option_value(args, "--prompt")
         .ok_or_else(|| invalid_input("codex-trace requires --prompt"))?;
 
-    let mut server = CodexAppServer::spawn(&CommandSpec::default())?;
-    server.initialize().await?;
+    let spec = CommandSpec::default();
+    let mut server = CodexAppServer::spawn(&spec)?;
+    let initialize = server.initialize().await?;
+    codex_runtime_identity(&initialize, &spec)?;
     let started = server.start_thread(&cwd).await?;
     let thread_id = thread_id(&started.result)
         .ok_or_else(|| invalid_input("thread/start response omitted thread.id"))?
@@ -285,10 +342,14 @@ fn print_help() {
          \n\
          Commands:\n\
            contract-info\n\
-           serve [--claude-python ABSOLUTE_PATH]\n\
+           serve [--codex-bin ABSOLUTE_PATH] [--claude-python ABSOLUTE_PATH]\n\
+                 [--workspace-lifecycle ABSOLUTE_PATH | --disable-workspace-lifecycle]\n\
+                 [--deny-shared-workspaces]\n\
            serve-durable [--socket ABSOLUTE_PATH] [--registry ABSOLUTE_PATH]\n\
                          [--status ABSOLUTE_PATH]\n\
-                         [--claude-python ABSOLUTE_PATH]\n\
+                         [--codex-bin ABSOLUTE_PATH] [--claude-python ABSOLUTE_PATH]\n\
+                         [--workspace-lifecycle ABSOLUTE_PATH | --disable-workspace-lifecycle]\n\
+                         [--deny-shared-workspaces]\n\
            codex-probe --cwd ABSOLUTE_PATH\n\
            codex-trace --cwd ABSOLUTE_PATH --prompt TEXT {LIVE_CONFIRMATION}\n\
          \n\

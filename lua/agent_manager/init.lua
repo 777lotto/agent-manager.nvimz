@@ -160,7 +160,10 @@ function M.setup(opts)
     command = config.broker.command,
     socket = config.broker.socket,
     reconnect = config.broker.reconnect,
+    codex_executable = config.providers.codex.executable,
     claude_python = config.providers.claude.python,
+    workspace_lifecycle = config.worktrees.lifecycle,
+    allow_shared_workspaces = config.worktrees.allow_shared,
     on_notification = function(method, params)
       local changed = model:apply_notification(method, params)
       if changed and method == "agent/event" and params.type == "file.changed" then
@@ -279,6 +282,45 @@ function M.close()
   return runtime.view:close()
 end
 
+local function valid_managed_identifier(value, allow_dot)
+  if type(value) ~= "string" or value == "" or #value > 128 then
+    return false
+  end
+  local previous_separator = true
+  for index = 1, #value do
+    local character = value:sub(index, index)
+    if character:match("[a-z0-9]") then
+      previous_separator = false
+    elseif (character == "-" or (allow_dot and character == ".")) and not previous_separator then
+      previous_separator = true
+    else
+      return false
+    end
+  end
+  return not previous_separator
+end
+
+local function request_agent_start(params, callback)
+  return with_client(function()
+    local _, request_err = runtime.client:request("agent/start", params, function(result, rpc_err)
+      if rpc_err then
+        report(rpc_err)
+        finish(callback, nil, rpc_err)
+        return
+      end
+      if result and result.agent then
+        runtime.model:select(result.agent.id)
+        runtime.view:schedule_render()
+      end
+      finish(callback, result, nil)
+    end)
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
 function M.start(opts, callback)
   opts = opts or {}
   if type(opts) ~= "table" then
@@ -291,6 +333,38 @@ function M.start(opts, callback)
     local err = structured_error("input", "provider must be 'codex' or 'claude'")
     finish(callback, nil, err)
     return nil, err
+  end
+  if opts.managed_workspace ~= nil then
+    local workspace = opts.managed_workspace
+    if type(workspace) ~= "table" then
+      local err = structured_error("input", "managed_workspace must be a table")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    if
+      not valid_managed_identifier(workspace.repository, true)
+      or not valid_managed_identifier(workspace.task_id, false)
+    then
+      local err = structured_error(
+        "input",
+        "managed repository and task IDs must use normalized lowercase names"
+      )
+      finish(callback, nil, err)
+      return nil, err
+    end
+    if workspace.resume ~= nil and type(workspace.resume) ~= "boolean" then
+      local err = structured_error("input", "managed_workspace.resume must be a boolean")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    return request_agent_start({
+      provider = provider,
+      managed_workspace = {
+        repository = workspace.repository,
+        task_id = workspace.task_id,
+        resume = workspace.resume == true,
+      },
+    }, callback)
   end
   local cwd = opts.cwd or project_root()
   if type(cwd) ~= "string" then
@@ -324,33 +398,12 @@ function M.start(opts, callback)
       return nil, err
     end
   end
-  return with_client(function()
-    local _, request_err = runtime.client:request(
-      "agent/start",
-      {
-        provider = provider,
-        cwd = cwd,
-        workspace_strategy = strategy,
-        worktree_path = worktree_path,
-      },
-      function(result, rpc_err)
-        if rpc_err then
-          report(rpc_err)
-          finish(callback, nil, rpc_err)
-          return
-        end
-        if result and result.agent then
-          runtime.model:select(result.agent.id)
-          runtime.view:schedule_render()
-        end
-        finish(callback, result, nil)
-      end
-    )
-    if request_err then
-      report(request_err)
-      finish(callback, nil, request_err)
-    end
-  end, callback)
+  return request_agent_start({
+    provider = provider,
+    cwd = cwd,
+    workspace_strategy = strategy,
+    worktree_path = worktree_path,
+  }, callback)
 end
 
 local function normalize_input(input)
@@ -474,6 +527,52 @@ function M.attach(agent_id, callback)
         if result and result.agent then
           runtime.model:select(result.agent.id)
           runtime.view:schedule_render()
+        end
+        finish(callback, result, nil)
+      end
+    )
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
+function M.workspaces(callback)
+  return with_client(function()
+    local _, request_err = runtime.client:request("workspace/list", {}, function(result, rpc_err)
+      if rpc_err then
+        report(rpc_err)
+        finish(callback, nil, rpc_err)
+        return
+      end
+      finish(callback, result, nil)
+    end)
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
+function M.handoff_workspace(repository, task_id, callback)
+  if
+    not valid_managed_identifier(repository, true)
+    or not valid_managed_identifier(task_id, false)
+  then
+    local err = structured_error("input", "invalid managed repository or task ID")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  return with_client(function()
+    local _, request_err = runtime.client:request(
+      "workspace/handoff",
+      { repository = repository, task_id = task_id },
+      function(result, rpc_err)
+        if rpc_err then
+          report(rpc_err)
+          finish(callback, nil, rpc_err)
+          return
         end
         finish(callback, result, nil)
       end
@@ -962,6 +1061,98 @@ function M.refresh(callback)
   end, callback)
 end
 
+local function repository_label(repository)
+  local state = repository.canonical_clean and "clean" or "dirty"
+  return string.format(
+    "%s · base %s · %s",
+    repository.slug,
+    repository.base_branch,
+    state
+  )
+end
+
+local function task_label(task)
+  local lease = #(task.lease_identity or {}) > 0 and table.concat(task.lease_identity, ",")
+    or "unleased"
+  return string.format("%s/%s · %s", task.repository, task.task_id, lease)
+end
+
+local function load_workspace_inventory(callback)
+  M.workspaces(function(result, err)
+    if err then
+      return
+    end
+    local repositories = result and result.repositories or {}
+    if #repositories == 0 then
+      vim.notify("Agent Manager: no registered repositories are available", vim.log.levels.WARN)
+      return
+    end
+    callback(repositories)
+  end)
+end
+
+local function start_new_managed_task(provider)
+  load_workspace_inventory(function(repositories)
+    vim.ui.select(repositories, {
+      prompt = "Repository",
+      format_item = repository_label,
+    }, function(repository)
+      if not repository then
+        return
+      end
+      vim.ui.input({ prompt = "Stable task ID (lowercase kebab-case): " }, function(task_id)
+        if not task_id or task_id == "" then
+          return
+        end
+        if not valid_managed_identifier(task_id, false) then
+          vim.notify("Agent Manager: task ID must use lowercase kebab-case", vim.log.levels.ERROR)
+          return
+        end
+        M.start({
+          provider = provider,
+          managed_workspace = {
+            repository = repository.slug,
+            task_id = task_id,
+            resume = false,
+          },
+        })
+      end)
+    end)
+  end)
+end
+
+local function resume_managed_task(provider)
+  load_workspace_inventory(function(repositories)
+    local tasks = {}
+    for _, repository in ipairs(repositories) do
+      for _, task in ipairs(repository.tasks or {}) do
+        local item = vim.deepcopy(task)
+        item.repository = repository.slug
+        table.insert(tasks, item)
+      end
+    end
+    if #tasks == 0 then
+      vim.notify("Agent Manager: no managed tasks are available to resume", vim.log.levels.WARN)
+      return
+    end
+    vim.ui.select(tasks, {
+      prompt = "Managed task",
+      format_item = task_label,
+    }, function(task)
+      if task then
+        M.start({
+          provider = provider,
+          managed_workspace = {
+            repository = task.repository,
+            task_id = task.task_id,
+            resume = true,
+          },
+        })
+      end
+    end)
+  end)
+end
+
 function M.start_ui()
   if not ensure_setup() then
     return
@@ -974,24 +1165,17 @@ function M.start_ui()
     if not provider then
       return
     end
-    vim.ui.select({ "shared", "worktree" }, { prompt = "Workspace strategy" }, function(strategy)
-      if strategy == "shared" then
+    local actions = { "New isolated task", "Resume isolated task" }
+    if runtime.config.worktrees.allow_shared then
+      table.insert(actions, "Shared checkout (admin-enabled)")
+    end
+    vim.ui.select(actions, { prompt = "Workspace" }, function(action)
+      if action == "New isolated task" then
+        start_new_managed_task(provider)
+      elseif action == "Resume isolated task" then
+        resume_managed_task(provider)
+      elseif action == "Shared checkout (admin-enabled)" then
         M.start({ provider = provider, cwd = project_root(), workspace_strategy = "shared" })
-      elseif strategy == "worktree" then
-        vim.ui.input({
-          prompt = "Existing linked worktree path: ",
-          default = project_root(),
-          completion = "dir",
-        }, function(path)
-          if path and path ~= "" then
-            M.start({
-              provider = provider,
-              cwd = path,
-              workspace_strategy = "worktree",
-              worktree_path = path,
-            })
-          end
-        end)
       end
     end)
   end)
@@ -1402,7 +1586,9 @@ function M.health()
     root = config and config.root or nil,
     broker = broker,
     mode = config and config.broker.mode or nil,
+    codex_executable = config and config.providers.codex.executable or nil,
     claude_python = config and config.providers.claude.python or nil,
+    worktrees = config and vim.deepcopy(config.worktrees) or nil,
     agents = status.model and status.model.agents or {},
     ux = runtime and runtime.ux:status() or UX.detect(),
   }

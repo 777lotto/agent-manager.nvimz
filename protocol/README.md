@@ -15,9 +15,12 @@ request ID. The public connection completes its handshake with an `initialized`
 notification after a successful `initialize` response.
 
 Codex App Server is a provider protocol, not either Agent Manager contract.
-Codex 0.152.0 deliberately omits the JSON-RPC header on its wire. The curated
-generated schemas under `vendor/codex/0.152.0/` capture that exact release, and
-the Rust adapter translates it at the provider boundary.
+The reviewed 0.152.0 schema baseline deliberately omits the JSON-RPC header on
+its wire. The curated generated schemas under `vendor/codex/0.152.0/` capture
+that release, and the Rust adapter translates it at the provider boundary. The
+runtime compatibility profile accepts that baseline and newer stable App Server
+releases after a successful non-experimental initialization handshake; the
+generated bundle is a review baseline, not a required installed CLI version.
 
 ## Compatibility rules
 
@@ -34,6 +37,12 @@ the Rust adapter translates it at the provider boundary.
 - The additive `provider/session/list` `active_only` flag and optional `cwd`
   support metadata-only cross-project CLI discovery; omitting the flag retains
   resumable-session behavior.
+- Additive managed-workspace fields preserve the explicit path-based v1 calls.
+  `workspace/list`, managed `agent/start`, and `workspace/handoff` delegate to
+  the external lifecycle authority and expose no destructive Git operation.
+- Agent summaries report the actual provider runtime and compatibility profile
+  learned during startup. A resumed session is opened by the currently
+  configured compatible runtime; a live provider process is never hot-swapped.
 - Malformed frames, duplicate callback responses, and unknown callback IDs fail
   closed.
 

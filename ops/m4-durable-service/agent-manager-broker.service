@@ -5,12 +5,14 @@ Documentation=https://github.com/777lotto/agent-manager.nvimz
 After=network-online.target
 Wants=network-online.target
 ConditionFileIsExecutable=/home/ai/.local/bin/agent-manager-broker
+ConditionFileIsExecutable=/home/ai/.local/bin/codex
 ConditionFileIsExecutable=/home/ai/.local/share/agent-manager/venv/bin/python
+ConditionFileIsExecutable=/home/ai/.local/bin/zemrip-agent-workspace
 
 [Service]
 Type=simple
 UMask=0077
-ExecStart=/home/ai/.local/bin/agent-manager-broker serve-durable --socket %t/agent-manager/broker.sock --registry %h/.local/state/agent-manager/registry.json --status /var/lib/zemrip/status/agent-manager.json --claude-python /home/ai/.local/share/agent-manager/venv/bin/python
+ExecStart=/home/ai/.local/bin/agent-manager-broker serve-durable --socket %t/agent-manager/broker.sock --registry %h/.local/state/agent-manager/registry.json --status /var/lib/zemrip/status/agent-manager.json --codex-bin /home/ai/.local/bin/codex --claude-python /home/ai/.local/share/agent-manager/venv/bin/python --workspace-lifecycle /home/ai/.local/bin/zemrip-agent-workspace --deny-shared-workspaces
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s

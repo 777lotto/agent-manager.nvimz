@@ -195,11 +195,15 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
         sdk = cast(JsonObject, diagnostics["sdk"])
         runtime = cast(JsonObject, diagnostics["claude_runtime"])
+        self.assertEqual(diagnostics["compatibility_profile"], "claude-agent-sdk-v1")
         self.assertEqual(sdk["version"], "0.2.148")
         self.assertIs(sdk["compatible"], True)
+        self.assertEqual(sdk["tested_version"], "0.2.148")
         self.assertEqual(runtime["source"], "sdk_bundled")
         self.assertEqual(runtime["version"], "2.1.251")
         self.assertIs(runtime["compatible"], True)
+        self.assertEqual(runtime["tested_version"], "2.1.251")
+        self.assertIsInstance(runtime["executable"], str)
 
     async def test_active_session_projection_retains_only_safe_identity_and_cwd(self) -> None:
         payload = AsyncMock(

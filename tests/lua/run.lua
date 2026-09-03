@@ -606,6 +606,120 @@ local function integration_test()
   vim.fn.delete(test_file)
 end
 
+local function managed_workspace_ui_test()
+  local manager = require("agent_manager")
+  configure_fake(manager)
+  assert(manager.open())
+  await("managed broker handshake", function()
+    return manager.status().client.state == "connected"
+  end)
+
+  local inventory = nil
+  assert(manager.workspaces(function(result, err)
+    assert_equal(err, nil, "workspace inventory error")
+    inventory = result
+  end))
+  await("workspace inventory", function()
+    return inventory ~= nil
+  end)
+  assert_equal(inventory.repositories[1].base_branch, "bluff", "managed base branch")
+  assert_equal(inventory.repositories[1].tasks[1].task_id, "existing-task", "managed task")
+
+  local original_select = vim.ui.select
+  local original_input = vim.ui.input
+  local select_count = 0
+  vim.ui.select = function(items, _, callback)
+    select_count = select_count + 1
+    callback(items[1])
+  end
+  vim.ui.input = function(_, callback)
+    callback("new-managed-task")
+  end
+  manager.start_ui()
+  await("managed agent startup", function()
+    local agent = manager.list()[1]
+    return agent and agent.state == "idle"
+  end)
+  vim.ui.select = original_select
+  vim.ui.input = original_input
+
+  local agent = manager.list()[1]
+  assert_equal(select_count, 3, "managed start picker depth")
+  assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
+  assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
+  assert_equal(agent.managed_workspace.task_id, "new-managed-task", "managed task ID")
+  assert_equal(agent.managed_workspace.base_branch, "bluff", "managed task base")
+  assert_equal(agent.runtime.provider_version, "0.153.0", "actual runtime version")
+  local status = manager.status()
+  assert(
+    buffer_contains(status.view.buffers.agents, "agent-manager/new-managed-task"),
+    "managed task presentation"
+  )
+  assert(
+    buffer_contains(status.view.buffers.agents, "codex-app-server-stable-v1"),
+    "runtime profile presentation"
+  )
+  manager.teardown()
+  vim.wait(500, function()
+    return false
+  end, 25, false)
+end
+
+local function managed_decision_render_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local model = Model.new({ max_events = 8 })
+  model:apply_state({
+    {
+      id = "agent-managed",
+      provider = "codex",
+      provider_session_id = "thread-managed",
+      cwd = "/workspace/worktrees/agent-manager/decision-task",
+      workspace_strategy = "worktree",
+      worktree_path = "/workspace/worktrees/agent-manager/decision-task",
+      managed_workspace = {
+        repository = "agent-manager",
+        task_id = "decision-task",
+        branch = "agent/decision-task",
+        base_branch = "bluff",
+      },
+      runtime = {
+        compatibility_profile = "codex-app-server-stable-v1",
+        provider_version = "0.153.0",
+      },
+      title = "fixture",
+      state = "waiting_approval",
+      pending_approvals = 1,
+      capabilities = { { name = "approvals", available = true } },
+    },
+  })
+  assert(model:apply_event({
+    sequence = 1,
+    agent_id = "agent-managed",
+    provider = "codex",
+    type = "approval.requested",
+    payload = {
+      id = "approval-managed-1",
+      kind = "approval",
+      choices = { "allow", "deny" },
+      tool_name = "Command",
+      summary = "write a managed file",
+    },
+  }))
+  assert_equal(model:focused_action().id, "approval-managed-1", "managed approval projection")
+
+  local view = View.new(model, {}, {})
+  assert(view:open())
+  view:render()
+  local decision = view:status().buffers.decision
+  assert(
+    buffer_contains(decision, "Task:      agent-manager/decision-task"),
+    "managed task line in the decision pane"
+  )
+  assert(buffer_contains(decision, "Strategy:  worktree"), "managed decision strategy")
+  view:teardown()
+end
+
 local function resume_test()
   local manager = require("agent_manager")
   configure_fake(manager)
@@ -657,6 +771,8 @@ local function run()
   public_input_validation_test()
   real_broker_handshake_test()
   durable_reconnect_test()
+  managed_workspace_ui_test()
+  managed_decision_render_test()
   integration_test()
   resume_test()
   print("Agent Manager Lua M4 tests passed")

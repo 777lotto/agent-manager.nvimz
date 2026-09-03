@@ -4,8 +4,6 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-test "$(codex --version)" = "codex-cli 0.152.0"
-
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 

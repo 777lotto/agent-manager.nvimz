@@ -272,7 +272,8 @@ The registry persists metadata only:
 - canonical working directory;
 - title, timestamps, and lifecycle state;
 - workspace strategy and worktree path when applicable; and
-- last known provider/runtime version.
+- managed repository/task/branch/base metadata when applicable; and
+- last known actual provider runtime and compatibility profile.
 
 Full prompts, tool payloads, model responses, and credentials are not duplicated
 into the broker registry by default. Provider transcripts remain the source of
@@ -288,7 +289,7 @@ The initialization response includes:
 
 - protocol version;
 - broker version;
-- provider adapter versions;
+- provider compatibility profiles and tested schema/package baselines;
 - supported request and event capabilities;
 - replay-window bounds; and
 - durable or embedded lifecycle mode.
@@ -299,7 +300,9 @@ The initialization response includes:
 | ------------------------ | ---------------------------------------------------------- |
 | `provider/session/list`  | Discover provider sessions, optionally globally or active. |
 | `agent/list`             | List known agents and live status.                         |
-| `agent/start`            | Start a provider session in an explicit working directory. |
+| `workspace/list`         | List registered repositories and managed task mappings.    |
+| `workspace/handoff`      | Release a managed task lease without deleting its checkout. |
+| `agent/start`            | Start in a managed task or explicit working directory.      |
 | `agent/attach`           | Subscribe to an agent owned by the broker.                 |
 | `agent/history`          | Fetch provider-backed projected history.                   |
 | `agent/prompt`           | Start the next normal user turn.                           |
@@ -318,6 +321,12 @@ The initialization response includes:
 Deleting provider transcripts or terminating the durable broker is not an
 ordinary workspace action in the first release.
 
+Managed worktree creation and resume are broker-mediated calls to the installed
+lifecycle authority, keyed only by registered repository and normalized stable
+task ID. The administrator may configure the lifecycle executable and whether
+shared-checkout starts are allowed. Reset, delete, forced cleanup, branch-name
+overrides, and arbitrary worktree paths are not administrative plugin controls.
+
 `provider/session/list` accepts an optional canonical `cwd`, pagination, and
 an `active_only` flag. Omitting `cwd` queries all provider-visible projects.
 Each projected record contains only provider identity, opaque session ID,
@@ -334,6 +343,8 @@ provider_session_id   opaque provider identifier
 cwd                   canonical absolute path
 workspace_strategy    shared | worktree
 worktree_path         canonical path or null
+managed_workspace     repository/task/branch/base metadata or null
+runtime               actual provider/adapter versions, profile, executable
 title                 user/provider title
 state                 starting | idle | running | waiting_input |
                       waiting_approval | completed | interrupted |
@@ -901,10 +912,10 @@ workspace.
 
 ## Configuration boundary
 
-Configuration selects executable locations, lifecycle mode, provider defaults,
-UI behavior, and optional UX integration. It never contains provider secrets or
-serializable permission callbacks. Commands are represented as argv lists and
-are launched without a shell.
+Configuration selects executable locations, lifecycle mode, managed-worktree
+policy, provider defaults, UI behavior, and optional UX integration. It never
+contains provider secrets or serializable permission callbacks. Commands are
+represented as argv lists and are launched without a shell.
 
 The target shape is:
 
@@ -917,12 +928,16 @@ require("agent_manager").setup({
   },
   providers = {
     codex = {
-      command = { "codex", "app-server" },
+      executable = "/absolute/path/to/codex",
     },
     claude = {
       python = "/installed/agent-manager-venv/bin/python",
       module = "agent_manager_claude_worker",
     },
+  },
+  worktrees = {
+    lifecycle = "/absolute/path/to/zemrip-agent-workspace",
+    allow_shared = false,
   },
   ux = {
     foundation = "auto",
@@ -955,6 +970,12 @@ agents.setup(opts)
 agents.open(layout?)
 agents.close()
 agents.start({ provider = "codex", cwd = "...", workspace_strategy = "shared" })
+agents.start({
+  provider = "codex",
+  managed_workspace = { repository = "repo", task_id = "task", resume = false },
+})
+agents.workspaces()
+agents.handoff_workspace("repo", "task")
 agents.attach(agent_id)
 agents.sessions({ provider = "codex", cwd = "..." })
 agents.prompt(agent_id, input)
@@ -1139,7 +1160,8 @@ non-sensitive service status.
 - Produce reproducible, checksummed Rust broker artifacts and a locked Python
   worker environment; perform no dependency installation from Neovim startup.
 - Add the plugin to `nvim-config` only after M0-M4 acceptance gates pass.
-- Pin exact broker/provider/UX-compatible revisions in the configuration.
+- Pin exact broker/UX revisions and reviewed provider compatibility profiles in
+  the configuration; record actual provider versions at runtime.
 
 ## Acceptance criteria
 

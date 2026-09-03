@@ -29,6 +29,11 @@ local function default_claude_python(root)
   return executable(python) and python or nil
 end
 
+local function discovered_executable(name)
+  local path = vim.fn.exepath(name)
+  return type(path) == "string" and path ~= "" and vim.fs.normalize(path) or nil
+end
+
 local function default_socket()
   local runtime = vim.env.XDG_RUNTIME_DIR
   if type(runtime) ~= "string" or runtime == "" or runtime:sub(1, 1) ~= "/" then
@@ -52,10 +57,16 @@ local function defaults()
       },
     },
     providers = {
-      codex = {},
+      codex = {
+        executable = discovered_executable("codex"),
+      },
       claude = {
         python = default_claude_python(root),
       },
+    },
+    worktrees = {
+      lifecycle = discovered_executable("zemrip-agent-workspace"),
+      allow_shared = false,
     },
     ui = {
       max_events = 2000,
@@ -150,6 +161,42 @@ function M.resolve(opts)
     return nil, {
       kind = "configuration",
       message = "providers.claude.python must be an absolute path",
+    }
+  end
+  local codex = config.providers.codex.executable
+  if codex ~= nil and codex ~= false and (type(codex) ~= "string" or codex == "") then
+    return nil, {
+      kind = "configuration",
+      message = "providers.codex.executable must be a path, false, or nil",
+    }
+  end
+  if type(codex) == "string" and codex:sub(1, 1) ~= "/" then
+    return nil, {
+      kind = "configuration",
+      message = "providers.codex.executable must be an absolute path",
+    }
+  end
+  local lifecycle = config.worktrees.lifecycle
+  if
+    lifecycle ~= nil
+    and lifecycle ~= false
+    and (type(lifecycle) ~= "string" or lifecycle == "")
+  then
+    return nil, {
+      kind = "configuration",
+      message = "worktrees.lifecycle must be an absolute path, false, or nil",
+    }
+  end
+  if type(lifecycle) == "string" and lifecycle:sub(1, 1) ~= "/" then
+    return nil, {
+      kind = "configuration",
+      message = "worktrees.lifecycle must be an absolute path",
+    }
+  end
+  if type(config.worktrees.allow_shared) ~= "boolean" then
+    return nil, {
+      kind = "configuration",
+      message = "worktrees.allow_shared must be a boolean",
     }
   end
   if type(config.ui.max_events) ~= "number" or config.ui.max_events < 1 then

@@ -18,11 +18,11 @@ use tokio::task::{JoinError, JoinHandle};
 use uuid::Uuid;
 
 use crate::BROKER_VERSION;
-use crate::codex::{CommandSpec, PINNED_CODEX_VERSION};
+use crate::codex::{CODEX_COMPATIBILITY_PROFILE, CODEX_SCHEMA_BASELINE_VERSION, CommandSpec};
 use crate::framing::{BoundedFrame, read_bounded_line};
 use crate::protocol::{
-    AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, PROTOCOL_VERSION,
-    Provider, RequestId, WorkspaceStrategy,
+    AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, ManagedWorkspace,
+    PROTOCOL_VERSION, Provider, RequestId, WorkspaceStrategy,
 };
 use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
@@ -30,7 +30,11 @@ use crate::runtime::{
     AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, discover_sessions, spawn_agent,
 };
 use crate::status::StatusStore;
-use crate::worker::{PINNED_CLAUDE_CODE_VERSION, PINNED_CLAUDE_SDK_VERSION, WorkerCommandSpec};
+use crate::worker::{
+    CLAUDE_COMPATIBILITY_PROFILE, TESTED_CLAUDE_CODE_VERSION, TESTED_CLAUDE_SDK_VERSION,
+    WorkerCommandSpec,
+};
+use crate::workspace::{WorkspaceCommandSpec, WorkspaceLifecycle};
 
 const MAX_PUBLIC_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_REPLAY_CAPACITY: usize = 2_000;
@@ -43,6 +47,8 @@ const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct EmbeddedConfig {
     runtime: RuntimeConfig,
+    workspace: Option<WorkspaceCommandSpec>,
+    allow_shared_workspaces: bool,
     replay_capacity: usize,
 }
 
@@ -50,12 +56,20 @@ impl Default for EmbeddedConfig {
     fn default() -> Self {
         Self {
             runtime: RuntimeConfig::default(),
+            workspace: Some(WorkspaceCommandSpec::default()),
+            allow_shared_workspaces: true,
             replay_capacity: DEFAULT_REPLAY_CAPACITY,
         }
     }
 }
 
 impl EmbeddedConfig {
+    #[must_use]
+    pub fn with_codex_program(mut self, program: impl Into<String>) -> Self {
+        self.runtime.codex.program = program.into();
+        self
+    }
+
     #[must_use]
     pub fn with_claude_python(mut self, python: impl Into<String>) -> Self {
         self.runtime.claude = WorkerCommandSpec {
@@ -66,6 +80,26 @@ impl EmbeddedConfig {
                 "agent_manager_claude_worker".to_owned(),
             ],
         };
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_lifecycle(mut self, program: impl Into<String>) -> Self {
+        self.workspace = Some(WorkspaceCommandSpec {
+            program: program.into(),
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn without_workspace_lifecycle(mut self) -> Self {
+        self.workspace = None;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_shared_workspaces(mut self, allowed: bool) -> Self {
+        self.allow_shared_workspaces = allowed;
         self
     }
 
@@ -261,6 +295,13 @@ struct ManagedAgent {
     task: Option<JoinHandle<()>>,
     pending_contexts: Vec<Value>,
     pending_questions: u64,
+}
+
+struct ResolvedWorkspace {
+    cwd: PathBuf,
+    strategy: WorkspaceStrategy,
+    worktree_path: Option<String>,
+    managed: Option<ManagedWorkspace>,
 }
 
 pub(crate) struct Broker {
@@ -521,8 +562,13 @@ impl Broker {
                 request_id,
                 json!({ "agents": self.summaries() }),
             )),
+            "workspace/list" => self.list_workspaces(request_id).await,
+            "workspace/handoff" => self.handoff_workspace(request_id, params).await,
             "provider/session/list" => self.provider_sessions(request_id, params).await,
-            "agent/start" => self.start_agent(request_id, params, SessionLaunch::Start),
+            "agent/start" => {
+                self.start_agent(request_id, params, SessionLaunch::Start)
+                    .await;
+            }
             "agent/attach" => self.attach_agent(request_id, params),
             "agent/history" => self.history(request_id, params).await,
             "agent/prompt" => {
@@ -607,10 +653,14 @@ impl Broker {
                 "broker_version": BROKER_VERSION,
                 "mode": self.mode.name(),
                 "providers": {
-                    "codex": { "app_server_version": PINNED_CODEX_VERSION },
+                    "codex": {
+                        "compatibility_profile": CODEX_COMPATIBILITY_PROFILE,
+                        "schema_baseline_version": CODEX_SCHEMA_BASELINE_VERSION,
+                    },
                     "claude": {
-                        "agent_sdk_version": PINNED_CLAUDE_SDK_VERSION,
-                        "claude_code_version": PINNED_CLAUDE_CODE_VERSION,
+                        "compatibility_profile": CLAUDE_COMPATIBILITY_PROFILE,
+                        "tested_agent_sdk_version": TESTED_CLAUDE_SDK_VERSION,
+                        "tested_claude_code_version": TESTED_CLAUDE_CODE_VERSION,
                     }
                 },
                 "replay": {
@@ -623,9 +673,93 @@ impl Broker {
                     "path": self.registry.as_ref().map(RegistryStore::path),
                     "metadata_only": true,
                 },
+                "workspaces": {
+                    "managed_tasks": self.config.workspace.is_some(),
+                    "shared_starts": self.config.allow_shared_workspaces,
+                    "authority": "external_lifecycle",
+                    "destructive_controls": false,
+                },
             }),
         ));
         false
+    }
+
+    async fn list_workspaces(&self, request_id: RequestId) {
+        let Some(command) = self.config.workspace.clone() else {
+            self.send(error_response(
+                Some(request_id),
+                -32_030,
+                "Managed workspace lifecycle is disabled",
+                None,
+            ));
+            return;
+        };
+        match WorkspaceLifecycle::new(command).inventory().await {
+            Ok(inventory) => self.send(success_response(request_id, json!(inventory))),
+            Err(error) => self.send(error_response(
+                Some(request_id),
+                -32_030,
+                &error.to_string(),
+                None,
+            )),
+        }
+    }
+
+    async fn handoff_workspace(&self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ManagedWorkspaceParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid managed workspace parameters",
+            ));
+            return;
+        };
+        if self.agents.values().any(|agent| {
+            agent.task.is_some()
+                && agent
+                    .summary
+                    .managed_workspace
+                    .as_ref()
+                    .is_some_and(|workspace| {
+                        workspace.repository == parsed.repository
+                            && workspace.task_id == parsed.task_id
+                    })
+        }) {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "A live agent still owns this managed task",
+                None,
+            ));
+            return;
+        }
+        let Some(command) = self.config.workspace.clone() else {
+            self.send(error_response(
+                Some(request_id),
+                -32_030,
+                "Managed workspace lifecycle is disabled",
+                None,
+            ));
+            return;
+        };
+        match WorkspaceLifecycle::new(command)
+            .handoff(&parsed.repository, &parsed.task_id)
+            .await
+        {
+            Ok(()) => self.send(success_response(
+                request_id,
+                json!({
+                    "handed_off": true,
+                    "repository": parsed.repository,
+                    "task_id": parsed.task_id,
+                }),
+            )),
+            Err(error) => self.send(error_response(
+                Some(request_id),
+                -32_030,
+                &error.to_string(),
+                None,
+            )),
+        }
     }
 
     async fn provider_sessions(&self, request_id: RequestId, params: Value) {
@@ -662,7 +796,7 @@ impl Broker {
         }
     }
 
-    fn start_agent(&mut self, request_id: RequestId, params: Value, launch: SessionLaunch) {
+    async fn start_agent(&mut self, request_id: RequestId, params: Value, launch: SessionLaunch) {
         let Ok(parsed) = serde_json::from_value::<StartParams>(params) else {
             self.send(invalid_params(request_id, "invalid start parameters"));
             return;
@@ -678,45 +812,187 @@ impl Broker {
             ));
             return;
         }
-        let cwd = match canonical_directory(&parsed.cwd) {
+        let Some(workspace) = self
+            .resolve_launch_workspace(
+                &request_id,
+                parsed.cwd.as_deref(),
+                parsed.workspace_strategy,
+                parsed.worktree_path.as_deref(),
+                parsed.managed_workspace.as_ref(),
+            )
+            .await
+        else {
+            return;
+        };
+
+        let _ = self.launch_agent(request_id, parsed.provider, workspace, launch);
+    }
+
+    async fn resolve_launch_workspace(
+        &self,
+        request_id: &RequestId,
+        raw_cwd: Option<&str>,
+        strategy: Option<WorkspaceStrategy>,
+        worktree_path: Option<&str>,
+        managed: Option<&ManagedWorkspaceParams>,
+    ) -> Option<ResolvedWorkspace> {
+        if let Some(managed) = managed {
+            if raw_cwd.is_some() || strategy.is_some() || worktree_path.is_some() {
+                self.send(invalid_params(
+                    request_id.clone(),
+                    "managed_workspace cannot be combined with explicit workspace fields",
+                ));
+                return None;
+            }
+            return self.resolve_managed_workspace(request_id, managed).await;
+        }
+        self.resolve_explicit_workspace(request_id, raw_cwd, strategy, worktree_path)
+    }
+
+    async fn resolve_managed_workspace(
+        &self,
+        request_id: &RequestId,
+        managed: &ManagedWorkspaceParams,
+    ) -> Option<ResolvedWorkspace> {
+        if self.mode == BrokerMode::Embedded
+            && self.agents.values().any(|agent| agent.task.is_some())
+        {
+            self.send(error_response(
+                Some(request_id.clone()),
+                -32_011,
+                "M2 embedded mode supports one live agent",
+                None,
+            ));
+            return None;
+        }
+        if self.agents.values().any(|agent| {
+            agent.task.is_some()
+                && agent
+                    .summary
+                    .managed_workspace
+                    .as_ref()
+                    .is_some_and(|workspace| {
+                        workspace.repository == managed.repository
+                            && workspace.task_id == managed.task_id
+                    })
+        }) {
+            self.send(error_response(
+                Some(request_id.clone()),
+                -32_012,
+                "A writable agent already owns this managed task",
+                None,
+            ));
+            return None;
+        }
+        let Some(command) = self.config.workspace.clone() else {
+            self.send(error_response(
+                Some(request_id.clone()),
+                -32_030,
+                "Managed workspace lifecycle is disabled",
+                None,
+            ));
+            return None;
+        };
+        let (path, metadata) = match WorkspaceLifecycle::new(command)
+            .claim(&managed.repository, &managed.task_id, managed.resume)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                self.send(error_response(
+                    Some(request_id.clone()),
+                    -32_030,
+                    &error.to_string(),
+                    None,
+                ));
+                return None;
+            }
+        };
+        let cwd = match canonical_directory(&path) {
             Ok(cwd) => cwd,
             Err(message) => {
-                self.send(invalid_params(request_id, message));
-                return;
+                self.send(invalid_params(request_id.clone(), message));
+                return None;
             }
         };
         let worktree_path = match validate_workspace(
-            parsed.workspace_strategy,
-            parsed.worktree_path.as_deref(),
+            WorkspaceStrategy::Worktree,
+            Some(&path),
             &cwd,
-            self.mode,
+            BrokerMode::Durable,
         ) {
             Ok(path) => path,
             Err(message) => {
-                self.send(invalid_params(request_id, message));
-                return;
+                self.send(invalid_params(request_id.clone(), message));
+                return None;
             }
         };
-
-        let _ = self.launch_agent(
-            request_id,
-            parsed.provider,
+        Some(ResolvedWorkspace {
             cwd,
-            parsed.workspace_strategy,
+            strategy: WorkspaceStrategy::Worktree,
             worktree_path,
-            launch,
-        );
+            managed: Some(metadata),
+        })
+    }
+
+    fn resolve_explicit_workspace(
+        &self,
+        request_id: &RequestId,
+        raw_cwd: Option<&str>,
+        strategy: Option<WorkspaceStrategy>,
+        worktree_path: Option<&str>,
+    ) -> Option<ResolvedWorkspace> {
+        let (Some(raw_cwd), Some(strategy)) = (raw_cwd, strategy) else {
+            self.send(invalid_params(
+                request_id.clone(),
+                "explicit starts require cwd and workspace_strategy",
+            ));
+            return None;
+        };
+        let cwd = match canonical_directory(raw_cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id.clone(), message));
+                return None;
+            }
+        };
+        let worktree_path = match validate_workspace(strategy, worktree_path, &cwd, self.mode) {
+            Ok(path) => path,
+            Err(message) => {
+                self.send(invalid_params(request_id.clone(), message));
+                return None;
+            }
+        };
+        Some(ResolvedWorkspace {
+            cwd,
+            strategy,
+            worktree_path,
+            managed: None,
+        })
     }
 
     fn launch_agent(
         &mut self,
         request_id: RequestId,
         provider: Provider,
-        cwd: PathBuf,
-        workspace_strategy: WorkspaceStrategy,
-        worktree_path: Option<String>,
+        workspace: ResolvedWorkspace,
         launch: SessionLaunch,
     ) -> Option<String> {
+        let ResolvedWorkspace {
+            cwd,
+            strategy: workspace_strategy,
+            worktree_path,
+            managed: managed_workspace,
+        } = workspace;
+        if workspace_strategy == WorkspaceStrategy::Shared && !self.config.allow_shared_workspaces {
+            self.send(error_response(
+                Some(request_id),
+                -32_031,
+                "Shared-checkout starts are disabled by broker policy",
+                None,
+            ));
+            return None;
+        }
         if self.mode == BrokerMode::Embedded
             && self.agents.values().any(|agent| agent.task.is_some())
         {
@@ -762,6 +1038,8 @@ impl Broker {
             cwd: cwd.to_string_lossy().into_owned(),
             workspace_strategy,
             worktree_path,
+            managed_workspace,
+            runtime: None,
             title,
             state: AgentState::Starting,
             active_turn_id: None,
@@ -895,9 +1173,12 @@ impl Broker {
         let _ = self.launch_agent(
             request_id,
             parsed.provider,
-            cwd,
-            parsed.workspace_strategy,
-            worktree_path,
+            ResolvedWorkspace {
+                cwd,
+                strategy: parsed.workspace_strategy,
+                worktree_path,
+                managed: None,
+            },
             SessionLaunch::Resume(session_id),
         );
     }
@@ -938,14 +1219,18 @@ impl Broker {
         let cwd = PathBuf::from(&source.summary.cwd);
         let strategy = source.summary.workspace_strategy;
         let worktree_path = source.summary.worktree_path.clone();
+        let managed_workspace = source.summary.managed_workspace.clone();
         let pending_contexts = source.pending_contexts.clone();
         self.retire_agent(&source_id).await;
         let forked_id = self.launch_agent(
             request_id,
             provider,
-            cwd,
-            strategy,
-            worktree_path,
+            ResolvedWorkspace {
+                cwd,
+                strategy,
+                worktree_path,
+                managed: managed_workspace,
+            },
             SessionLaunch::Fork(provider_session_id),
         );
         if let Some(agent) = forked_id.and_then(|agent_id| self.agents.get_mut(&agent_id)) {
@@ -1339,12 +1624,14 @@ impl Broker {
                 request_id,
                 agent_id,
                 provider_session_id,
+                runtime,
             } => {
                 let summary = {
                     let Some(agent) = self.agents.get_mut(&agent_id) else {
                         return;
                     };
                     agent.summary.provider_session_id = Some(provider_session_id);
+                    agent.summary.runtime = Some(runtime);
                     agent.summary.state = AgentState::Idle;
                     agent.summary.updated_at = timestamp();
                     agent.summary.clone()
@@ -1679,12 +1966,25 @@ struct ClientIdentity {
 #[serde(deny_unknown_fields)]
 struct StartParams {
     provider: Provider,
-    cwd: String,
-    workspace_strategy: WorkspaceStrategy,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    workspace_strategy: Option<WorkspaceStrategy>,
     #[serde(default)]
     worktree_path: Option<String>,
     #[serde(default)]
+    managed_workspace: Option<ManagedWorkspaceParams>,
+    #[serde(default)]
     provider_options: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedWorkspaceParams {
+    repository: String,
+    task_id: String,
+    #[serde(default)]
+    resume: bool,
 }
 
 #[derive(Debug, Deserialize)]

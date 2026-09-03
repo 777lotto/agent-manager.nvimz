@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "agent/start",
+  "params": {
+    "provider": "codex",
+    "managed_workspace": {
+      "repository": "agent-manager",
+      "task_id": "runtime-compat",
+      "resume": false
+    }
+  }
+}
