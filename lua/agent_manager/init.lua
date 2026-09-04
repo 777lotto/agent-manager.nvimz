@@ -1180,18 +1180,6 @@ local function refresh_external_sessions(callback)
   end
 end
 
-local function refresh_workspace_inventory(callback)
-  local _, request_err = runtime.client:request("workspace/list", {}, function(result, rpc_err)
-    if result and result.repositories then
-      runtime.model:apply_workspace_inventory(result.repositories)
-    end
-    callback(result, rpc_err)
-  end)
-  if request_err then
-    callback(nil, request_err)
-  end
-end
-
 function M.refresh(callback)
   local ok, setup_err = ensure_setup()
   if not ok then
@@ -1210,24 +1198,13 @@ function M.refresh(callback)
         finish(callback, nil, rpc_err)
         return
       end
-      local remaining = 2
-      local function settled()
-        remaining = remaining - 1
-        if remaining == 0 then
-          runtime.view:schedule_render()
-          finish(callback, result, nil)
-        end
-      end
       result = result or {}
       refresh_external_sessions(function(external)
         result.external_sessions = external.sessions
         result.external_activity = external.activity
-        settled()
-      end)
-      refresh_workspace_inventory(function(workspaces, workspace_err)
-        result.repositories = workspaces and workspaces.repositories or {}
-        result.workspace_error = workspace_err
-        settled()
+        result.repositories = runtime.model:workspace_list()
+        runtime.view:schedule_render()
+        finish(callback, result, nil)
       end)
     end)
     if request_err then
@@ -1287,6 +1264,47 @@ local function path_within(path, root)
     return false
   end
   return root == "/" or path == root or path:sub(1, #root + 1) == root .. "/"
+end
+
+local function managed_layout_context(context)
+  context = type(context) == "table" and context or {}
+  if valid_managed_identifier(context.repository, true) then
+    return { repository = context.repository }
+  end
+  if type(context.cwd) ~= "string" or context.cwd == "" then
+    return nil
+  end
+  local cwd = vim.uv.fs_realpath(vim.fs.normalize(context.cwd))
+  if not cwd then
+    return nil
+  end
+  local git_root = vim.fs.root(cwd, { ".git" })
+  if not git_root then
+    return nil
+  end
+  git_root = normalized_path(vim.uv.fs_realpath(git_root) or git_root)
+  local home = vim.uv.os_homedir() or vim.env.HOME
+  home = home and normalized_path(vim.uv.fs_realpath(home) or home) or nil
+  if not git_root or not home or not path_within(git_root, home) or git_root == home then
+    return nil
+  end
+  local relative = git_root:sub(#home + 2)
+  local parts = vim.split(relative, "/", { plain = true, trimempty = true })
+  local repository = nil
+  local task_id = nil
+  if #parts == 1 then
+    repository = parts[1]:lower()
+  elseif #parts == 3 and parts[1] == "worktrees" then
+    repository = parts[2]:lower()
+    task_id = parts[3]
+  end
+  if not valid_managed_identifier(repository, true) then
+    return nil
+  end
+  if task_id and not valid_managed_identifier(task_id, false) then
+    return nil
+  end
+  return { repository = repository, task_id = task_id }
 end
 
 local function contextual_repository(repositories, context)
@@ -1406,8 +1424,15 @@ local function start_new_session(provider, context)
 
   local cached = runtime.model:workspace_list()
   local known = contextual_repository(cached, context)
-  if not known and valid_managed_identifier(context and context.repository, true) then
-    known = { slug = context.repository }
+  local layout = managed_layout_context(context)
+  if not known and layout then
+    for _, repository in ipairs(cached) do
+      if repository.slug == layout.repository then
+        known = repository
+        break
+      end
+    end
+    known = known or { slug = layout.repository }
   end
   if known then
     choose_session_name(known)
@@ -1600,6 +1625,20 @@ function M.resume_session_ui(session)
       task_id = managed.task_id,
       resume = true,
     })
+    return
+  end
+
+  local layout = managed_layout_context({ cwd = session.cwd })
+  if layout and layout.task_id then
+    resume_with_workspace(session, {
+      repository = layout.repository,
+      task_id = layout.task_id,
+      resume = true,
+    })
+    return
+  end
+  if layout then
+    prompt_resume_workspace(session, { slug = layout.repository })
     return
   end
 

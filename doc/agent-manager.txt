@@ -129,14 +129,17 @@ Activity. Wide displays show all three. Medium and narrow displays may also use
 
 The Agents pane is a lazy filesystem tree rooted at the full home directory
 (for example, `/home/ai/`). Files and directories appear independently of
-session state. Registered repositories, broker-owned agents, and active or
+session state. Known managed repositories, broker-owned agents, and active or
 saved standalone Codex/Claude sessions are overlaid beneath their directories.
-The project where Agent Manager was opened carries a `[cwd]` marker; known
-registered or managed repository directories carry `[repo]`. Place the cursor
-on a directory and press `sn` to use it as the start-flow hint; if it
-cannot be matched to one registered repository, the flow asks which repository
-to use. Choose a provider and workspace action, enter the stable task ID, wait
-for the ready notice, then press `2` and `tp` to send the first prompt.
+The project where Agent Manager was opened carries a `[cwd]` marker; repository
+directories learned from managed sessions or explicit inventory carry
+`[repo]`. Place the cursor on a directory and press `sn` to use it as the
+start-flow hint. Canonical clones and managed worktrees use the required
+`~/<repo>` and `~/worktrees/<repo>/<task>` layout without first running the
+repository-wide lifecycle audit; the lifecycle claim still validates the
+candidate before launch. Nonstandard paths fall back to explicit inventory.
+Choose a provider, enter the stable task ID, wait for the ready notice, then
+press `2` and `tp` to send the first prompt.
 
 Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
 badge. The different shapes and labels preserve provider identity under themes
@@ -205,9 +208,11 @@ hot-upgraded; resuming a persisted session uses the currently configured
 compatible runtime.
 
 External CLI discovery projects metadata only. Prompt previews and tool
-payloads do not cross into the Neovim model. Agent Manager does not attach to,
-resume, interrupt, or otherwise seize a session while its standalone CLI owns
-the provider writer.
+payloads do not cross into the Neovim model. Opening the workspace and `gr`
+refresh session metadata without running full lifecycle inventory; callers can
+request that inventory explicitly when they need every registered repository
+and task mapping. Agent Manager does not attach to, resume, interrupt, or
+otherwise seize a session while its standalone CLI owns the provider writer.
 
 ==============================================================================
 6. UX integration                                       *agent-manager-ux*

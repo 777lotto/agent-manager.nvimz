@@ -101,6 +101,11 @@ preferred managed start takes a registered repository and stable task ID; the
 broker delegates inventory, claim/resume, and lease handoff to the installed
 Git/worktree authority and records repository, task, `agent/**` branch, base,
 and path in its summary. It does not reproduce Git lifecycle logic.
+The claim response is validated against the exact linked Git worktree, task
+branch, and branch-configured base before provider startup. This avoids using
+the authority's repository-wide cleanup audit as a redundant post-claim lookup;
+older authorities without a valid receipt use the audit fallback, with a
+non-destructive lease handoff if that fallback fails.
 
 Shared-checkout starts are an explicit broker policy and are disabled by the
 production unit. The plugin exposes that opt-in as `worktrees.allow_shared` for

@@ -921,6 +921,52 @@ local function managed_workspace_ui_test()
   end, 25, false)
 end
 
+local function managed_start_uses_focused_layout_without_inventory_test()
+  local manager = require("agent_manager")
+  configure_fake(manager)
+  assert(manager.open())
+  await("focused-layout broker handshake", function()
+    return manager.status().client.state == "connected"
+  end)
+  await("focused-layout provider sessions", function()
+    return #(manager.status().model.external_sessions or {}) == 4
+  end)
+  assert_equal(
+    manager.status().model.workspace_repositories,
+    {},
+    "opening the session tree must not run the full workspace audit"
+  )
+
+  local original_select = vim.ui.select
+  local original_input = vim.ui.input
+  vim.ui.select = function(items, _, callback)
+    callback(items[1])
+  end
+  vim.ui.input = function(_, callback)
+    callback("direct-managed-task")
+  end
+
+  local status = manager.status()
+  vim.api.nvim_feedkeys("1", "x", false)
+  local directory_row = assert(buffer_line_number(status.view.buffers.agents, "[cwd]"))
+  vim.api.nvim_win_set_cursor(0, { directory_row, 0 })
+  vim.api.nvim_feedkeys("sn", "x", false)
+  await("focused-layout managed startup", function()
+    local agent = manager.list()[1]
+    return agent and agent.state == "idle"
+  end)
+
+  vim.ui.select = original_select
+  vim.ui.input = original_input
+  local agent = manager.list()[1]
+  assert_equal(agent.managed_workspace.repository, "agent-manager", "focused repository")
+  assert_equal(agent.managed_workspace.task_id, "direct-managed-task", "focused task")
+  manager.teardown()
+  vim.wait(500, function()
+    return false
+  end, 25, false)
+end
+
 local function managed_decision_render_test()
   local Model = require("agent_manager.model")
   local View = require("agent_manager.view")
@@ -1041,6 +1087,7 @@ local function run()
   public_input_validation_test()
   real_broker_handshake_test()
   durable_reconnect_test()
+  managed_start_uses_focused_layout_without_inventory_test()
   managed_workspace_ui_test()
   managed_decision_render_test()
   integration_test()

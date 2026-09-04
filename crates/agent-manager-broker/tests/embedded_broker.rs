@@ -147,6 +147,14 @@ struct ManagedWorkspaceFixture {
 
 impl ManagedWorkspaceFixture {
     fn new() -> Self {
+        Self::with_claim_receipt(true)
+    }
+
+    fn without_claim_receipt() -> Self {
+        Self::with_claim_receipt(false)
+    }
+
+    fn with_claim_receipt(emit_claim_receipt: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "agent-manager-managed-workspace-test-{}",
             uuid::Uuid::new_v4()
@@ -173,6 +181,14 @@ impl ManagedWorkspaceFixture {
                 "-b",
                 "agent/managed-task",
                 worktree.to_str().expect("UTF-8 worktree"),
+            ],
+        );
+        run_git(
+            &worktree,
+            &[
+                "config",
+                "branch.agent/managed-task.merge",
+                "refs/heads/bluff",
             ],
         );
 
@@ -207,9 +223,11 @@ impl ManagedWorkspaceFixture {
             }]
         });
         let script = format!(
-            "#!/usr/bin/env python3\nimport pathlib, sys\nAUDIT = {audit:?}\nMARKER = pathlib.Path({marker:?})\ncommand = sys.argv[1]\nif command == 'audit':\n    print(AUDIT)\nelif command in ('claim', 'handoff'):\n    with MARKER.open('a', encoding='utf-8') as target:\n        target.write(' '.join(sys.argv[1:]) + '\\n')\nelse:\n    raise SystemExit(2)\n",
+            "#!/usr/bin/env python3\nimport pathlib, sys\nAUDIT = {audit:?}\nEMIT_CLAIM_RECEIPT = {emit_claim_receipt}\nMARKER = pathlib.Path({marker:?})\nWORKTREE = {worktree:?}\ncommand = sys.argv[1]\nwith MARKER.open('a', encoding='utf-8') as target:\n    target.write(' '.join(sys.argv[1:]) + '\\n')\nif command == 'audit':\n    print(AUDIT)\nelif command in ('claim', 'handoff'):\n    if command == 'claim' and EMIT_CLAIM_RECEIPT:\n        print('claimed: agent-manager/managed-task: ' + WORKTREE + ' branch=agent/managed-task lease=held')\n        print('hand off with: ignored')\nelse:\n    raise SystemExit(2)\n",
             audit = serde_json::to_string(&audit).expect("encode audit"),
+            emit_claim_receipt = if emit_claim_receipt { "True" } else { "False" },
             marker = marker.to_string_lossy(),
+            worktree = worktree.to_string_lossy(),
         );
         fs::write(&lifecycle, script).expect("write lifecycle fixture");
         fs::set_permissions(&lifecycle, fs::Permissions::from_mode(0o700))
@@ -957,6 +975,43 @@ async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
 }
 
 #[tokio::test]
+async fn lifecycle_without_a_claim_receipt_uses_the_scoped_audit_fallback() {
+    completes_within(async {
+        let fixture = ManagedWorkspaceFixture::without_claim_receipt();
+        let mut harness = start_managed_harness(&fixture).await;
+        harness
+            .send(request(
+                2,
+                "agent/start",
+                json!({
+                    "provider": "codex",
+                    "managed_workspace": {
+                        "repository": "agent-manager",
+                        "task_id": "managed-task",
+                        "resume": true
+                    }
+                }),
+            ))
+            .await;
+        assert_eq!(
+            harness.response(2).await["result"]["agent"]["state"],
+            "idle"
+        );
+        let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
+        assert_eq!(
+            lifecycle_calls
+                .lines()
+                .filter(|line| line.starts_with("audit "))
+                .count(),
+            1
+        );
+        harness.shutdown(3).await;
+    })
+    .await
+    .expect("legacy lifecycle fallback timed out");
+}
+
+#[tokio::test]
 async fn deleting_an_owned_session_hands_off_but_preserves_its_worktree() {
     completes_within(async {
         let fixture = ManagedWorkspaceFixture::new();
@@ -1007,7 +1062,7 @@ async fn deleting_an_owned_session_hands_off_but_preserves_its_worktree() {
 }
 
 #[tokio::test]
-async fn managed_workspace_start_uses_lifecycle_inventory_claim_and_handoff() {
+async fn managed_workspace_start_uses_validated_lifecycle_claim_and_handoff() {
     completes_within(async {
         let fixture = ManagedWorkspaceFixture::new();
         let mut harness = start_managed_harness(&fixture).await;
@@ -1087,6 +1142,14 @@ async fn managed_workspace_start_uses_lifecycle_inventory_claim_and_handoff() {
         let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
         assert!(lifecycle_calls.contains("claim agent-manager managed-task --owner-pid"));
         assert!(lifecycle_calls.contains("handoff agent-manager managed-task --owner-pid"));
+        assert_eq!(
+            lifecycle_calls
+                .lines()
+                .filter(|line| line.starts_with("audit "))
+                .count(),
+            1,
+            "the explicit inventory call is the only lifecycle audit"
+        );
         harness.shutdown(7).await;
     })
     .await
@@ -1126,6 +1189,12 @@ async fn managed_workspace_resume_claims_the_saved_task_before_provider_resume()
         let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
         assert!(lifecycle_calls.contains("claim agent-manager managed-task --owner-pid"));
         assert!(lifecycle_calls.contains("--resume"));
+        assert!(
+            !lifecycle_calls
+                .lines()
+                .any(|line| line.starts_with("audit ")),
+            "a validated resume receipt must not trigger a cleanup audit"
+        );
         harness.shutdown(3).await;
     })
     .await

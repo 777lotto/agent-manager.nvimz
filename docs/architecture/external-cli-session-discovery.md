@@ -48,6 +48,7 @@ path removes the worktree, branch, or project files.
 The Agents pane overlays both collections on a filesystem hierarchy rooted at
 the user's full home path and uses explicit `ACTIVE`, `RESUME`, and fail-closed
 `CHECK` labels. Opening the pane and pressing `gr` perform metadata-only
-refreshes and do not start a paid model turn. Provider prompt previews,
-transcript messages, arbitrary CLI JSON fields, and tool payloads are discarded
-before they reach the public broker protocol.
+session refreshes, do not run the lifecycle authority's repository-wide audit,
+and do not start a paid model turn. Provider prompt previews, transcript
+messages, arbitrary CLI JSON fields, and tool payloads are discarded before
+they reach the public broker protocol.

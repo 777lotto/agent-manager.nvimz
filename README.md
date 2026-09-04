@@ -126,8 +126,9 @@ Then open Neovim and use:
 To start a session from the workspace:
 
 1. Press `1` to focus Agents and place the cursor on the desired directory.
-   The project where Agent Manager was opened is marked `[cwd]`; registered or
-   already managed repositories are marked `[repo]`.
+   The project where Agent Manager was opened is marked `[cwd]`; repositories
+   already known from managed sessions or explicit inventory are marked
+   `[repo]`.
 2. Press `sn` and choose Codex or Claude. `sn` always means “start a new
    session”; continuing old work is not mixed into this flow.
 3. Enter a stable lowercase session name. Agent Manager creates the safe
@@ -161,7 +162,7 @@ switch the same buffers without losing model state.
 
 The Agents pane is a lazy filesystem tree rooted at the full home path (for
 example, `/home/ai/`). It includes ordinary files and directories whether or
-not a session exists there; registered repositories and every discovered
+not a session exists there; known managed repositories and every discovered
 Codex/Claude session—live or saved—are overlaid beneath their directory. Codex rows use
 a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
 identity remains clear even when a theme does not preserve the intended color.
@@ -208,7 +209,13 @@ diagnostic `codex-probe` performs only initialization and thread discovery;
 External CLI discovery is metadata-only: Agent Manager projects provider,
 session ID, working directory, optional provider-supplied title, timestamp, and active
 state. Prompt previews and tool payloads are discarded at the provider
-boundary.
+boundary. Opening the workspace and `gr` refresh broker/provider session
+metadata without running the lifecycle authority's repository-wide cleanup
+audit. A focused canonical clone or managed worktree supplies its repository
+identity from the required `~/<repo>` or `~/worktrees/<repo>/<task>` layout;
+the lifecycle claim remains authoritative and rejects an unregistered or
+inconsistent candidate before launch. Full workspace inventory remains an
+explicit operation and the fallback for nonstandard layouts.
 
 ## Development
 
@@ -268,10 +275,12 @@ The promoted schema-v1 integrations are:
 
 ### Managed worktrees and administrator policy
 
-The normal `sn` flow only starts a new session. Repository choices and existing
-workspace mappings come from the installed `zemrip-agent-workspace audit
---json` interface. A new session asks for one stable lowercase kebab-case name;
-the broker atomically claims the resulting `agent/<name>` branch, lease, and
+The normal `sn` flow only starts a new session. A focused canonical clone or
+managed worktree identifies the candidate repository through the required
+workspace layout; nonstandard paths fall back to the installed
+`zemrip-agent-workspace audit --json` inventory. A new session asks for one
+stable lowercase kebab-case name; the broker then asks the lifecycle authority
+to atomically claim the resulting `agent/<name>` branch, lease, and
 `~/worktrees/<repo>/<name>` checkout before it starts a provider. Continuing a
 saved row reuses its mapped workspace; if its history came from a canonical
 checkout, Agent Manager asks for a workspace name and safely moves the resumed
@@ -286,6 +295,12 @@ disable managed starts. Set `worktrees.allow_shared = true` only when the
 administrator intends to permit writable agents in coordination checkouts; the
 embedded broker enforces the setting, and durable deployments enforce it with
 the corresponding service flag.
+
+After a claim, the broker validates the lifecycle receipt against the exact
+linked Git worktree, `agent/<task>` branch, and configured base branch instead
+of launching a repository-wide cleanup audit. Older lifecycle implementations
+without the receipt retain the audit fallback; a failed fallback hands off the
+new lease without deleting the branch or worktree.
 
 ### Provider runtime compatibility
 
