@@ -267,6 +267,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     cwd=Path(directory),
                     resume=None,
                     fork=False,
+                    model="sonnet",
+                    effort="high",
                     callback=callback,
                 )
 
@@ -279,6 +281,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(options.strict_mcp_config, True)
             self.assertIs(options.include_partial_messages, True)
             self.assertIs(options.include_hook_events, True)
+            self.assertEqual(options.model, "sonnet")
+            self.assertEqual(options.effort, "high")
             permission = options.can_use_tool
             self.assertIsNotNone(permission)
             assert permission is not None
@@ -327,6 +331,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     cwd=cwd,
                     resume="source-session",
                     fork=False,
+                    model=None,
+                    effort=None,
                     callback=callback,
                 )
                 resumed_options = RecordingSdkClient.instances[-1].options
@@ -341,6 +347,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     cwd=cwd,
                     resume="source-session",
                     fork=True,
+                    model=None,
+                    effort=None,
                     callback=callback,
                 )
                 forked_options = RecordingSdkClient.instances[-1].options

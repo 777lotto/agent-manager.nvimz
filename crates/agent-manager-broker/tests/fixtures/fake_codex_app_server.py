@@ -54,10 +54,16 @@ def main() -> None:
 
     if message.get("method") != "thread/start":
         raise AssertionError("expected thread/start")
+    if message.get("params", {}).get("model") != "gpt-test":
+        raise AssertionError("thread/start model was not forwarded")
     send({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
     respond(message, {"thread": {"id": "thread-1"}})
 
     turn = expect("turn/start")
+    if turn.get("params", {}).get("model") != "gpt-test-next":
+        raise AssertionError("turn/start model was not forwarded")
+    if turn.get("params", {}).get("effort") != "high":
+        raise AssertionError("turn/start effort was not forwarded")
     respond(turn, {"turn": {"id": "turn-1", "status": "inProgress"}})
     send(
         {

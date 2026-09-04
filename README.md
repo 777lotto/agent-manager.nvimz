@@ -9,7 +9,8 @@ M4 is complete. Durable mode keeps multiple Codex and Claude agents alive
 across SSH and Neovim restarts through an owner-only Unix socket, bounded
 replay, provider-backed history resync, and an archivable metadata-only
 registry. New sessions default to lifecycle-managed worktrees selected by
-repository and a stable session name. Shared-checkout starts are disabled by default;
+repository and created from the first prompt under a generated task name.
+Shared-checkout starts are disabled by default;
 an administrator may explicitly re-enable them. Embedded mode remains available as the
 single-agent, Neovim-owned fallback. The M3 Foundation, Styling, Chrome, and
 native presentation contracts remain unchanged. Ordinary verification uses
@@ -71,9 +72,13 @@ require("agent_manager").setup({
   providers = {
     codex = {
       executable = "/absolute/path/to/codex",
+      model = "gpt-5.4", -- optional initial default
+      effort = "high", -- optional initial default
     },
     claude = {
       python = "/absolute/path/to/agent-manager-worker-venv/bin/python",
+      model = "sonnet", -- optional initial default
+      effort = "high", -- optional initial default
     },
   },
   worktrees = {
@@ -131,9 +136,13 @@ To start a session from the workspace:
    `[repo]`.
 2. Press `sn` and choose Codex or Claude. `sn` always means “start a new
    session”; continuing old work is not mixed into this flow.
-3. Enter a stable lowercase session name. Agent Manager creates the safe
-   worktree for that repository and reports when the agent is ready.
-4. Press `2`, then `tp`, to compose the first prompt.
+3. Choose a model. The last model and effort are reused by default, and focus
+   moves directly to Conversation for the initial prompt.
+4. Submit the prompt. Only then does Agent Manager create the safe worktree and
+   start the provider. Managed sessions use the generated worktree name as
+   their title; shared sessions use the first few prompt words in the live UI.
+   Use `am` or `ae` before this prompt or between later turns to change model or
+   effort.
 
 Starting from another pane still works; Agent Manager asks which registered
 repository to use. `:AgentManagerStart [codex|claude]` uses the current project
@@ -143,16 +152,17 @@ input that cannot be sent.
 
 The workspace maps `1`, `2`, and `3` directly to Agents, Conversation, and
 Activity. `<Tab>` and `<S-Tab>` still cycle panes. Commands are grouped under
-buffer-local prefixes: `s` for sessions (`sn`, `so`, `sf`, `sa`), `t` for the
-current turn (`tp`, `ts`, `ti`, `tc`), `d` for diff/delete (`df`, `ds`), and
-`g` for navigation/refresh (`ga`, `gc`, `gt`, `gr`, `g?`). `y` means yes/allow
+buffer-local prefixes: `a` for agent settings (`am`, `ae`), `s` for sessions
+(`sn`, `so`, `sf`, `sa`), `t` for the current turn (`tp`, `ts`, `ti`, `tc`),
+`d` for diff/delete (`df`, `ds`), and `g` for navigation/refresh (`ga`, `gc`,
+`gt`, `gr`, `g?`). `y` means yes/allow
 and `n` means no/deny only for the focused human request. `<CR>` toggles a
 directory, opens a file or session, or answers a question; `h` and `l` collapse
 and expand tree rows. `q` closes only the view.
 
-When `which-key.nvim` is available, Agent Manager registers those four prefixes
-as buffer-local groups without requiring `<leader>`. Because `d`, `g`, `s`, and
-`t` are built-in keys, a host that wants their menus to open automatically must
+When `which-key.nvim` is available, Agent Manager registers those five prefixes
+as buffer-local groups without requiring `<leader>`. Because `a`, `d`, `g`, `s`,
+and `t` are built-in keys, a host that wants their menus to open automatically must
 include them as normal-mode entries in which-key's `opts.triggers`; its
 `<auto>` trigger intentionally skips existing built-ins. Agent Manager does not
 call `which-key.show()` from a mapping, call which-key setup, or replace global
@@ -163,7 +173,11 @@ switch the same buffers without losing model state.
 The Agents pane is a lazy filesystem tree rooted at the full home path (for
 example, `/home/ai/`). It includes ordinary files and directories whether or
 not a session exists there; known managed repositories and every discovered
-Codex/Claude session—live or saved—are overlaid beneath their directory. Codex rows use
+Codex/Claude session—live or saved—are overlaid beneath their directory.
+Directories with sessions anywhere below them sort before directories without
+sessions. Child directory contents begin collapsed. Direct sessions appear in
+a highlighted, independently expandable `Sessions` branch and are ordered by
+latest activity across both providers. Codex rows use
 a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
 identity remains clear even when a theme does not preserve the intended color.
 Green `● ACTIVE` labels identify live writers. Dark `○ RESUME` labels identify
@@ -275,13 +289,14 @@ The promoted schema-v1 integrations are:
 
 ### Managed worktrees and administrator policy
 
-The normal `sn` flow only starts a new session. A focused canonical clone or
+The normal `sn` flow only prepares a new session. A focused canonical clone or
 managed worktree identifies the candidate repository through the required
 workspace layout; nonstandard paths fall back to the installed
-`zemrip-agent-workspace audit --json` inventory. A new session asks for one
-stable lowercase kebab-case name; the broker then asks the lifecycle authority
-to atomically claim the resulting `agent/<name>` branch, lease, and
-`~/worktrees/<repo>/<name>` checkout before it starts a provider. Continuing a
+`zemrip-agent-workspace audit --json` inventory. After model selection, the
+first prompt generates a collision-resistant lowercase task ID. The broker
+then asks the lifecycle authority to atomically claim the resulting
+`agent/<task-id>` branch, lease, and `~/worktrees/<repo>/<task-id>` checkout
+before it starts a provider. Continuing a
 saved row reuses its mapped workspace; if its history came from a canonical
 checkout, Agent Manager asks for a workspace name and safely moves the resumed
 provider into that worktree. No raw worktree path is requested.

@@ -85,6 +85,14 @@
         "reason": { "type": ["string", "null"], "maxLength": 1024 }
       }
     },
+    "providerOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "effort": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
+      }
+    },
     "agentSummary": {
       "type": "object",
       "additionalProperties": false,
@@ -125,6 +133,7 @@
             { "type": "null" }
           ]
         },
+        "provider_options": { "$ref": "#/$defs/providerOptions" },
         "title": { "type": "string", "maxLength": 4096 },
         "state": { "$ref": "#/$defs/agentState" },
         "active_turn_id": { "type": ["string", "null"], "maxLength": 1024 },
@@ -228,7 +237,7 @@
             "resume": { "type": "boolean" }
           }
         },
-        "provider_options": { "type": "object" }
+        "provider_options": { "$ref": "#/$defs/providerOptions" }
       },
       "oneOf": [
         {
@@ -322,7 +331,8 @@
       "required": ["agent_id", "input"],
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "input": { "$ref": "#/$defs/input" }
+        "input": { "$ref": "#/$defs/input" },
+        "provider_options": { "$ref": "#/$defs/providerOptions" }
       }
     },
     "resumeParams": {
@@ -345,7 +355,7 @@
             "resume": { "type": "boolean" }
           }
         },
-        "provider_options": { "type": "object" }
+        "provider_options": { "$ref": "#/$defs/providerOptions" }
       },
       "oneOf": [
         {

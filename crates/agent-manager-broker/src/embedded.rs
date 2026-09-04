@@ -22,12 +22,12 @@ use crate::codex::{CODEX_COMPATIBILITY_PROFILE, CODEX_SCHEMA_BASELINE_VERSION, C
 use crate::framing::{BoundedFrame, read_bounded_line};
 use crate::protocol::{
     AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, ManagedWorkspace,
-    PROTOCOL_VERSION, Provider, RequestId, WorkspaceStrategy,
+    PROTOCOL_VERSION, Provider, ProviderOptions, RequestId, WorkspaceStrategy,
 };
 use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
 use crate::runtime::{
-    AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, delete_provider_session,
+    AgentCommand, AgentSpawn, RuntimeConfig, RuntimeEvent, SessionLaunch, delete_provider_session,
     discover_sessions, spawn_agent,
 };
 use crate::status::StatusStore;
@@ -303,6 +303,8 @@ struct ManagedAgent {
     task: Option<JoinHandle<()>>,
     pending_contexts: Vec<Value>,
     pending_questions: u64,
+    has_prompted: bool,
+    title_from_prompt: bool,
 }
 
 struct ResolvedWorkspace {
@@ -357,6 +359,8 @@ impl Broker {
                     task: None,
                     pending_contexts: Vec::new(),
                     pending_questions: 0,
+                    has_prompted: true,
+                    title_from_prompt: false,
                 },
             );
         }
@@ -954,15 +958,9 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid start parameters"));
             return;
         };
-        if parsed
-            .provider_options
-            .as_ref()
-            .is_some_and(|options| !options.is_empty())
-        {
-            self.send(invalid_params(
-                request_id,
-                "provider options are not available in M2",
-            ));
+        let provider_options = parsed.provider_options.unwrap_or_default();
+        if let Err(message) = validate_provider_options(parsed.provider, &provider_options) {
+            self.send(invalid_params(request_id, message));
             return;
         }
         let Some(workspace) = self
@@ -978,7 +976,13 @@ impl Broker {
             return;
         };
 
-        let _ = self.launch_agent(request_id, parsed.provider, workspace, launch);
+        let _ = self.launch_agent(
+            request_id,
+            parsed.provider,
+            workspace,
+            provider_options,
+            launch,
+        );
     }
 
     async fn resolve_launch_workspace(
@@ -1129,6 +1133,7 @@ impl Broker {
         request_id: RequestId,
         provider: Provider,
         workspace: ResolvedWorkspace,
+        provider_options: ProviderOptions,
         launch: SessionLaunch,
     ) -> Option<String> {
         let ResolvedWorkspace {
@@ -1180,10 +1185,8 @@ impl Broker {
         }
         let agent_id = Uuid::new_v4().to_string();
         let now = timestamp();
-        let title = cwd
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map_or_else(|| provider.to_string(), str::to_owned);
+        let title = directory_title(&cwd, provider);
+        let has_prompted = !matches!(&launch, SessionLaunch::Start);
         let summary = AgentSummary {
             id: agent_id.clone(),
             provider,
@@ -1193,6 +1196,7 @@ impl Broker {
             worktree_path,
             managed_workspace,
             runtime: None,
+            provider_options: provider_options.clone(),
             title,
             state: AgentState::Starting,
             active_turn_id: None,
@@ -1204,11 +1208,14 @@ impl Broker {
         };
         let runtime_request_id = self.runtime_request(request_id);
         let (commands, task) = spawn_agent(
-            provider,
-            agent_id.clone(),
-            cwd,
-            runtime_request_id,
-            launch,
+            AgentSpawn {
+                provider,
+                agent_id: agent_id.clone(),
+                cwd,
+                start_request_id: runtime_request_id,
+                launch,
+                provider_options,
+            },
             self.config.runtime.clone(),
             self.runtime.clone(),
         );
@@ -1222,6 +1229,8 @@ impl Broker {
                 task: Some(task),
                 pending_contexts: Vec::new(),
                 pending_questions: 0,
+                has_prompted,
+                title_from_prompt: false,
             },
         );
         self.notify_state();
@@ -1292,15 +1301,9 @@ impl Broker {
             ));
             return;
         }
-        if parsed
-            .provider_options
-            .as_ref()
-            .is_some_and(|options| !options.is_empty())
-        {
-            self.send(invalid_params(
-                request_id,
-                "provider options are not available in M2",
-            ));
+        let provider_options = parsed.provider_options.unwrap_or_default();
+        if let Err(message) = validate_provider_options(parsed.provider, &provider_options) {
+            self.send(invalid_params(request_id, message));
             return;
         }
         let Some(workspace) = self
@@ -1320,6 +1323,7 @@ impl Broker {
             request_id,
             parsed.provider,
             workspace,
+            provider_options,
             SessionLaunch::Resume(session_id),
         );
     }
@@ -1362,6 +1366,7 @@ impl Broker {
         let worktree_path = source.summary.worktree_path.clone();
         let managed_workspace = source.summary.managed_workspace.clone();
         let pending_contexts = source.pending_contexts.clone();
+        let provider_options = source.summary.provider_options.clone();
         self.retire_agent(&source_id).await;
         let forked_id = self.launch_agent(
             request_id,
@@ -1372,6 +1377,7 @@ impl Broker {
                 worktree_path,
                 managed: managed_workspace,
             },
+            provider_options,
             SessionLaunch::Fork(provider_session_id),
         );
         if let Some(agent) = forked_id.and_then(|agent_id| self.agents.get_mut(&agent_id)) {
@@ -1448,10 +1454,21 @@ impl Broker {
             self.send(invalid_params(request_id, "input text must not be empty"));
             return;
         }
-        let Some(agent) = self.agents.get_mut(&parsed.agent_id) else {
+        let Some(agent) = self.agents.get(&parsed.agent_id) else {
             self.send(agent_not_found(request_id));
             return;
         };
+        let provider_options = match input_provider_options(agent, parsed.provider_options, kind) {
+            Ok(options) => options,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let agent = self
+            .agents
+            .get_mut(&parsed.agent_id)
+            .expect("validated agent must remain present");
         let allowed = match kind {
             InputKind::Prompt => matches!(
                 agent.summary.state,
@@ -1469,25 +1486,26 @@ impl Broker {
             return;
         }
         let cwd = Path::new(&agent.summary.cwd);
-        let mut attachments = agent.pending_contexts.clone();
-        for attachment in parsed.input.attachments {
-            let attachment = match validate_context(attachment, cwd) {
-                Ok(attachment) => attachment,
+        let attachments =
+            match merge_input_contexts(&agent.pending_contexts, parsed.input.attachments, cwd) {
+                Ok(attachments) => attachments,
                 Err(message) => {
                     self.send(invalid_params(request_id, message));
                     return;
                 }
             };
-            attachments.push(attachment);
-        }
-        if let Err(message) = validate_context_collection(&attachments) {
-            self.send(invalid_params(request_id, message));
-            return;
-        }
         let commands = agent.commands.clone();
         agent.pending_contexts.clear();
         if kind == InputKind::Prompt {
             agent.summary.state = AgentState::Running;
+            agent.summary.provider_options = provider_options.clone();
+            if !agent.has_prompted {
+                agent.has_prompted = true;
+                if agent.summary.managed_workspace.is_none() {
+                    agent.summary.title = prompt_title(&parsed.input.text);
+                    agent.title_from_prompt = true;
+                }
+            }
             agent.summary.updated_at = timestamp();
         }
         let runtime_request_id = self.runtime_request(request_id.clone());
@@ -1496,6 +1514,7 @@ impl Broker {
                 request_id: runtime_request_id.clone(),
                 text: parsed.input.text,
                 attachments,
+                provider_options,
             },
             InputKind::Steer => AgentCommand::Steer {
                 request_id: runtime_request_id.clone(),
@@ -2005,7 +2024,19 @@ impl Broker {
         let summaries = self.summaries();
         let mut registry_failed = false;
         let registry_bytes = if let Some(registry) = &self.registry {
-            if registry.persist(&summaries).is_err() {
+            let registry_summaries = self
+                .agent_order
+                .iter()
+                .filter_map(|agent_id| self.agents.get(agent_id))
+                .map(|agent| {
+                    let mut summary = agent.summary.clone();
+                    if agent.title_from_prompt {
+                        summary.title = directory_title(Path::new(&summary.cwd), summary.provider);
+                    }
+                    summary
+                })
+                .collect::<Vec<_>>();
+            if registry.persist(&registry_summaries).is_err() {
                 registry_failed = true;
                 eprintln!("agent-manager-broker: durable registry persistence failed");
             }
@@ -2133,6 +2164,33 @@ enum InputKind {
     Steer,
 }
 
+fn input_provider_options(
+    agent: &ManagedAgent,
+    requested: Option<ProviderOptions>,
+    kind: InputKind,
+) -> Result<ProviderOptions, &'static str> {
+    let current = &agent.summary.provider_options;
+    let options = requested.unwrap_or_else(|| current.clone());
+    validate_provider_options(agent.summary.provider, &options)?;
+    if kind == InputKind::Steer && &options != current {
+        return Err("provider options apply to ordinary prompts, not active-turn steering");
+    }
+    Ok(options)
+}
+
+fn merge_input_contexts(
+    pending: &[Value],
+    attachments: Vec<Value>,
+    cwd: &Path,
+) -> Result<Vec<Value>, &'static str> {
+    let mut contexts = pending.to_vec();
+    for attachment in attachments {
+        contexts.push(validate_context(attachment, cwd)?);
+    }
+    validate_context_collection(&contexts)?;
+    Ok(contexts)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InitializeParams {
@@ -2164,7 +2222,7 @@ struct StartParams {
     #[serde(default)]
     managed_workspace: Option<ManagedWorkspaceParams>,
     #[serde(default)]
-    provider_options: Option<serde_json::Map<String, Value>>,
+    provider_options: Option<ProviderOptions>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2218,7 +2276,7 @@ struct ResumeParams {
     #[serde(default)]
     managed_workspace: Option<ManagedWorkspaceParams>,
     #[serde(default)]
-    provider_options: Option<serde_json::Map<String, Value>>,
+    provider_options: Option<ProviderOptions>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2242,6 +2300,8 @@ struct HistoryParams {
 struct TurnInputParams {
     agent_id: String,
     input: TurnInput,
+    #[serde(default)]
+    provider_options: Option<ProviderOptions>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2478,6 +2538,51 @@ fn canonical_context_path(raw: &str) -> Result<PathBuf, &'static str> {
         .file_name()
         .ok_or("editor context path has no file name")?;
     Ok(parent.join(name))
+}
+
+fn validate_provider_options(
+    provider: Provider,
+    options: &ProviderOptions,
+) -> Result<(), &'static str> {
+    if options.model.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+    }) {
+        return Err("provider model is invalid");
+    }
+    if options.effort.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 64 || value.chars().any(char::is_control)
+    }) {
+        return Err("provider effort is invalid");
+    }
+    if provider == Provider::Claude
+        && options
+            .effort
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "low" | "medium" | "high" | "xhigh" | "max"))
+    {
+        return Err("Claude effort must be low, medium, high, xhigh, or max");
+    }
+    Ok(())
+}
+
+fn prompt_title(prompt: &str) -> String {
+    let title = prompt
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title.chars().take(96).collect::<String>();
+    if title.is_empty() {
+        "session".to_owned()
+    } else {
+        title
+    }
+}
+
+fn directory_title(cwd: &Path, provider: Provider) -> String {
+    cwd.file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| provider.to_string(), str::to_owned)
 }
 
 fn capabilities(provider: Provider) -> Vec<Capability> {

@@ -13,7 +13,8 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::protocol::{
-    AgentState, AgentSummary, ManagedWorkspace, Provider, ProviderRuntime, WorkspaceStrategy,
+    AgentState, AgentSummary, ManagedWorkspace, Provider, ProviderOptions, ProviderRuntime,
+    WorkspaceStrategy,
 };
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -56,6 +57,8 @@ struct RegistryAgent {
     managed_workspace: Option<ManagedWorkspace>,
     #[serde(default)]
     runtime: Option<ProviderRuntime>,
+    #[serde(default)]
+    provider_options: ProviderOptions,
     title: String,
     state: AgentState,
     created_at: String,
@@ -187,6 +190,7 @@ impl From<&AgentSummary> for RegistryAgent {
             worktree_path: summary.worktree_path.clone(),
             managed_workspace: summary.managed_workspace.clone(),
             runtime: summary.runtime.clone(),
+            provider_options: summary.provider_options.clone(),
             title: summary.title.clone(),
             state: summary.state,
             created_at: summary.created_at.clone(),
@@ -214,6 +218,7 @@ impl RegistryAgent {
                 .is_some_and(|version| version.len() > 1_024)
             || !valid_managed_workspace(self.managed_workspace.as_ref())
             || !valid_runtime(self.runtime.as_ref())
+            || !valid_provider_options(&self.provider_options)
         {
             return Err(RegistryError::Unsafe("agent metadata is invalid"));
         }
@@ -232,6 +237,7 @@ impl RegistryAgent {
             worktree_path: self.worktree_path,
             managed_workspace: self.managed_workspace,
             runtime: self.runtime,
+            provider_options: self.provider_options,
             title: self.title,
             state: AgentState::Disconnected,
             active_turn_id: None,
@@ -269,6 +275,14 @@ fn valid_runtime(runtime: Option<&ProviderRuntime>) -> bool {
             && runtime.executable.as_ref().is_none_or(|path| {
                 !path.is_empty() && path.len() <= 8_192 && Path::new(path).is_absolute()
             })
+    })
+}
+
+fn valid_provider_options(options: &ProviderOptions) -> bool {
+    options.model.as_ref().is_none_or(|model| {
+        !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
+    }) && options.effort.as_ref().is_none_or(|effort| {
+        !effort.is_empty() && effort.len() <= 64 && !effort.chars().any(char::is_control)
     })
 }
 
@@ -322,7 +336,9 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::{RegistryError, RegistryStore};
-    use crate::protocol::{AgentState, AgentSummary, Provider, ProviderRuntime, WorkspaceStrategy};
+    use crate::protocol::{
+        AgentState, AgentSummary, Provider, ProviderOptions, ProviderRuntime, WorkspaceStrategy,
+    };
 
     #[test]
     fn registry_round_trip_contains_metadata_only() {
@@ -350,6 +366,7 @@ mod tests {
                     adapter_version: None,
                     executable: Some("/home/ai/.local/bin/codex".to_owned()),
                 }),
+                provider_options: ProviderOptions::default(),
                 title: "project".to_owned(),
                 state: AgentState::Running,
                 active_turn_id: Some("turn-secret-payload".to_owned()),

@@ -26,13 +26,21 @@ async fn proves_initialize_history_turn_event_and_approval_flow() {
     );
 
     let cwd = std::env::current_dir().expect("current directory");
-    let started = server.start_thread(&cwd).await.expect("start thread");
+    let started = server
+        .start_thread(&cwd, Some("gpt-test"))
+        .await
+        .expect("start thread");
     assert_eq!(thread_id(&started.result), Some("thread-1"));
     assert_eq!(started.events.len(), 1);
     assert_eq!(started.events[0].method, "thread/started");
 
     let turn = server
-        .start_turn("thread-1", "return a deterministic fixture")
+        .start_turn(
+            "thread-1",
+            "return a deterministic fixture",
+            Some("gpt-test-next"),
+            Some("high"),
+        )
         .await
         .expect("start turn");
     assert_eq!(turn.result["turn"]["id"], "turn-1");

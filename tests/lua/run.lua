@@ -236,6 +236,7 @@ local function workspace_view_navigation_test()
       title = "codex fixture",
       state = "idle",
       capabilities = {},
+      updated_at = "2026-09-01T00:02:00Z",
     },
     {
       id = "agent-claude",
@@ -246,6 +247,7 @@ local function workspace_view_navigation_test()
       title = "claude fixture",
       state = "idle",
       capabilities = {},
+      updated_at = 1788221040000,
     },
   })
   local start_context = nil
@@ -272,12 +274,14 @@ local function workspace_view_navigation_test()
       cwd = repository,
       title = "saved codex fixture",
       active = false,
+      updated_at = "2026-09-01T00:03:00Z",
     },
     {
       provider_session_id = "codex-home-view",
       cwd = "",
       title = "home codex fixture",
       active = false,
+      updated_at = "2026-09-01T00:01:00Z",
     },
   }, true)
   assert(view:open())
@@ -288,19 +292,49 @@ local function workspace_view_navigation_test()
   assert(buffer_contains(status.buffers.agents, "README.txt"), "unrelated home file")
   assert(not buffer_contains(status.buffers.agents, "(unknown)"), "blank session cwd uses home")
   assert(buffer_contains(status.buffers.agents, "● CODEX"), "Codex badge")
-  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "Claude badge")
-  assert(buffer_contains(status.buffers.agents, "● ACTIVE"), "active session badge")
   assert(buffer_contains(status.buffers.agents, "○ RESUME"), "saved session badge")
+  assert(not buffer_contains(status.buffers.agents, "◆ CLAUDE"), "nested sessions start collapsed")
+  assert(not buffer_contains(status.buffers.agents, "project.txt"), "directory files start collapsed")
+  local projects_row = assert(buffer_line_number(status.buffers.agents, "projects/"))
+  local notes_row = assert(buffer_line_number(status.buffers.agents, "notes/"))
+  assert(projects_row < notes_row, "directories containing sessions sort first")
   for index, pane in ipairs({ "agents", "conversation", "activity" }) do
     vim.api.nvim_feedkeys(tostring(index), "x", false)
     assert_equal(view:status().active_pane, pane, "numbered pane navigation")
   end
 
   assert(view:focus("agents"))
+  vim.api.nvim_win_set_cursor(0, { projects_row, 0 })
+  vim.api.nvim_feedkeys("l", "x", false)
+  assert(vim.wait(1000, function()
+    return buffer_contains(status.buffers.agents, "agent-manager/  [repo]")
+  end), "projects directory expansion")
   local repository_row = assert(
     buffer_line_number(status.buffers.agents, "agent-manager/  [repo]"),
     "registered repository row"
   )
+  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
+  vim.api.nvim_feedkeys("l", "x", false)
+  assert(vim.wait(1000, function()
+    return buffer_contains(status.buffers.agents, "◆ CLAUDE")
+  end), "repository session expansion")
+  assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "dedicated session group")
+  assert(buffer_contains(status.buffers.agents, "project.txt"), "expanded directory file")
+  local session_group_row = assert(buffer_line_number(status.buffers.agents, "Sessions (3)"))
+  vim.api.nvim_win_set_cursor(0, { session_group_row, 0 })
+  vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
+  assert(vim.wait(1000, function()
+    return not buffer_contains(status.buffers.agents, "saved codex fixture")
+  end), "session group collapse")
+  vim.api.nvim_win_set_cursor(0, { session_group_row, 0 })
+  vim.api.nvim_feedkeys("l", "x", false)
+  assert(vim.wait(1000, function()
+    return buffer_contains(status.buffers.agents, "saved codex fixture")
+  end), "session group expansion")
+  local claude_row = assert(buffer_line_number(status.buffers.agents, "· claude fixture"))
+  local saved_row = assert(buffer_line_number(status.buffers.agents, "saved codex fixture"))
+  local codex_row = assert(buffer_line_number(status.buffers.agents, "· codex fixture"))
+  assert(claude_row < saved_row and saved_row < codex_row, "sessions sort by latest activity")
   vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
   vim.api.nvim_feedkeys("sn", "x", false)
   assert_equal(start_context.repository, "agent-manager", "directory start repository")
@@ -308,7 +342,6 @@ local function workspace_view_navigation_test()
   vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
   vim.api.nvim_feedkeys("df", "x", false)
   assert_equal(diff_target.cwd, repository, "directory diff target")
-  local saved_row = assert(buffer_line_number(status.buffers.agents, "saved codex fixture"))
   vim.api.nvim_win_set_cursor(0, { saved_row, 0 })
   vim.api.nvim_feedkeys("ds", "x", false)
   assert_equal(
@@ -350,6 +383,7 @@ local function which_key_prefix_test()
     end
   end
   assert_equal(groups, {
+    a = "agent settings",
     d = "diff / delete",
     g = "go",
     s = "session",
@@ -359,7 +393,7 @@ local function which_key_prefix_test()
   for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buffer, "n")) do
     prefix_maps[mapping.lhs] = true
   end
-  for _, prefix in ipairs({ "d", "g", "s", "t" }) do
+  for _, prefix in ipairs({ "a", "d", "g", "s", "t" }) do
     assert(not prefix_maps[prefix], prefix .. " must be owned by which-key opts.triggers")
   end
 
@@ -599,20 +633,38 @@ local function integration_test()
     return #(manager.status().model.external_sessions or {}) == 4
   end)
   local external_status = manager.status()
+  local agents_buffer = external_status.view.buffers.agents
   assert_equal(manager.list(), {}, "external CLI sessions are not broker-owned agents")
-  assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "directory tree parent")
-  assert(buffer_contains(external_status.view.buffers.agents, "api"), "Codex session directory")
-  assert(buffer_contains(external_status.view.buffers.agents, "web"), "Claude session directory")
-  assert(buffer_contains(external_status.view.buffers.agents, "[cwd]"), "opening project directory hint")
-  assert(buffer_contains(external_status.view.buffers.agents, "workspace"), "tree root child")
-  assert(buffer_contains(external_status.view.buffers.agents, "repos"), "tree nested repo root")
-  assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "tree repository")
-  assert(buffer_contains(external_status.view.buffers.agents, "api/"), "tree sibling branch")
-  assert(buffer_contains(external_status.view.buffers.agents, "web/"), "tree final branch")
-  assert(buffer_contains(external_status.view.buffers.agents, "● ACTIVE"), "active external label")
-  assert(buffer_contains(external_status.view.buffers.agents, "○ RESUME"), "resumable external label")
+  assert(not buffer_contains(agents_buffer, "workspace/"), "outside directories start collapsed")
+  assert(manager.status().view.active_pane == "conversation")
+  vim.api.nvim_feedkeys("1", "x", false)
+  local function expand_tree(parent, child)
+    local row = assert(buffer_line_number(agents_buffer, parent), "missing tree row " .. parent)
+    vim.api.nvim_win_set_cursor(0, { row, 0 })
+    vim.api.nvim_feedkeys("l", "x", false)
+    local expanded = vim.wait(1000, function()
+      return buffer_contains(agents_buffer, child)
+    end, 10, false)
+    if not expanded then
+      error(
+        "missing tree child "
+          .. child
+          .. "\n"
+          .. table.concat(vim.api.nvim_buf_get_lines(agents_buffer, 0, -1, false), "\n")
+      )
+    end
+  end
+  expand_tree("▸ /  [missing]", "workspace/")
+  expand_tree("workspace/", "repos/")
+  expand_tree("agent-manager/  [missing]", "○ RESUME")
+  expand_tree("repos/", "alpha/")
+  expand_tree("alpha/", "api/")
+  expand_tree("api/", "Codex terminal session")
+  expand_tree("web/", "Claude terminal session")
+  assert(buffer_contains(agents_buffer, "● ACTIVE"), "active external label")
+  assert(buffer_contains(agents_buffer, "○ RESUME"), "resumable external label")
   assert(
-    buffer_contains(external_status.view.buffers.agents, "sn new · so open · df diff · ds delete"),
+    buffer_contains(agents_buffer, "sn new · so open · am model · ae effort"),
     "session action note"
   )
 
@@ -734,6 +786,7 @@ local function integration_test()
       and status.file_conflicts[agent_id][test_file]
   end)
   local completed = manager.status()
+  assert_equal(completed.model.agents[1].title, "interactive question", "shared prompt title")
   assert_equal(completed.model.usage[agent_id].input_tokens, 12, "usage input tokens")
   assert_equal(vim.api.nvim_buf_get_lines(source_buffer, 0, -1, false), {
     "dirty local edit",
@@ -874,47 +927,87 @@ local function managed_workspace_ui_test()
     callback(items[1])
     ui_active = false
   end
-  local input_prompt = nil
+  local input_prompts = {}
   vim.ui.input = function(opts, callback)
     assert_equal(ui_active, false, "start input nesting")
     ui_active = true
-    input_prompt = opts.prompt
-    callback("new-managed-task")
+    table.insert(input_prompts, opts.prompt)
+    if opts.prompt:find("model", 1, true) then
+      callback("gpt-fixture")
+    else
+      assert_equal(opts.prompt, "Prompt: ", "first prompt opens after model selection")
+      callback("build the managed feature")
+    end
     ui_active = false
   end
-  local status = manager.status()
-  assert(status.model.workspace_repositories[1], "workspace inventory model")
+  assert(manager.status().model.workspace_repositories[1], "workspace inventory model")
   assert(manager.status().view.active_pane == "conversation")
-  vim.api.nvim_feedkeys("1", "x", false)
-  local agents_buffer = status.view.buffers.agents
-  local repository_row = assert(buffer_line_number(agents_buffer, "agent-manager/  [repo]"))
-  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
-  vim.api.nvim_feedkeys("sn", "x", false)
+  manager.start_ui({
+    cwd = inventory.repositories[1].canonical_path,
+    repository = "agent-manager",
+  })
   await("managed agent startup", function()
     local agent = manager.list()[1]
-    return agent and agent.state == "idle"
+    return agent and agent.state == "completed"
   end)
   vim.ui.select = original_select
   vim.ui.input = original_input
 
   local agent = manager.list()[1]
   assert_equal(select_count, 1, "new session only asks for a provider")
-  assert(input_prompt:find("agent-manager", 1, true), "contextual task prompt")
-  assert(input_prompt:find("New Codex session", 1, true), "new-session prompt wording")
+  assert_equal(#input_prompts, 2, "model selection flows directly to the initial prompt")
+  assert(input_prompts[1]:find("New Codex session", 1, true), "model prompt wording")
+  assert(not input_prompts[1]:find("name", 1, true), "new sessions do not request a title")
   assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
-  assert_equal(agent.managed_workspace.task_id, "new-managed-task", "managed task ID")
+  assert(agent.managed_workspace.task_id:match("^session%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-%d%d%d%d%d%d$"), "generated managed task ID")
   assert_equal(agent.managed_workspace.base_branch, "bluff", "managed task base")
+  assert_equal(agent.provider_options.model, "gpt-fixture", "selected model reaches the broker")
   assert_equal(agent.runtime.provider_version, "0.153.0", "actual runtime version")
   local status = manager.status()
   assert(
-    buffer_contains(status.view.buffers.agents, "agent-manager/new-managed-task"),
+    buffer_contains(
+      status.view.buffers.agents,
+      "agent-manager/" .. agent.managed_workspace.task_id
+    ),
     "managed task presentation"
   )
   assert(
     buffer_contains(status.view.buffers.agents, "codex-app-server-stable-v1"),
     "runtime profile presentation"
   )
+  assert(
+    buffer_contains(
+      status.view.buffers.conversation,
+      agent.managed_workspace.task_id .. " · Codex — gpt-fixture / default"
+    ),
+    "conversation heading shows title, provider, model, and effort"
+  )
+
+  vim.ui.input = function(opts, callback)
+    assert(opts.prompt:find("Codex model", 1, true), "am model prompt")
+    callback("gpt-switched")
+  end
+  manager.model_ui()
+  vim.ui.select = function(items, _, callback)
+    for _, item in ipairs(items) do
+      if item == "high" then
+        callback(item)
+        return
+      end
+    end
+  end
+  manager.effort_ui()
+  assert(manager.prompt(agent.id, "apply the changed settings"))
+  await("changed model and effort", function()
+    local current = manager.list()[1]
+    return current
+      and current.provider_options.model == "gpt-switched"
+      and current.provider_options.effort == "high"
+  end)
+  assert(manager.interrupt(agent.id))
+  vim.ui.select = original_select
+  vim.ui.input = original_input
   manager.teardown()
   vim.wait(500, function()
     return false
@@ -942,25 +1035,29 @@ local function managed_start_uses_focused_layout_without_inventory_test()
   vim.ui.select = function(items, _, callback)
     callback(items[1])
   end
-  vim.ui.input = function(_, callback)
-    callback("direct-managed-task")
+  local remembered_model = nil
+  vim.ui.input = function(opts, callback)
+    if opts.prompt:find("model", 1, true) then
+      remembered_model = opts.default
+      callback(opts.default)
+    else
+      callback("inspect the focused layout")
+    end
   end
 
-  local status = manager.status()
-  vim.api.nvim_feedkeys("1", "x", false)
-  local directory_row = assert(buffer_line_number(status.view.buffers.agents, "[cwd]"))
-  vim.api.nvim_win_set_cursor(0, { directory_row, 0 })
-  vim.api.nvim_feedkeys("sn", "x", false)
+  manager.start_ui({ cwd = root })
   await("focused-layout managed startup", function()
     local agent = manager.list()[1]
-    return agent and agent.state == "idle"
+    return agent and agent.state == "completed"
   end)
 
   vim.ui.select = original_select
   vim.ui.input = original_input
   local agent = manager.list()[1]
+  assert_equal(remembered_model, "gpt-switched", "new session defaults to the last model")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "focused repository")
-  assert_equal(agent.managed_workspace.task_id, "direct-managed-task", "focused task")
+  assert(agent.managed_workspace.task_id:match("^session%-"), "focused task uses a generated ID")
+  assert_equal(agent.provider_options.effort, "high", "new session defaults to the last effort")
   manager.teardown()
   vim.wait(500, function()
     return false
@@ -1087,8 +1184,8 @@ local function run()
   public_input_validation_test()
   real_broker_handshake_test()
   durable_reconnect_test()
-  managed_start_uses_focused_layout_without_inventory_test()
   managed_workspace_ui_test()
+  managed_start_uses_focused_layout_without_inventory_test()
   managed_decision_render_test()
   integration_test()
   resume_test()

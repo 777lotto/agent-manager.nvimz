@@ -59,9 +59,13 @@ local function defaults()
     providers = {
       codex = {
         executable = discovered_executable("codex"),
+        model = nil,
+        effort = nil,
       },
       claude = {
         python = default_claude_python(root),
+        model = nil,
+        effort = nil,
       },
     },
     worktrees = {
@@ -174,6 +178,27 @@ function M.resolve(opts)
     return nil, {
       kind = "configuration",
       message = "providers.codex.executable must be an absolute path",
+    }
+  end
+  for _, provider in ipairs({ "codex", "claude" }) do
+    for _, key in ipairs({ "model", "effort" }) do
+      local value = config.providers[provider][key]
+      if value ~= nil and (type(value) ~= "string" or value == "") then
+        return nil, {
+          kind = "configuration",
+          message = "providers." .. provider .. "." .. key .. " must be a non-empty string",
+        }
+      end
+    end
+  end
+  local claude_effort = config.providers.claude.effort
+  if
+    claude_effort
+    and not vim.tbl_contains({ "low", "medium", "high", "xhigh", "max" }, claude_effort)
+  then
+    return nil, {
+      kind = "configuration",
+      message = "providers.claude.effort is not supported",
     }
   end
   local lifecycle = config.worktrees.lifecycle

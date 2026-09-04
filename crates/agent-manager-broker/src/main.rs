@@ -215,11 +215,11 @@ async fn trace_codex(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut server = CodexAppServer::spawn(&spec)?;
     let initialize = server.initialize().await?;
     codex_runtime_identity(&initialize, &spec)?;
-    let started = server.start_thread(&cwd).await?;
+    let started = server.start_thread(&cwd, None).await?;
     let thread_id = thread_id(&started.result)
         .ok_or_else(|| invalid_input("thread/start response omitted thread.id"))?
         .to_owned();
-    let turn = server.start_turn(&thread_id, prompt).await?;
+    let turn = server.start_turn(&thread_id, prompt, None, None).await?;
     let mut next_sequence = 1;
     for event in started.events.into_iter().chain(turn.events) {
         print_event(&event, &mut next_sequence)?;

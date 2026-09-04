@@ -19,6 +19,8 @@ class Session(Protocol):
 
     async def prompt(self, text: str) -> None: ...
 
+    async def set_model(self, model: str | None) -> None: ...
+
     async def steer(self, text: str) -> None: ...
 
     async def receive_turn(self, emit: EventCallback) -> None: ...
@@ -43,12 +45,14 @@ class Adapter(Protocol):
 
     async def delete_session(self, session_id: str, directory: str) -> None: ...
 
-    async def open_session(
+    async def open_session(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
         cwd: Path,
         resume: str | None,
         fork: bool,
+        model: str | None,
+        effort: str | None,
         callback: HumanCallback,
     ) -> Session: ...
