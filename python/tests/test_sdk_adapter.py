@@ -350,6 +350,13 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(forked.provider_session_id, "fork-session")
                 await forked.close()
 
+    async def test_delete_session_uses_pinned_sdk_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sdk_adapter, "delete_sdk_session") as delete:
+                await ClaudeSdkAdapter().delete_session("source-session", directory)
+
+            delete.assert_called_once_with("source-session", directory=directory)
+
 
 if __name__ == "__main__":
     unittest.main()

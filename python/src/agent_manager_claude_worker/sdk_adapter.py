@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     get_session_messages,
     list_sessions,
 )
+from claude_agent_sdk import delete_session as delete_sdk_session
 from claude_agent_sdk._cli_version import (  # pyright: ignore[reportPrivateUsage]
     __cli_version__,
 )
@@ -145,6 +146,12 @@ class ClaudeSdkAdapter:
             offset=offset,
         )
         return [encode_json_value(record) for record in records]
+
+    async def delete_session(self, session_id: str, directory: str) -> None:
+        try:
+            await asyncio.to_thread(delete_sdk_session, session_id, directory=directory)
+        except (FileNotFoundError, ValueError) as error:
+            raise ProtocolFault(-32041, "Claude session was not found") from error
 
     async def open_session(
         self,

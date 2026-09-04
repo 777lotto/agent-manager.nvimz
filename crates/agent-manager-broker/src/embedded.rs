@@ -27,7 +27,8 @@ use crate::protocol::{
 use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
 use crate::runtime::{
-    AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, discover_sessions, spawn_agent,
+    AgentCommand, RuntimeConfig, RuntimeEvent, SessionLaunch, delete_provider_session,
+    discover_sessions, spawn_agent,
 };
 use crate::status::StatusStore;
 use crate::worker::{
@@ -109,6 +110,13 @@ impl EmbeddedConfig {
         self.runtime.codex = codex;
         self.runtime.codex_thread_locks = None;
         self.runtime.claude = claude;
+        self
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_codex_thread_locks(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.runtime.codex_thread_locks = Some(directory.into());
         self
     }
 
@@ -564,7 +572,9 @@ impl Broker {
             )),
             "workspace/list" => self.list_workspaces(request_id).await,
             "workspace/handoff" => self.handoff_workspace(request_id, params).await,
+            "workspace/diff" => self.workspace_diff(request_id, params).await,
             "provider/session/list" => self.provider_sessions(request_id, params).await,
+            "provider/session/delete" => self.delete_session(request_id, params).await,
             "agent/start" => {
                 self.start_agent(request_id, params, SessionLaunch::Start)
                     .await;
@@ -678,6 +688,10 @@ impl Broker {
                     "shared_starts": self.config.allow_shared_workspaces,
                     "authority": "external_lifecycle",
                     "destructive_controls": false,
+                },
+                "provider_sessions": {
+                    "delete": true,
+                    "worktree_preserved": true,
                 },
             }),
         ));
@@ -794,6 +808,145 @@ impl Broker {
             Ok(result) => self.send(success_response(request_id, result)),
             Err(message) => self.send(error_response(Some(request_id), -32_020, message, None)),
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn delete_session(&mut self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ProviderSessionDeleteParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid provider session delete parameters",
+            ));
+            return;
+        };
+        if parsed.provider_session_id.is_empty() || parsed.provider_session_id.len() > 1_024 {
+            self.send(invalid_params(
+                request_id,
+                "invalid provider session identity",
+            ));
+            return;
+        }
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        let matching_agent_ids = self
+            .agent_order
+            .iter()
+            .filter(|agent_id| {
+                self.agents.get(*agent_id).is_some_and(|agent| {
+                    agent.summary.provider == parsed.provider
+                        && agent.summary.provider_session_id.as_deref()
+                            == Some(parsed.provider_session_id.as_str())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching_agent_ids.iter().any(|agent_id| {
+            self.agents.get(agent_id).is_some_and(|agent| {
+                matches!(
+                    agent.summary.state,
+                    AgentState::Starting
+                        | AgentState::Running
+                        | AgentState::WaitingInput
+                        | AgentState::WaitingApproval
+                ) || agent.summary.pending_approvals > 0
+                    || agent.pending_questions > 0
+            })
+        }) {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "An agent with active work or a pending human request cannot be deleted",
+                None,
+            ));
+            return;
+        }
+        let mut managed_workspaces = Vec::<ManagedWorkspace>::new();
+        for agent_id in &matching_agent_ids {
+            if let Some(workspace) = self
+                .agents
+                .get(agent_id)
+                .and_then(|agent| agent.summary.managed_workspace.clone())
+                && !managed_workspaces.iter().any(|candidate| {
+                    candidate.repository == workspace.repository
+                        && candidate.task_id == workspace.task_id
+                })
+            {
+                managed_workspaces.push(workspace);
+            }
+        }
+        let workspace_command = if managed_workspaces.is_empty() {
+            None
+        } else {
+            let Some(command) = self.config.workspace.clone() else {
+                self.send(error_response(
+                    Some(request_id),
+                    -32_030,
+                    "Managed workspace lifecycle is disabled",
+                    None,
+                ));
+                return;
+            };
+            Some(command)
+        };
+
+        for agent_id in &matching_agent_ids {
+            if self
+                .agents
+                .get(agent_id)
+                .is_some_and(|agent| agent.task.is_some())
+            {
+                self.retire_agent(agent_id).await;
+            }
+        }
+        if let Some(command) = workspace_command {
+            let lifecycle = WorkspaceLifecycle::new(command);
+            for workspace in &managed_workspaces {
+                if let Err(error) = lifecycle
+                    .handoff(&workspace.repository, &workspace.task_id)
+                    .await
+                {
+                    self.send(error_response(
+                        Some(request_id),
+                        -32_030,
+                        &error.to_string(),
+                        None,
+                    ));
+                    return;
+                }
+            }
+        }
+        if let Err(message) = delete_provider_session(
+            parsed.provider,
+            &parsed.provider_session_id,
+            &cwd,
+            &self.config.runtime,
+        )
+        .await
+        {
+            self.send(error_response(Some(request_id), -32_020, message, None));
+            return;
+        }
+        for agent_id in &matching_agent_ids {
+            self.agents.remove(agent_id);
+        }
+        self.agent_order
+            .retain(|agent_id| !matching_agent_ids.contains(agent_id));
+        self.send(success_response(
+            request_id,
+            json!({
+                "deleted": true,
+                "provider": parsed.provider,
+                "provider_session_id": parsed.provider_session_id,
+                "workspace_handed_off": !managed_workspaces.is_empty(),
+                "worktree_preserved": true,
+            }),
+        ));
+        self.notify_state();
     }
 
     async fn start_agent(&mut self, request_id: RequestId, params: Value, launch: SessionLaunch) {
@@ -1531,6 +1684,24 @@ impl Broker {
         ));
     }
 
+    async fn workspace_diff(&self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<WorkspaceDiffParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid workspace diff parameters",
+            ));
+            return;
+        };
+        let cwd = match canonical_directory(&parsed.cwd) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.send(invalid_params(request_id, message));
+                return;
+            }
+        };
+        self.diff_directory(request_id, &cwd).await;
+    }
+
     async fn diff(&self, request_id: RequestId, params: Value) {
         let Some(agent_id) = parse_agent_id(params) else {
             self.send(invalid_params(request_id, "invalid agent id parameters"));
@@ -1540,10 +1711,16 @@ impl Broker {
             self.send(agent_not_found(request_id));
             return;
         };
-        let cwd = agent.summary.cwd.clone();
+        self.diff_directory(request_id, Path::new(&agent.summary.cwd))
+            .await;
+    }
+
+    async fn diff_directory(&self, request_id: RequestId, cwd: &Path) {
         let mut command = tokio::process::Command::new("git");
         command
-            .args(["-C", &cwd, "diff", "--no-ext-diff", "--no-textconv", "--"])
+            .arg("-C")
+            .arg(cwd)
+            .args(["diff", "--no-ext-diff", "--no-textconv", "--"])
             .kill_on_drop(true);
         let output = tokio::time::timeout(DIFF_TIMEOUT, command.output()).await;
         let Ok(Ok(output)) = output else {
@@ -2011,6 +2188,20 @@ struct ProviderSessionListParams {
     limit: Option<u32>,
     #[serde(default)]
     active_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderSessionDeleteParams {
+    provider: Provider,
+    provider_session_id: String,
+    cwd: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceDiffParams {
+    cwd: String,
 }
 
 #[derive(Debug, Deserialize)]

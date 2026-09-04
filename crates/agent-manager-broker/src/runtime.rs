@@ -1,6 +1,7 @@
 //! Provider tasks owned by the embedded or durable broker.
 
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::future::pending;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -169,6 +170,11 @@ pub(crate) async fn discover_sessions(
     active_only: bool,
     config: &RuntimeConfig,
 ) -> Result<Value, &'static str> {
+    let fallback_cwd = cwd.map(Path::to_path_buf).or_else(|| {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    });
     match provider {
         Provider::Codex => {
             let mut server = CodexAppServer::spawn(&config.codex)
@@ -198,6 +204,7 @@ pub(crate) async fn discover_sessions(
                     &active,
                     activity_available,
                     active_only,
+                    fallback_cwd.as_deref(),
                 )
             })
         }
@@ -231,8 +238,84 @@ pub(crate) async fn discover_sessions(
                     &HashSet::new(),
                     activity_available,
                     active_only,
+                    fallback_cwd.as_deref(),
                 )
             })
+        }
+    }
+}
+
+pub(crate) async fn delete_provider_session(
+    provider: Provider,
+    provider_session_id: &str,
+    cwd: &Path,
+    config: &RuntimeConfig,
+) -> Result<(), &'static str> {
+    match provider {
+        Provider::Codex => {
+            let (active, activity_available) =
+                active_thread_ids(config.codex_thread_locks.as_deref());
+            if !activity_available {
+                return Err("Codex session activity could not be verified");
+            }
+            if active.contains(provider_session_id) {
+                return Err("An active Codex session cannot be deleted");
+            }
+            let mut server = CodexAppServer::spawn(&config.codex)
+                .map_err(|_| "Codex App Server could not be started")?;
+            if server
+                .initialize()
+                .await
+                .ok()
+                .and_then(|value| codex_runtime_identity(&value, &config.codex).ok())
+                .is_none()
+            {
+                let _ = server.shutdown().await;
+                return Err("Codex App Server initialization failed");
+            }
+            let listed = server.list_threads_for_directory(cwd, None, 1_000).await;
+            let found = listed.is_ok_and(|outcome| {
+                outcome.result["data"].as_array().is_some_and(|sessions| {
+                    sessions
+                        .iter()
+                        .any(|session| session["id"].as_str() == Some(provider_session_id))
+                })
+            });
+            if !found {
+                let _ = server.shutdown().await;
+                return Err("Codex session was not found in the requested directory");
+            }
+            let deleted = server.delete_thread(provider_session_id).await.is_ok();
+            let _ = server.shutdown().await;
+            if deleted {
+                Ok(())
+            } else {
+                Err("Codex session deletion failed")
+            }
+        }
+        Provider::Claude => {
+            let mut worker = ClaudeWorker::spawn(&config.claude)
+                .map_err(|_| "Claude worker could not be started")?;
+            if worker.initialize().await.is_err() {
+                let _ = worker.shutdown().await;
+                return Err("Claude worker initialization failed");
+            }
+            let deleted = worker
+                .request(
+                    "session/delete",
+                    json!({
+                        "session_id": provider_session_id,
+                        "directory": cwd,
+                    }),
+                )
+                .await
+                .is_ok();
+            let _ = worker.shutdown().await;
+            if deleted {
+                Ok(())
+            } else {
+                Err("Claude session deletion failed or the session is active")
+            }
         }
     }
 }

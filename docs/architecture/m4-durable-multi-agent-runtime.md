@@ -104,9 +104,10 @@ and path in its summary. It does not reproduce Git lifecycle logic.
 
 Shared-checkout starts are an explicit broker policy and are disabled by the
 production unit. The plugin exposes that opt-in as `worktrees.allow_shared` for
-embedded mode. Neither policy surface exposes reset, delete, force-clean, or
-garbage collection; cleanup consequences and proof remain wholly owned by the
-external lifecycle authority.
+embedded mode. Neither policy surface exposes reset, checkout deletion,
+force-clean, or garbage collection; cleanup consequences and proof remain
+wholly owned by the external lifecycle authority. Provider-history deletion is
+a separate, exact-session operation and always preserves Git state.
 
 Embedded stdio mode deliberately retains its one-live-agent limit and shutdown
 ownership. `broker/shutdown` is rejected in durable mode because only the

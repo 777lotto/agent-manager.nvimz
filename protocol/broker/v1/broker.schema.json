@@ -256,6 +256,14 @@
         "task_id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 128 }
       }
     },
+    "workspaceDiffParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cwd"],
+      "properties": {
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
     "providerSessionListParams": {
       "type": "object",
       "additionalProperties": false,
@@ -266,6 +274,16 @@
         "cursor": { "type": ["string", "null"], "maxLength": 4096 },
         "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 1000 },
         "active_only": { "type": "boolean", "default": false }
+      }
+    },
+    "providerSessionDeleteParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "provider_session_id", "cwd"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "provider_session_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 }
       }
     },
     "historyParams": {
@@ -421,7 +439,9 @@
             "agent/list",
             "workspace/list",
             "workspace/handoff",
+            "workspace/diff",
             "provider/session/list",
+            "provider/session/delete",
             "agent/start",
             "agent/attach",
             "agent/history",
@@ -445,7 +465,9 @@
         { "if": { "properties": { "method": { "const": "initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
         { "if": { "properties": { "method": { "enum": ["agent/list", "workspace/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
         { "if": { "properties": { "method": { "const": "workspace/handoff" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/managedWorkspaceParams" } } } },
+        { "if": { "properties": { "method": { "const": "workspace/diff" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/workspaceDiffParams" } } } },
         { "if": { "properties": { "method": { "const": "provider/session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionListParams" } } } },
+        { "if": { "properties": { "method": { "const": "provider/session/delete" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionDeleteParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
         { "if": { "properties": { "method": { "enum": ["agent/attach", "agent/interrupt", "agent/fork", "agent/archive", "agent/diff"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/agentIdParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/history" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/historyParams" } } } },

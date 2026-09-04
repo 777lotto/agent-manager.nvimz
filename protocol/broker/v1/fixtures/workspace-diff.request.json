@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "workspace/diff",
+  "params": {
+    "cwd": "/workspace/agent-manager"
+  }
+}

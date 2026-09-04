@@ -366,6 +366,10 @@ async fn prove_embedded_flow(provider: Provider) {
         .as_str()
         .expect("agent id")
         .to_owned();
+    let provider_session_id = started["result"]["agent"]["provider_session_id"]
+        .as_str()
+        .expect("provider session id")
+        .to_owned();
     assert_eq!(started["result"]["agent"]["provider"], json!(provider));
     let runtime = &started["result"]["agent"]["runtime"];
     match provider {
@@ -507,6 +511,19 @@ async fn prove_embedded_flow(provider: Provider) {
     assert_eq!(harness.response(5).await["result"]["accepted"], true);
     harness.event("turn.started").await;
 
+    harness
+        .send(request(
+            29,
+            "provider/session/delete",
+            json!({
+                "provider": provider,
+                "provider_session_id": provider_session_id,
+                "cwd": cwd,
+            }),
+        ))
+        .await;
+    assert_eq!(harness.response(29).await["error"]["code"], -32_013);
+
     send_input(&mut harness, 6, "agent/steer", &agent_id, "steering input").await;
     assert_eq!(harness.response(6).await["result"]["accepted"], true);
     harness.event("message.delta").await;
@@ -559,6 +576,16 @@ async fn prove_embedded_flow(provider: Provider) {
         .await;
     let diff = harness.response(25).await;
     assert!(diff["result"]["diff"].is_string());
+
+    harness
+        .send(request(28, "workspace/diff", json!({ "cwd": cwd })))
+        .await;
+    let workspace_diff = harness.response(28).await;
+    assert_eq!(
+        workspace_diff["result"]["cwd"],
+        cwd.to_string_lossy().as_ref()
+    );
+    assert!(workspace_diff["result"]["diff"].is_string());
 
     harness
         .send(request(26, "agent/fork", json!({ "agent_id": agent_id })))
@@ -807,7 +834,7 @@ async fn provider_discovery_lists_active_cli_sessions_without_a_cwd_filter() {
     .expect("global active session discovery timed out");
 }
 
-async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
+async fn prove_provider_session_delete(provider: Provider, lock_directory: &std::path::Path) {
     let codex = fixture_command("fake_m1_codex_app_server.py");
     let claude = fixture_command("fake_m1_claude_worker.py");
     let config = EmbeddedConfig::default()
@@ -821,6 +848,89 @@ async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
                 args: vec![claude.to_string_lossy().into_owned()],
             },
         )
+        .with_codex_thread_locks(lock_directory);
+    let mut harness = Harness::start_with_config(config);
+    harness
+        .send(request(
+            1,
+            "initialize",
+            json!({
+                "protocol_version": 1,
+                "client": { "name": "session-delete-test", "version": "0.1.0" }
+            }),
+        ))
+        .await;
+    let initialized = harness.response(1).await;
+    assert_eq!(initialized["result"]["provider_sessions"]["delete"], true);
+    harness
+        .send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+    harness
+        .wait_for(|message| message["method"] == "broker/state")
+        .await;
+
+    let provider_session_id = match provider {
+        Provider::Codex => "thread-resumable",
+        Provider::Claude => "session-resumable",
+    };
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .expect("canonical manifest directory");
+    harness
+        .send(request(
+            2,
+            "provider/session/delete",
+            json!({
+                "provider": provider,
+                "provider_session_id": provider_session_id,
+                "cwd": cwd,
+            }),
+        ))
+        .await;
+    let deleted = harness.response(2).await;
+    assert_eq!(deleted["result"]["deleted"], true);
+    assert_eq!(
+        deleted["result"]["provider_session_id"],
+        provider_session_id
+    );
+    assert_eq!(deleted["result"]["worktree_preserved"], true);
+    harness.shutdown(3).await;
+}
+
+#[tokio::test]
+async fn provider_session_delete_uses_provider_mutation_and_preserves_files() {
+    completes_within(async {
+        let root = std::env::temp_dir().join(format!(
+            "agent-manager-provider-delete-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let lock_directory = root.join("thread-writer-locks");
+        fs::create_dir_all(&lock_directory).expect("create empty Codex lock directory");
+        prove_provider_session_delete(Provider::Codex, &lock_directory).await;
+        prove_provider_session_delete(Provider::Claude, &lock_directory).await;
+        fs::remove_dir_all(root).expect("remove provider delete fixture");
+    })
+    .await
+    .expect("provider session delete flow timed out");
+}
+
+async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
+    let codex = fixture_command("fake_m1_codex_app_server.py");
+    let claude = fixture_command("fake_m1_claude_worker.py");
+    let lock_directory = fixture.root.join("thread-writer-locks");
+    fs::create_dir_all(&lock_directory).expect("create Codex lock directory");
+    let config = EmbeddedConfig::default()
+        .with_provider_commands(
+            CommandSpec {
+                program: "python".to_owned(),
+                args: vec![codex.to_string_lossy().into_owned()],
+            },
+            WorkerCommandSpec {
+                program: "python".to_owned(),
+                args: vec![claude.to_string_lossy().into_owned()],
+            },
+        )
+        .with_codex_thread_locks(lock_directory)
         .with_workspace_lifecycle(fixture.lifecycle.to_string_lossy())
         .with_shared_workspaces(false);
     let mut harness = Harness::start_with_config(config);
@@ -844,6 +954,56 @@ async fn start_managed_harness(fixture: &ManagedWorkspaceFixture) -> Harness {
         .wait_for(|message| message["method"] == "broker/state")
         .await;
     harness
+}
+
+#[tokio::test]
+async fn deleting_an_owned_session_hands_off_but_preserves_its_worktree() {
+    completes_within(async {
+        let fixture = ManagedWorkspaceFixture::new();
+        let mut harness = start_managed_harness(&fixture).await;
+        harness
+            .send(request(
+                2,
+                "agent/start",
+                json!({
+                    "provider": "codex",
+                    "managed_workspace": {
+                        "repository": "agent-manager",
+                        "task_id": "managed-task",
+                        "resume": true
+                    }
+                }),
+            ))
+            .await;
+        let started = harness.response(2).await;
+        assert_eq!(started["result"]["agent"]["state"], "idle");
+        harness.state("idle").await;
+
+        harness
+            .send(request(
+                3,
+                "provider/session/delete",
+                json!({
+                    "provider": "codex",
+                    "provider_session_id": "thread-m1",
+                    "cwd": fixture.worktree,
+                }),
+            ))
+            .await;
+        let deleted = harness.response(3).await;
+        assert_eq!(deleted["result"]["deleted"], true);
+        assert_eq!(deleted["result"]["workspace_handed_off"], true);
+        assert_eq!(deleted["result"]["worktree_preserved"], true);
+        assert!(fixture.worktree.join("README.md").is_file());
+
+        harness.send(request(4, "agent/list", json!({}))).await;
+        assert_eq!(harness.response(4).await["result"]["agents"], json!([]));
+        let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
+        assert!(lifecycle_calls.contains("handoff agent-manager managed-task --owner-pid"));
+        harness.shutdown(5).await;
+    })
+    .await
+    .expect("managed provider session delete flow timed out");
 }
 
 #[tokio::test]

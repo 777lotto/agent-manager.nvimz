@@ -100,6 +100,11 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 :AgentManagerArchive       Confirm and remove an inactive agent from the broker
                            registry without deleting provider history.
 
+                                                   *:AgentManagerDelete*
+:AgentManagerDelete        Confirm and permanently delete the selected provider
+                           session history while preserving its worktree and
+                           project files.
+
                                                    *:AgentManagerContext*
 :AgentManagerContext       Queue an explicit buffer, range, diagnostic, or diff
                            snapshot for the selected agent's next input.
@@ -122,43 +127,45 @@ headings are numbered: 1 focuses Agents, 2 focuses Conversation, and 3 focuses
 Activity. Wide displays show all three. Medium and narrow displays may also use
 <Tab> and <S-Tab> to cycle panes.
 
-The Agents pane is a working-directory tree containing registered repositories,
-broker-owned agents, and active sessions started by the standalone Codex or
-Claude CLI. The project where Agent Manager was opened carries a `[cwd]` marker;
-known registered or managed repository directories carry `[repo]`. Place the
-cursor on a directory and press `n` to use it as the start-flow hint; if it
+The Agents pane is a lazy filesystem tree rooted at the full home directory
+(for example, `/home/ai/`). Files and directories appear independently of
+session state. Registered repositories, broker-owned agents, and active or
+saved standalone Codex/Claude sessions are overlaid beneath their directories.
+The project where Agent Manager was opened carries a `[cwd]` marker; known
+registered or managed repository directories carry `[repo]`. Place the cursor
+on a directory and press `sn` to use it as the start-flow hint; if it
 cannot be matched to one registered repository, the flow asks which repository
 to use. Choose a provider and workspace action, enter the stable task ID, wait
-for the ready notice, then press `2` and `p` to send the first prompt.
+for the ready notice, then press `2` and `tp` to send the first prompt.
 
 Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
 badge. The different shapes and labels preserve provider identity under themes
 that alter colors. External rows are labeled "cli-running" and remain read-only
 while the originating terminal owns them. The tree is refreshed when the
-workspace opens and with `r`. Set `ui.external_sessions` to false to hide
+workspace opens and with `gr`. Set `ui.external_sessions` to false to hide
 external CLI sessions; `ui.external_session_limit` caps each provider query
 from 1 to 1000.
 
     1 / 2 / 3 focus Agents / Conversation / Activity
-    n       start an agent
-    h       attach to or resume a session
-    p       prompt the selected agent
-    s       steer an active turn
-    x       confirm an interrupt
-    a / d   allow or deny only the focused human request
-    <CR>    answer a focused question or select an agent
-    c       queue explicit editor context
-    f       fork the selected provider session
-    A       archive the selected inactive agent
-    D       show a workspace diff or dirty-buffer conflict
-    r       refresh agents and external CLI sessions
+    sn / so start a session / open or continue one
+    sf / sa fork / archive a session
+    tp / ts prompt / steer the selected agent
+    ti / tc confirm interrupt / queue explicit editor context
+    df / ds show a focused diff / delete focused provider history
+    ga/gc/gt focus Agents / Conversation / Activity
+    gr      refresh the filesystem and provider sessions
+    y / n   yes/allow or no/deny only the focused human request
+    <CR>    toggle a directory, open a file/session, or answer a question
+    h / l   collapse / expand a directory
     <Tab>   cycle panes
-    ?       show mapping help
+    ? / g?  show mapping help
     q       close the workspace view
 
-Mappings are buffer-local. Closing the view does not approve, interrupt, or
-delete provider state. A provider approval or question opens a dedicated
-decision buffer that normal streaming redraws do not replace.
+Mappings are buffer-local. If which-key.nvim is available, `d`, `g`, `s`, and
+`t` open buffer-local groups without `<leader>`; Agent Manager does not change
+which-key setup or the user's global/leader mappings. Closing the view does not
+approve, interrupt, or delete provider state. A provider approval or question
+opens a dedicated decision buffer that normal streaming redraws do not replace.
 
 ==============================================================================
 5. Safety                                            *agent-manager-safety*
@@ -182,8 +189,12 @@ branch, lease, and linked worktree; it never duplicates that Git logic.
 Shared-checkout starts are disabled by default. An administrator may set
 `worktrees.allow_shared = true`; the embedded broker enforces the resulting
 policy, while durable service policy is configured on the supervised broker.
-Agent Manager exposes no reset, delete, force-clean, or garbage-collection
-control. A fork keeps its source as a disconnected summary so writer ownership
+Agent Manager exposes no worktree reset, checkout deletion, force-clean, or
+garbage-collection control. `ds` and |:AgentManagerDelete| are limited to the
+provider's saved session history. They require confirmation, refuse active
+sessions and pending human requests, retire an idle manager-owned runtime, hand
+off its managed lease, and always preserve the worktree, branch, and project
+files. A fork keeps its source as a disconnected summary so writer ownership
 remains explicit.
 
 Codex and Claude sessions record the actual runtime versions returned by their

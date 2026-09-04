@@ -93,34 +93,17 @@ local function sorted_keys(values)
   return keys
 end
 
-local function directory_parts(path, home)
-  local normalized = tostring(path or ""):gsub("\\", "/")
-  normalized = normalized ~= "/" and normalized:gsub("/+$", "") or normalized
-  local normalized_home = tostring(home or ""):gsub("\\", "/"):gsub("/+$", "")
-  local root = "/"
-  local remainder = normalized:gsub("^/+", "")
-  if normalized_home ~= "" and (normalized == normalized_home or normalized:sub(1, #normalized_home + 1) == normalized_home .. "/") then
-    root = "~"
-    remainder = normalized:sub(#normalized_home + 1):gsub("^/+", "")
-  else
-    local drive, rest = normalized:match("^([A-Za-z]:)/?(.*)$")
-    if drive then
-      root = drive
-      remainder = rest
-    elseif normalized:sub(1, 1) ~= "/" then
-      root = "(unknown)"
-      remainder = normalized
-    end
+local function normalized_path(path)
+  path = tostring(path or ""):gsub("\\", "/")
+  if path == "/" or path:match("^[A-Za-z]:/$") then
+    return path
   end
-  local parts = {}
-  for part in remainder:gmatch("[^/]+") do
-    table.insert(parts, part)
-  end
-  local root_path = root
-  if root == "~" then
-    root_path = normalized_home
-  end
-  return root, root_path, parts
+  path = path:gsub("/+$", "")
+  return path ~= "" and path or "/"
+end
+
+local function absolute_path(path)
+  return path:sub(1, 1) == "/" or path:match("^[A-Za-z]:/") ~= nil
 end
 
 local function join_path(parent, child)
@@ -128,6 +111,65 @@ local function join_path(parent, child)
     return "/" .. child
   end
   return tostring(parent):gsub("/+$", "") .. "/" .. child
+end
+
+local function session_path(path, home)
+  local normalized_home = normalized_path(home)
+  local normalized = tostring(path or ""):gsub("\\", "/")
+  if normalized == "" or normalized == "." or normalized == "~" then
+    return normalized_home
+  end
+  if normalized:sub(1, 2) == "~/" then
+    return normalized_path(join_path(normalized_home, normalized:sub(3)))
+  end
+  if not absolute_path(normalized) then
+    return normalized_path(join_path(normalized_home, normalized))
+  end
+  return normalized_path(normalized)
+end
+
+local function path_within(path, root)
+  path = normalized_path(path)
+  root = normalized_path(root)
+  return root == "/" or path == root or path:sub(1, #root + 1) == root .. "/"
+end
+
+local function relative_parts(path, root)
+  if not path_within(path, root) then
+    return nil
+  end
+  local remainder = normalized_path(path):sub(#normalized_path(root) + 1):gsub("^/+", "")
+  local parts = {}
+  for part in remainder:gmatch("[^/]+") do
+    table.insert(parts, part)
+  end
+  return parts
+end
+
+local function directory_parts(path, home)
+  local normalized = session_path(path, home)
+  local normalized_home = normalized_path(home)
+  local root = "/"
+  local remainder = normalized:gsub("^/+", "")
+  if normalized_home ~= "" and (normalized == normalized_home or normalized:sub(1, #normalized_home + 1) == normalized_home .. "/") then
+    root = normalized_home .. (normalized_home == "/" and "" or "/")
+    remainder = normalized:sub(#normalized_home + 1):gsub("^/+", "")
+  else
+    local drive, rest = normalized:match("^([A-Za-z]:)/?(.*)$")
+    if drive then
+      root = drive
+      remainder = rest
+    end
+  end
+  local parts = {}
+  for part in remainder:gmatch("[^/]+") do
+    table.insert(parts, part)
+  end
+  local root_path = root
+  if root == normalized_home .. (normalized_home == "/" and "" or "/") then
+    root_path = normalized_home
+  end
+  return root, root_path, parts
 end
 
 local function tree_node(roots, path, home)
@@ -147,32 +189,57 @@ local function tree_node(roots, path, home)
   return node
 end
 
+local function overlay_node(path)
+  return { path = path, directories = {}, sessions = {} }
+end
+
+local function overlay_path(root, path, home)
+  local normalized = session_path(path, home)
+  local parts = relative_parts(normalized, home)
+  if not parts then
+    return nil, normalized
+  end
+  local node = root
+  for _, part in ipairs(parts) do
+    node.directories[part] = node.directories[part] or overlay_node(join_path(node.path, part))
+    node = node.directories[part]
+  end
+  return node, normalized
+end
+
 local function session_tree(sessions, repositories, directory_hints, home)
-  local roots = {}
+  local root = overlay_node(home)
+  local outside = {}
   for _, session in ipairs(sessions) do
-    local node = tree_node(roots, session.cwd, home)
+    local node, path = overlay_path(root, session.cwd, home)
+    if not node then
+      node = tree_node(outside, path, home)
+    end
     table.insert(node.sessions, session)
     if session.managed_workspace and session.managed_workspace ~= vim.NIL then
       node.repository = session.managed_workspace.repository
     end
   end
   for _, repository in ipairs(repositories or {}) do
-    local node = tree_node(roots, repository.canonical_path, home)
+    local node, path = overlay_path(root, repository.canonical_path, home)
+    if not node then
+      node = tree_node(outside, path, home)
+    end
     node.repository = repository.slug
   end
   for path in pairs(directory_hints or {}) do
-    local node = tree_node(roots, path, home)
+    local node, normalized = overlay_path(root, path, home)
+    if not node then
+      node = tree_node(outside, normalized, home)
+    end
     node.directory_hint = true
   end
-  return roots
+  return root, outside
 end
 
-local function ordered_node_items(node)
-  local items = {}
-  for _, name in ipairs(sorted_keys(node.directories)) do
-    table.insert(items, { kind = "directory", name = name, node = node.directories[name] })
-  end
-  table.sort(node.sessions, function(left, right)
+local function sorted_sessions(node)
+  local sessions = vim.deepcopy(node.sessions or {})
+  table.sort(sessions, function(left, right)
     if left.provider ~= right.provider then
       return tostring(left.provider) < tostring(right.provider)
     end
@@ -181,10 +248,28 @@ local function ordered_node_items(node)
     end
     return tostring(left.key) < tostring(right.key)
   end)
-  for _, session in ipairs(node.sessions) do
+  return sessions
+end
+
+local function ordered_virtual_items(node)
+  local items = {}
+  for _, name in ipairs(sorted_keys(node.directories)) do
+    table.insert(items, { kind = "directory", name = name, node = node.directories[name] })
+  end
+  for _, session in ipairs(sorted_sessions(node)) do
     table.insert(items, { kind = "session", session = session })
   end
   return items
+end
+
+local function home_directory(path)
+  local candidate = path
+  if type(candidate) ~= "string" or candidate == "" then
+    candidate = vim.uv.os_homedir() or vim.env.HOME or vim.uv.cwd()
+  end
+  candidate = normalized_path(candidate)
+  local resolved = vim.uv.fs_realpath(candidate)
+  return normalized_path(resolved or candidate)
 end
 
 local function set_window_options(window, wrap, pane)
@@ -212,10 +297,13 @@ function View.layout_for(columns)
 end
 
 function View.new(model, actions, opts)
+  opts = opts or {}
+  local home = home_directory(opts.home)
   local self = setmetatable({
     model = model,
     actions = actions or {},
-    opts = opts or {},
+    opts = opts,
+    home = home,
     buffers = {},
     windows = {},
     tab = nil,
@@ -225,7 +313,13 @@ function View.new(model, actions, opts)
     agent_rows = {},
     session_rows = {},
     directory_rows = {},
+    directory_path_rows = {},
+    file_rows = {},
     directory_hints = {},
+    expanded_directories = { [home] = true },
+    directory_cache = {},
+    revealed_sessions = {},
+    revealed_paths = {},
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
     render_pending = false,
     last_action_id = nil,
@@ -238,9 +332,75 @@ function View:add_directory_hint(path)
   if type(path) ~= "string" or path == "" then
     return false
   end
-  self.directory_hints[vim.fs.normalize(path)] = true
+  path = session_path(path, self.home)
+  self.directory_hints[path] = true
+  self:_reveal_path(path, false, self.revealed_paths)
   self:schedule_render()
   return true
+end
+
+function View:_reveal_path(path, include_target, seen, identity)
+  path = session_path(path, self.home)
+  identity = identity or path
+  if seen and seen[identity] then
+    return false
+  end
+  if seen then
+    seen[identity] = true
+  end
+  local parts = relative_parts(path, self.home)
+  if not parts then
+    return false
+  end
+  local current = self.home
+  self.expanded_directories[current] = true
+  for index, part in ipairs(parts) do
+    current = join_path(current, part)
+    if include_target or index < #parts then
+      self.expanded_directories[current] = true
+    end
+  end
+  return true
+end
+
+function View:_directory_listing(path)
+  local cached = self.directory_cache[path]
+  if cached then
+    return cached.entries, cached.error
+  end
+  local entries = {}
+  local ok, err = pcall(function()
+    for name, entry_type in vim.fs.dir(path) do
+      if name ~= "." and name ~= ".." then
+        table.insert(entries, {
+          name = name,
+          path = join_path(path, name),
+          type = entry_type or "file",
+        })
+      end
+    end
+  end)
+  table.sort(entries, function(left, right)
+    local left_directory = left.type == "directory"
+    local right_directory = right.type == "directory"
+    if left_directory ~= right_directory then
+      return left_directory
+    end
+    local left_name = left.name:lower()
+    local right_name = right.name:lower()
+    return left_name == right_name and left.name < right.name or left_name < right_name
+  end)
+  cached = {
+    entries = entries,
+    error = ok and nil or tostring(err),
+  }
+  self.directory_cache[path] = cached
+  return cached.entries, cached.error
+end
+
+function View:refresh_filesystem()
+  self.directory_cache = {}
+  self:schedule_render()
 end
 
 function View:_create_autocmds()
@@ -293,6 +453,9 @@ function View:_map_buffer(buffer)
   local map_opts = function(description)
     return { buffer = buffer, silent = true, nowait = true, desc = description }
   end
+  local map = function(keys, callback, description)
+    vim.keymap.set("n", keys, callback, map_opts("Agent Manager: " .. description))
+  end
   vim.keymap.set("n", "<Tab>", function()
     self:cycle(1)
   end, map_opts("Agent Manager: next pane"))
@@ -311,74 +474,127 @@ function View:_map_buffer(buffer)
   vim.keymap.set("n", "<CR>", function()
     self:_activate_row()
   end, map_opts("Agent Manager: select item"))
-  vim.keymap.set("n", "a", function()
+  map("y", function()
     local action = self:_focused_decision()
     if action and action.kind == "approval" and action_has_choice(action, "allow") and self.actions.allow then
       self.actions.allow(action)
     end
-  end, map_opts("Agent Manager: allow focused approval"))
-  vim.keymap.set("n", "d", function()
+  end, "yes / allow focused approval")
+  map("n", function()
     local action = self:_focused_decision()
     if action and action_has_choice(action, "deny") and self.actions.deny then
       self.actions.deny(action)
     end
-  end, map_opts("Agent Manager: deny focused request"))
-  vim.keymap.set("n", "n", function()
+  end, "no / deny focused request")
+
+  map("sn", function()
     if self.actions.start then
       self.actions.start(self:_start_context())
     end
-  end, map_opts("Agent Manager: start agent"))
-  vim.keymap.set("n", "p", function()
+  end, "start new session")
+  map("so", function()
+    local session = self:_focused_session()
+    if session and self.actions.attach then
+      self.actions.attach(session)
+    end
+  end, "open or continue session")
+  map("sf", function()
+    local session = self:_focused_session()
+    if session and self.actions.fork then
+      self.actions.fork(session)
+    end
+  end, "fork session")
+  map("sa", function()
+    local session = self:_focused_session()
+    if session and self.actions.archive then
+      self.actions.archive(session)
+    end
+  end, "archive session")
+
+  map("tp", function()
     if self.actions.prompt then
       self.actions.prompt()
     end
-  end, map_opts("Agent Manager: prompt"))
-  vim.keymap.set("n", "s", function()
+  end, "prompt selected agent")
+  map("ts", function()
     if self.actions.steer then
       self.actions.steer()
     end
-  end, map_opts("Agent Manager: steer"))
-  vim.keymap.set("n", "x", function()
+  end, "steer active turn")
+  map("ti", function()
     if self.actions.interrupt then
       self.actions.interrupt()
     end
-  end, map_opts("Agent Manager: interrupt"))
-  vim.keymap.set("n", "h", function()
-    if self.actions.attach then
-      self.actions.attach(self:_focused_session())
-    end
-  end, map_opts("Agent Manager: open or continue session"))
-  vim.keymap.set("n", "f", function()
-    if self.actions.fork then
-      self.actions.fork()
-    end
-  end, map_opts("Agent Manager: fork selected session"))
-  vim.keymap.set("n", "A", function()
-    if self.actions.archive then
-      self.actions.archive()
-    end
-  end, map_opts("Agent Manager: archive selected agent"))
-  vim.keymap.set("n", "c", function()
+  end, "interrupt active turn")
+  map("tc", function()
     if self.actions.context then
       self.actions.context()
     end
-  end, map_opts("Agent Manager: add editor context"))
-  vim.keymap.set("n", "D", function()
+  end, "add editor context")
+
+  map("df", function()
     if self.actions.diff then
-      self.actions.diff()
+      self.actions.diff(self:_focused_target())
     end
-  end, map_opts("Agent Manager: show diff or file conflict"))
-  vim.keymap.set("n", "r", function()
+  end, "show file diff")
+  map("ds", function()
+    local session = self:_focused_session()
+    if session and self.actions.delete_session then
+      self.actions.delete_session(session)
+    end
+  end, "delete session")
+
+  map("ga", function()
+    self:focus("agents")
+  end, "go to agents")
+  map("gc", function()
+    self:focus("conversation")
+  end, "go to conversation")
+  map("gt", function()
+    self:focus("activity")
+  end, "go to activity")
+  map("gr", function()
+    self:refresh_filesystem()
     if self.actions.refresh then
       self.actions.refresh()
     end
-  end, map_opts("Agent Manager: refresh"))
-  vim.keymap.set("n", "?", function()
+  end, "refresh tree and sessions")
+  map("g?", function()
     self:show_help()
-  end, map_opts("Agent Manager: help"))
-  vim.keymap.set("n", "g?", function()
+  end, "show help")
+
+  map("h", function()
+    self:_collapse_row()
+  end, "collapse directory")
+  map("l", function()
+    self:_expand_row()
+  end, "expand or open item")
+  map("?", function()
     self:show_help()
-  end, map_opts("Agent Manager: help"))
+  end, "show help")
+
+  local ok, which_key = pcall(require, "which-key")
+  if ok and type(which_key.add) == "function" then
+    which_key.add({
+      { "d", group = "diff / delete", buffer = buffer },
+      { "g", group = "go", buffer = buffer },
+      { "s", group = "session", buffer = buffer },
+      { "t", group = "turn", buffer = buffer },
+    })
+    if type(which_key.show) == "function" then
+      for _, prefix in ipairs({ "d", "g", "s", "t" }) do
+        local keys = prefix
+        map(keys, function()
+          which_key.show({
+            keys = keys,
+            mode = "n",
+            buf = buffer,
+            global = false,
+          })
+        end, keys .. " menu")
+      end
+    end
+  end
 end
 
 function View:open()
@@ -518,6 +734,88 @@ function View:_focused_session()
   return vim.deepcopy(self.session_rows[row])
 end
 
+function View:_focused_target()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.agents then
+    return nil
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local target = self.session_rows[row] or self.directory_rows[row]
+  if not target and self.file_rows[row] then
+    target = { cwd = vim.fs.dirname(self.file_rows[row].path) }
+  end
+  return vim.deepcopy(target)
+end
+
+function View:_toggle_directory(directory, expanded)
+  if not directory or type(directory.cwd) ~= "string" then
+    return false
+  end
+  if expanded == nil then
+    expanded = not self.expanded_directories[directory.cwd]
+  end
+  self.expanded_directories[directory.cwd] = expanded or nil
+  self:schedule_render()
+  return true
+end
+
+function View:_expand_row()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.agents then
+    return false
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local directory = self.directory_rows[row]
+  if directory then
+    return self:_toggle_directory(directory, true)
+  end
+  return self:_activate_row()
+end
+
+function View:_collapse_row()
+  if vim.api.nvim_get_current_buf() ~= self.buffers.agents then
+    return false
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local directory = self.directory_rows[row]
+  if directory and self.expanded_directories[directory.cwd] then
+    return self:_toggle_directory(directory, false)
+  end
+  local target_path = directory and directory.cwd
+  if not target_path then
+    local session = self.session_rows[row]
+    local file = self.file_rows[row]
+    target_path = session and session.cwd or file and vim.fs.dirname(file.path)
+  end
+  if not target_path then
+    return false
+  end
+  local parent = normalized_path(vim.fs.dirname(target_path))
+  while parent and path_within(parent, self.home) do
+    local parent_row = self.directory_path_rows[parent]
+    if parent_row then
+      vim.api.nvim_win_set_cursor(0, { parent_row, 0 })
+      return true
+    end
+    if parent == self.home or parent == "/" then
+      break
+    end
+    parent = normalized_path(vim.fs.dirname(parent))
+  end
+  return false
+end
+
+function View:_open_file(file)
+  if not file or type(file.path) ~= "string" then
+    return false
+  end
+  local window = self.windows.conversation
+  if not valid_window(window) then
+    return false
+  end
+  vim.api.nvim_set_current_win(window)
+  vim.cmd("edit " .. vim.fn.fnameescape(file.path))
+  return true
+end
+
 function View:_activate_row()
   local buffer = vim.api.nvim_get_current_buf()
   if buffer == self.buffers.decision then
@@ -531,6 +829,16 @@ function View:_activate_row()
     return
   end
   local row = vim.api.nvim_win_get_cursor(0)[1]
+  local directory = self.directory_rows[row]
+  if directory then
+    self:_toggle_directory(directory)
+    return
+  end
+  local file = self.file_rows[row]
+  if file then
+    self:_open_file(file)
+    return
+  end
   local session = self.session_rows[row]
   if not session then
     return
@@ -606,95 +914,225 @@ function View:_render_agents()
   self.agent_rows = {}
   self.session_rows = {}
   self.directory_rows = {}
+  self.directory_path_rows = {}
+  self.file_rows = {}
   local repositories = self.model:workspace_list()
-  if #sessions == 0 and #repositories == 0 and not next(self.directory_hints) then
-    table.insert(lines, " No directory context is available.")
-    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+
+  for _, session in ipairs(sessions) do
+    local session_identity = session.key
+      or (tostring(session.provider) .. ":" .. tostring(session.provider_session_id))
+    self:_reveal_path(
+      session.cwd,
+      true,
+      self.revealed_sessions,
+      session_identity .. "@" .. session_path(session.cwd, self.home)
+    )
+  end
+  for _, repository in ipairs(repositories) do
+    self:_reveal_path(
+      repository.canonical_path,
+      false,
+      self.revealed_paths,
+      "repo:" .. repository.slug
+    )
   end
 
-  local function render_node(node, prefix)
-    local items = ordered_node_items(node)
+  local function directory_suffix(node, exists)
+    if node.repository then
+      return "  [repo]"
+    end
+    if node.directory_hint then
+      return "  [cwd]"
+    end
+    return exists == false and "  [missing]" or ""
+  end
+
+  local function add_directory_row(node, exists)
+    self.directory_rows[#lines] = {
+      cwd = node.path,
+      repository = node.repository,
+      exists = exists ~= false,
+    }
+    self.directory_path_rows[node.path] = #lines
+  end
+
+  local function add_session_row(session, prefix, connector)
+    session = vim.deepcopy(session)
+    session.cwd = session_path(session.cwd, self.home)
+    local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
+    local provider = session.provider == "claude" and "◆ CLAUDE" or "● CODEX"
+    local badge, badge_group = session_badge(session)
+    local pending = session.managed and #self.model:pending(session.id) or 0
+    local marker = pending > 0 and (" !" .. tostring(pending)) or ""
+    local lead = string.format("%s%s%s ", prefix, connector, selected)
+    table.insert(lines, string.format(
+      "%s%s %s · %s%s",
+      lead,
+      provider,
+      badge,
+      inline(session.title),
+      marker
+    ))
+    self.session_rows[#lines] = session
+    table.insert(highlights, {
+      line = #lines,
+      group = session.provider == "claude" and "AgentManagerProviderClaude"
+        or "AgentManagerProviderCodex",
+      start = #lead,
+      finish = #lead + #provider,
+    })
+    table.insert(highlights, {
+      line = #lines,
+      group = badge_group,
+      start = #lead + #provider + 1,
+      finish = #lead + #provider + 1 + #badge,
+    })
+    if session.managed then
+      self.agent_rows[#lines] = session.id
+    end
+  end
+
+  local render_home_node
+  render_home_node = function(node, prefix, exists)
+    local entries, read_error = {}, nil
+    if exists ~= false then
+      entries, read_error = self:_directory_listing(node.path)
+    end
+    local directories = {}
+    local files = {}
+    for _, entry in ipairs(entries) do
+      if entry.type == "directory" then
+        directories[entry.name] = {
+          name = entry.name,
+          node = node.directories[entry.name] or overlay_node(entry.path),
+          exists = true,
+        }
+      else
+        table.insert(files, entry)
+      end
+    end
+    for name, child in pairs(node.directories) do
+      directories[name] = directories[name] or { name = name, node = child, exists = false }
+    end
+    local items = {}
+    for _, name in ipairs(sorted_keys(directories)) do
+      table.insert(items, vim.tbl_extend("force", { kind = "directory" }, directories[name]))
+    end
+    for _, session in ipairs(sorted_sessions(node)) do
+      table.insert(items, { kind = "session", session = session })
+    end
+    for _, file in ipairs(files) do
+      table.insert(items, { kind = "file", file = file })
+    end
+    if read_error then
+      table.insert(items, { kind = "error" })
+    end
+
     for index, item in ipairs(items) do
       local last = index == #items
       local connector = last and "└─ " or "├─ "
       if item.kind == "directory" then
-        local suffix = item.node.repository and "  [repo]"
-          or item.node.directory_hint and "  [cwd]"
-          or ""
-        table.insert(lines, prefix .. connector .. inline(item.name) .. suffix)
-        self.directory_rows[#lines] = {
-          cwd = item.node.path,
-          repository = item.node.repository,
-        }
+        local expanded = self.expanded_directories[item.node.path] == true
+        local icon = expanded and "▾ " or "▸ "
+        table.insert(
+          lines,
+          prefix
+            .. connector
+            .. icon
+            .. inline(item.name)
+            .. "/"
+            .. directory_suffix(item.node, item.exists)
+        )
+        add_directory_row(item.node, item.exists)
         table.insert(highlights, {
           line = #lines,
           group = item.node.repository and "AgentManagerTitle" or "AgentManagerMuted",
         })
-        render_node(item.node, prefix .. (last and "   " or "│  "))
-      else
-        local session = item.session
-        local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
-        local provider = session.provider == "claude" and "◆ CLAUDE" or "● CODEX"
-        local badge, badge_group = session_badge(session)
-        local pending = session.managed and #self.model:pending(session.id) or 0
-        local marker = pending > 0 and (" !" .. tostring(pending)) or ""
-        local lead = string.format("%s%s%s ", prefix, connector, selected)
-        table.insert(lines, string.format(
-          "%s%s %s · %s%s",
-          lead,
-          provider,
-          badge,
-          inline(session.title),
-          marker
-        ))
-        self.session_rows[#lines] = vim.deepcopy(session)
-        table.insert(
-          highlights,
-          {
-            line = #lines,
-            group = session.provider == "claude" and "AgentManagerProviderClaude"
-              or "AgentManagerProviderCodex",
-            start = #lead,
-            finish = #lead + #provider,
-          }
-        )
-        table.insert(highlights, {
-          line = #lines,
-          group = badge_group,
-          start = #lead + #provider + 1,
-          finish = #lead + #provider + 1 + #badge,
-        })
-        if session.managed then
-          self.agent_rows[#lines] = session.id
+        if expanded then
+          render_home_node(item.node, prefix .. (last and "   " or "│  "), item.exists)
         end
+      elseif item.kind == "session" then
+        add_session_row(item.session, prefix, connector)
+      elseif item.kind == "file" then
+        local suffix = item.file.type == "link" and "@" or ""
+        table.insert(lines, prefix .. connector .. "  " .. inline(item.file.name) .. suffix)
+        self.file_rows[#lines] = vim.deepcopy(item.file)
+        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+      else
+        table.insert(lines, prefix .. connector .. "  [directory unreadable]")
+        table.insert(highlights, { line = #lines, group = "AgentManagerStatusFailure" })
       end
     end
   end
 
-  local tree = session_tree(sessions, repositories, self.directory_hints, vim.env.HOME)
-  for _, root_name in ipairs(sorted_keys(tree)) do
-    local root = tree[root_name]
-    local suffix = root.repository and "  [repo]" or root.directory_hint and "  [cwd]" or ""
-    table.insert(lines, " " .. inline(root_name) .. suffix)
-    self.directory_rows[#lines] = { cwd = root.path, repository = root.repository }
-    table.insert(highlights, {
-      line = #lines,
-      group = "AgentManagerTitle",
-    })
-    render_node(root, " ")
+  local home_root, outside = session_tree(sessions, repositories, self.directory_hints, self.home)
+  local home_label = self.home == "/" and "/" or self.home .. "/"
+  local home_expanded = self.expanded_directories[self.home] == true
+  table.insert(
+    lines,
+    " "
+      .. (home_expanded and "▾ " or "▸ ")
+      .. inline(home_label)
+      .. directory_suffix(home_root, true)
+  )
+  add_directory_row(home_root, true)
+  table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+  if home_expanded then
+    render_home_node(home_root, " ", true)
   end
 
-  if #repositories > 0 or next(self.directory_hints) then
-    table.insert(lines, "")
-    table.insert(lines, " Start: place cursor on a [repo] or [cwd] directory and press n.")
-    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+  local function prepare_virtual(node)
+    local identity = "outside:" .. node.path
+    if not self.revealed_paths[identity] then
+      self.revealed_paths[identity] = true
+      self.expanded_directories[node.path] = true
+    end
+    for _, child in pairs(node.directories) do
+      prepare_virtual(child)
+    end
   end
 
-  if #sessions > 0 then
-    table.insert(lines, "")
-    table.insert(lines, " Enter/h: open ACTIVE or continue RESUME · r: refresh")
-    table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+  local render_virtual_node
+  render_virtual_node = function(node, prefix)
+    local items = ordered_virtual_items(node)
+    for index, item in ipairs(items) do
+      local last = index == #items
+      local connector = last and "└─ " or "├─ "
+      if item.kind == "directory" then
+        local expanded = self.expanded_directories[item.node.path] == true
+        table.insert(
+          lines,
+          prefix
+            .. connector
+            .. (expanded and "▾ " or "▸ ")
+            .. inline(item.name)
+            .. "/"
+            .. directory_suffix(item.node, false)
+        )
+        add_directory_row(item.node, false)
+        table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
+        if expanded then
+          render_virtual_node(item.node, prefix .. (last and "   " or "│  "))
+        end
+      else
+        add_session_row(item.session, prefix, connector)
+      end
+    end
   end
+
+  for _, root_name in ipairs(sorted_keys(outside)) do
+    local root = outside[root_name]
+    prepare_virtual(root)
+    table.insert(lines, "")
+    table.insert(lines, " ▾ " .. inline(root_name) .. directory_suffix(root, false))
+    add_directory_row(root, false)
+    table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
+    render_virtual_node(root, " ")
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, " sn new · so open · df diff · ds delete · gr refresh")
+  table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   for _, provider in ipairs({ "codex", "claude" }) do
     local activity = self.model.external_activity[provider]
     if activity and (activity.error or not activity.available) then
@@ -769,9 +1207,9 @@ function View:_render_conversation()
   local messages = self.model:conversation()
   if #messages == 0 then
     if agent then
-      table.insert(lines, " Press p to compose a prompt.")
+      table.insert(lines, " Press tp to compose a prompt.")
     else
-      table.insert(lines, " Start a session in pane 1, then press p here to prompt it.")
+      table.insert(lines, " Start a session in pane 1 with sn, then press tp here to prompt it.")
     end
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
@@ -929,9 +1367,9 @@ function View:_render_decision(action)
   end
   table.insert(lines, "")
   if action.kind == "approval" then
-    table.insert(lines, " a allow    d deny")
+    table.insert(lines, " y yes / allow    n no / deny")
   else
-    table.insert(lines, " <CR> answer    d deny")
+    table.insert(lines, " <CR> answer    n no / deny")
   end
   table.insert(highlights, { line = #lines, group = "AgentManagerHelpKey" })
   self:_set_lines("decision", lines, highlights)
@@ -999,20 +1437,31 @@ function View:show_help()
   local lines = {
     " HELP",
     "",
-    " n       start a new session in focused directory",
-    " h       open or continue focused session",
-    " p       prompt selected agent",
-    " s       steer active turn",
-    " x       interrupt active turn",
-    " a / d   allow or deny focused request",
-    " f       fork selected session",
-    " A       archive selected inactive agent",
-    " c       add explicit editor context",
-    " D       show workspace diff or dirty-buffer conflict",
-    " r       refresh agents and CLI sessions",
+    " SESSION",
+    " sn      start a new session in focused directory",
+    " so      open or continue focused session",
+    " sf      fork focused session",
+    " sa      archive selected inactive agent",
+    "",
+    " TURN",
+    " tp      prompt selected agent",
+    " ts      steer active turn",
+    " ti      interrupt active turn",
+    " tc      add explicit editor context",
+    "",
+    " DIFF / DELETE",
+    " df      show focused session or directory diff",
+    " ds      permanently delete focused provider session",
+    "",
+    " GO",
+    " ga/gc/gt focus agents / conversation / activity",
+    " gr      refresh filesystem, agents, and CLI sessions",
+    "",
+    " y / n   yes / allow or no / deny focused request",
     " 1 / 2 / 3 focus agents / conversation / activity",
     " <Tab>   cycle panes",
-    " <CR>    select agent or answer focused question",
+    " <CR>    expand directory, open file/session, or answer question",
+    " h / l   collapse / expand directory",
     " q       close workspace",
   }
   local highlights = { { line = 1, group = "AgentManagerTitle" } }
@@ -1054,6 +1503,7 @@ function View:status()
     open = valid_tab(self.tab),
     mode = self.mode,
     active_pane = self.active_pane,
+    home = self.home,
     buffers = vim.deepcopy(self.buffers),
     windows = vim.deepcopy(self.windows),
     backend = "native",

@@ -286,6 +286,11 @@ impl CodexAppServer {
         .await
     }
 
+    pub async fn delete_thread(&mut self, thread_id: &str) -> Result<RequestOutcome, CodexError> {
+        self.request("thread/delete", json!({ "threadId": thread_id }))
+            .await
+    }
+
     pub async fn start_turn(
         &mut self,
         thread_id: &str,

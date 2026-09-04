@@ -211,12 +211,19 @@ end
 local function workspace_view_navigation_test()
   local Model = require("agent_manager.model")
   local View = require("agent_manager.view")
+  local home = vim.fn.tempname() .. "-agent-manager-home"
+  local repository = home .. "/projects/agent-manager"
+  assert_equal(vim.fn.mkdir(repository, "p"), 1, "test home repository creation")
+  assert_equal(vim.fn.mkdir(home .. "/notes", "p"), 1, "unrelated home directory creation")
+  vim.fn.writefile({ "home fixture" }, home .. "/README.txt")
+  vim.fn.writefile({ "project fixture" }, repository .. "/project.txt")
+
   local model = Model.new({ max_events = 8 })
   model:apply_workspace_inventory({
     {
       slug = "agent-manager",
-      canonical_path = "/workspace/agent-manager",
-      worktree_root = "/workspace/worktrees/agent-manager",
+      canonical_path = repository,
+      worktree_root = home .. "/worktrees/agent-manager",
     },
   })
   model:apply_state({
@@ -224,7 +231,7 @@ local function workspace_view_navigation_test()
       id = "agent-codex",
       provider = "codex",
       provider_session_id = "codex-view",
-      cwd = "/workspace/agent-manager",
+      cwd = repository,
       workspace_strategy = "shared",
       title = "codex fixture",
       state = "idle",
@@ -234,7 +241,7 @@ local function workspace_view_navigation_test()
       id = "agent-claude",
       provider = "claude",
       provider_session_id = "claude-view",
-      cwd = "/workspace/agent-manager",
+      cwd = repository,
       workspace_strategy = "shared",
       title = "claude fixture",
       state = "idle",
@@ -243,6 +250,8 @@ local function workspace_view_navigation_test()
   })
   local start_context = nil
   local resumed_session = nil
+  local deleted_session = nil
+  local diff_target = nil
   local view = View.new(model, {
     start = function(context)
       start_context = context
@@ -250,23 +259,38 @@ local function workspace_view_navigation_test()
     resume = function(session)
       resumed_session = session
     end,
-  }, {})
+    delete_session = function(session)
+      deleted_session = session
+    end,
+    diff = function(target)
+      diff_target = target
+    end,
+  }, { home = home })
   model:apply_external_sessions("codex", {
     {
       provider_session_id = "codex-saved-view",
-      cwd = "/workspace/agent-manager",
+      cwd = repository,
       title = "saved codex fixture",
+      active = false,
+    },
+    {
+      provider_session_id = "codex-home-view",
+      cwd = "",
+      title = "home codex fixture",
       active = false,
     },
   }, true)
   assert(view:open())
   view:render()
   local status = view:status()
+  assert(buffer_has_line(status.buffers.agents, " ▾ " .. home .. "/"), "full home root label")
+  assert(buffer_contains(status.buffers.agents, "notes/"), "unrelated home directory")
+  assert(buffer_contains(status.buffers.agents, "README.txt"), "unrelated home file")
+  assert(not buffer_contains(status.buffers.agents, "(unknown)"), "blank session cwd uses home")
   assert(buffer_contains(status.buffers.agents, "● CODEX"), "Codex badge")
   assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "Claude badge")
   assert(buffer_contains(status.buffers.agents, "● ACTIVE"), "active session badge")
   assert(buffer_contains(status.buffers.agents, "○ RESUME"), "saved session badge")
-
   for index, pane in ipairs({ "agents", "conversation", "activity" }) do
     vim.api.nvim_feedkeys(tostring(index), "x", false)
     assert_equal(view:status().active_pane, pane, "numbered pane navigation")
@@ -274,18 +298,65 @@ local function workspace_view_navigation_test()
 
   assert(view:focus("agents"))
   local repository_row = assert(
-    buffer_line_number(status.buffers.agents, "agent-manager  [repo]"),
+    buffer_line_number(status.buffers.agents, "agent-manager/  [repo]"),
     "registered repository row"
   )
   vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
-  vim.api.nvim_feedkeys("n", "x", false)
+  vim.api.nvim_feedkeys("sn", "x", false)
   assert_equal(start_context.repository, "agent-manager", "directory start repository")
-  assert_equal(start_context.cwd, "/workspace/agent-manager", "directory start cwd")
+  assert_equal(start_context.cwd, repository, "directory start cwd")
+  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
+  vim.api.nvim_feedkeys("df", "x", false)
+  assert_equal(diff_target.cwd, repository, "directory diff target")
   local saved_row = assert(buffer_line_number(status.buffers.agents, "saved codex fixture"))
+  vim.api.nvim_win_set_cursor(0, { saved_row, 0 })
+  vim.api.nvim_feedkeys("ds", "x", false)
+  assert_equal(
+    deleted_session.provider_session_id,
+    "codex-saved-view",
+    "saved row delete action"
+  )
   vim.api.nvim_win_set_cursor(0, { saved_row, 0 })
   vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
   assert_equal(resumed_session.provider_session_id, "codex-saved-view", "saved row resume action")
   view:teardown()
+  vim.fn.delete(home, "rf")
+end
+
+local function which_key_prefix_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local home = vim.fn.tempname() .. "-agent-manager-which-key"
+  assert_equal(vim.fn.mkdir(home, "p"), 1, "which-key test home creation")
+  local specs = {}
+  local shown = nil
+  local previous_which_key = package.loaded["which-key"]
+  package.loaded["which-key"] = {
+    add = function(spec)
+      vim.list_extend(specs, vim.deepcopy(spec))
+    end,
+    show = function(opts)
+      shown = vim.deepcopy(opts)
+    end,
+  }
+  local view = View.new(Model.new({ max_events = 8 }), {}, { home = home })
+  assert(view:open())
+  assert(view:focus("agents"))
+  vim.api.nvim_feedkeys("d", "x", false)
+
+  local groups = {}
+  for _, spec in ipairs(specs) do
+    groups[spec[1]] = spec.group
+  end
+  assert_equal(groups.d, "diff / delete", "buffer-local d which-key group")
+  assert_equal(groups.s, "session", "buffer-local s which-key group")
+  assert_equal(shown.keys, "d", "d opens its which-key prefix")
+  assert_equal(shown.buf, view:status().buffers.agents, "which-key uses the focused buffer")
+  assert_equal(shown.global, false, "which-key menu remains buffer-local")
+
+  view:teardown()
+  package.loaded["which-key"] = previous_which_key
+  vim.fn.delete(home, "rf")
 end
 
 local function native_presentation_test()
@@ -348,6 +419,14 @@ local function public_input_validation_test()
   result, err = manager.sessions({ provider = "codex", active_only = "yes" })
   assert_equal(result, nil, "invalid active-only discovery result")
   assert_equal(err.kind, "input", "invalid active-only discovery error")
+
+  result, err = manager.workspace_diff(42)
+  assert_equal(result, nil, "invalid workspace diff result")
+  assert_equal(err.kind, "input", "invalid workspace diff error")
+
+  result, err = manager.delete_session({ provider = "codex", cwd = "/tmp" })
+  assert_equal(result, nil, "invalid session delete result")
+  assert_equal(err.kind, "input", "invalid session delete error")
 
   result, err = manager.resume({
     provider = "claude",
@@ -486,6 +565,7 @@ local function integration_test()
     "AgentManager",
     "AgentManagerAttach",
     "AgentManagerContext",
+    "AgentManagerDelete",
     "AgentManagerDiff",
     "AgentManagerFork",
   }) do
@@ -518,12 +598,12 @@ local function integration_test()
   assert(buffer_contains(external_status.view.buffers.agents, "workspace"), "tree root child")
   assert(buffer_contains(external_status.view.buffers.agents, "repos"), "tree nested repo root")
   assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "tree repository")
-  assert(buffer_has_line(external_status.view.buffers.agents, "          ├─ api"), "tree sibling branch")
-  assert(buffer_has_line(external_status.view.buffers.agents, "          └─ web"), "tree final branch")
+  assert(buffer_contains(external_status.view.buffers.agents, "api/"), "tree sibling branch")
+  assert(buffer_contains(external_status.view.buffers.agents, "web/"), "tree final branch")
   assert(buffer_contains(external_status.view.buffers.agents, "● ACTIVE"), "active external label")
   assert(buffer_contains(external_status.view.buffers.agents, "○ RESUME"), "resumable external label")
   assert(
-    buffer_contains(external_status.view.buffers.agents, "open ACTIVE or continue RESUME"),
+    buffer_contains(external_status.view.buffers.agents, "sn new · so open · df diff · ds delete"),
     "session action note"
   )
 
@@ -536,6 +616,27 @@ local function integration_test()
     return sessions ~= nil
   end)
   assert_equal(sessions.sessions[1].provider_session_id, "codex-resumable-lua", "session id")
+
+  local deleted = nil
+  assert(manager.delete_session(sessions.sessions[1], function(result, err)
+    assert_equal(err, nil, "session deletion error")
+    deleted = result
+  end))
+  await("provider session deletion", function()
+    return deleted ~= nil
+  end)
+  assert_equal(deleted.worktree_preserved, true, "session deletion preserves files")
+  assert_equal(#manager.status().model.external_sessions, 3, "deleted session leaves the tree")
+
+  local external_diff = nil
+  assert(manager.workspace_diff("/tmp", function(result, err)
+    assert_equal(err, nil, "external workspace diff error")
+    external_diff = result
+  end))
+  await("external workspace diff", function()
+    return external_diff ~= nil
+  end)
+  assert(external_diff.diff:find("+new", 1, true), "external workspace diff result")
 
   assert(manager.start({ provider = "codex", cwd = "/tmp", workspace_strategy = "shared" }))
   await("agent startup", function()
@@ -597,7 +698,7 @@ local function integration_test()
   assert(manager.status().model.pending_actions["approval-lua-1"], "failed response must remain pending")
 
   vim.api.nvim_set_current_buf(approval_status.view.buffers.decision)
-  vim.api.nvim_feedkeys("a", "x", false)
+  vim.api.nvim_feedkeys("y", "x", false)
   await("clarifying question", function()
     local action = manager.status().model.pending_actions["question-lua-1"]
     return action ~= nil and manager.list()[1].state == "waiting_input"
@@ -777,9 +878,9 @@ local function managed_workspace_ui_test()
   assert(manager.status().view.active_pane == "conversation")
   vim.api.nvim_feedkeys("1", "x", false)
   local agents_buffer = status.view.buffers.agents
-  local repository_row = assert(buffer_line_number(agents_buffer, "agent-manager  [repo]"))
+  local repository_row = assert(buffer_line_number(agents_buffer, "agent-manager/  [repo]"))
   vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
-  vim.api.nvim_feedkeys("n", "x", false)
+  vim.api.nvim_feedkeys("sn", "x", false)
   await("managed agent startup", function()
     local agent = manager.list()[1]
     return agent and agent.state == "idle"
@@ -854,7 +955,12 @@ local function managed_decision_render_test()
   }))
   assert_equal(model:focused_action().id, "approval-managed-1", "managed approval projection")
 
-  local view = View.new(model, {}, {})
+  local denied_action = nil
+  local view = View.new(model, {
+    deny = function(action)
+      denied_action = action.id
+    end,
+  }, {})
   assert(view:open())
   view:render()
   local decision = view:status().buffers.decision
@@ -863,6 +969,9 @@ local function managed_decision_render_test()
     "managed task line in the decision pane"
   )
   assert(buffer_contains(decision, "Strategy:  worktree"), "managed decision strategy")
+  vim.api.nvim_set_current_buf(decision)
+  vim.api.nvim_feedkeys("n", "x", false)
+  assert_equal(denied_action, "approval-managed-1", "n denies the focused request")
   view:teardown()
 end
 
@@ -918,6 +1027,7 @@ local function run()
   pure_model_test()
   layout_test()
   workspace_view_navigation_test()
+  which_key_prefix_test()
   native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()
