@@ -37,7 +37,7 @@ configuration pins.
           effort = "high",  -- optional initial default
         },
         claude = {
-          python = "/path/to/worker-venv/bin/python",
+          python = "/path/to/worker-runtime/bin/python",
           model = "sonnet", -- optional initial default
           effort = "high",  -- optional initial default
         },
@@ -275,18 +275,20 @@ backend remains native and |:AgentManagerHealth| reports that choice.
 ==============================================================================
 7. Release and durable install                     *agent-manager-release*
 
-The v0.1.0 production asset targets Linux x86_64. It contains the native broker
-and the private worker's hash-locked Python 3.13 environment. release.json pins
+The v0.1.0 production asset targets Linux x86_64. It contains the native broker,
+the exact relocatable Python 3.13 interpreter, and the private worker's
+hash-locked packages. release.json pins
 the source revision, broker and worker contracts, provider versions, UX
 revisions, and clean-source marker. PAYLOAD.SHA256 covers the inner tree and
 SHA256SUMS covers the archive. GitHub publishes keyless build attestations from
-a verified signed annotated tag on the production bet branch.
+a verified signed annotated tag reachable from the default bluff branch.
 
-Verify the downloaded archive's attestation on an authenticated control plane,
-then run ops/m5-release-install/ in numeric order as the ai user. It validates
-and activates immutable versioned paths without Cargo, uv, pip, or dependency
-resolution during Neovim startup. Next run ops/m4-durable-service/ in its
-documented order to install and start the supervised broker. Both phases are
+The nvim-config Lazy build hook runs install-current.sh after the plugin is
+installed or its release pin changes. It reuses a verified active runtime or
+downloads and activates immutable versioned paths without Cargo, uv, pip, or
+dependency resolution on the destination. It does not run during DevPlugins.
+Hosts that need sessions to survive Neovim exits can next run
+ops/m4-durable-service/ in its documented order. The install phases are
 idempotent and ship reverse-order paired undo.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

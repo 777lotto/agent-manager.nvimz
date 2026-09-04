@@ -23,6 +23,16 @@ case "$REQUIRE_CLEAN_SOURCE" in
   1) clean_source_args+=(--require-clean-source) ;;
   *) fail "REQUIRE_CLEAN_SOURCE must be 0 or 1" ;;
 esac
+# Sourced consumers append the tagged source revision when the integration
+# layer knows it (Lazy checkouts always do). The checked-in operator env may
+# leave this empty until the release tag exists.
+# shellcheck disable=SC2034
+source_revision_args=()
+if test -n "${RELEASE_SOURCE_REVISION:-}"; then
+  [[ "$RELEASE_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "RELEASE_SOURCE_REVISION must be one full lowercase Git commit"
+  source_revision_args+=(--source-revision "$RELEASE_SOURCE_REVISION")
+fi
 
 require_absolute() {
   local value="$1"
@@ -35,14 +45,16 @@ validate_parameters() {
   local variable
   for variable in \
     RELEASE_ARCHIVE RELEASE_CHECKSUMS PYTHON_BIN INSTALL_ROOT RELEASES_DIR RELEASE_DIR \
-    VENVS_DIR VERSIONED_VENV BROKER_LINK VENV_LINK STATE_DIR STATUS_FILE; do
+    BROKER_LINK VENV_LINK STATE_ROOT STATE_DIR STATUS_FILE; do
     require_absolute "${!variable}" "$variable"
   done
   test "$RELEASE_DIR" = "$RELEASES_DIR/v${RELEASE_VERSION}-${RELEASE_TARGET}" \
     || fail "RELEASE_DIR does not match the pinned release"
-  test "$VERSIONED_VENV" = "$VENVS_DIR/v${RELEASE_VERSION}-${RELEASE_TARGET}" \
-    || fail "VERSIONED_VENV does not match the pinned release"
   test "$VENV_LINK" = "$INSTALL_ROOT/venv" || fail "VENV_LINK must be the stable runtime path"
+  test "$STATE_DIR" = "$STATE_ROOT/v${RELEASE_VERSION}-${RELEASE_TARGET}" \
+    || fail "STATE_DIR does not match the pinned release"
+  test "$STATUS_FILE" = "$STATE_DIR/status.json" \
+    || fail "STATUS_FILE must be the versioned status path"
   test -x "$metadata_script" || fail "release metadata verifier is unavailable"
   case "$SERVICE_STATE_CHECK" in
     systemd) ;;

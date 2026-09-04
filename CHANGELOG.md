@@ -7,7 +7,7 @@ and releases use Semantic Versioning.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-02
+## [0.1.0] - Unreleased
 
 ### Added
 
@@ -21,11 +21,11 @@ and releases use Semantic Versioning.
   registry, multi-agent scheduling, and linked-worktree writer isolation.
 - Reproducible Linux x86_64 release bundle containing the Rust broker and
   hash-locked Python runtime, with internal and external SHA-256 coverage.
-- Keyless GitHub build attestations, signed-tag release automation, pinned
-  provider/runtime CI, and `bluff` to `bet` promotion enforcement.
+- Keyless GitHub build attestations, signed-tag release automation from
+  `bluff`, and pinned provider/runtime CI.
 - Resumable, idempotent release installation and durable-service phases with
   behavioral status evidence and paired rollback.
-- Exact durable-mode adoption in `nvim-config` after the M0-M4 gates passed.
+- Release-coupled `nvim-config` adoption after the M0-M4 gates passed.
 
 [Unreleased]: https://github.com/777lotto/agent-manager.nvimz/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/777lotto/agent-manager.nvimz/releases/tag/v0.1.0

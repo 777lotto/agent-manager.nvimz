@@ -2,8 +2,8 @@
 
 <!-- markdownlint-configure-file {"MD013": {"tables": false}} -->
 
-- Status: M5 release and configuration adoption implemented
-- Last reviewed: 2026-09-02
+- Status: M5 implementation complete; signed v0.1.0 publication pending
+- Last reviewed: 2026-09-04
 - Plugin/package name: `agent-manager`
 - Repository/folder name: `agent-manager.nvimz`
 - Foundation plugin ID: `agent.manager`
@@ -184,10 +184,11 @@ registry, replay sequence, Unix socket, UX state, provider credentials, or any
 Codex process. It never binds a listener. Standard output is reserved for the
 worker protocol; redacted operational diagnostics use standard error.
 
-The worker runs from an explicitly installed, locked virtual environment.
-Neither Neovim nor the broker invokes `pip` or resolves dependencies at
-startup. The configured Python entry point and SDK version are visible in
-health diagnostics.
+The worker runs from an explicitly selected, locked Python runtime. Source
+development uses the repository venv; a release embeds its exact interpreter,
+standard library, worker, and dependencies in one immutable prefix. Neither
+Neovim nor the broker invokes `pip` or resolves dependencies at startup. The
+configured Python entry point and SDK version are visible in health diagnostics.
 
 ### Provider adapters
 
@@ -302,30 +303,30 @@ The initialization response includes:
 
 ### Required requests
 
-| Method                   | Purpose                                                     |
-| ------------------------ | ----------------------------------------------------------- |
-| `provider/model/list`    | List provider-selectable models without starting a turn.   |
-| `provider/session/list`  | Discover provider sessions, optionally globally or active.  |
-| `agent/list`             | List known agents and live status.                          |
-| `workspace/list`         | List registered repositories and managed task mappings.     |
-| `workspace/handoff`      | Release a managed task lease without deleting its checkout. |
-| `workspace/diff`         | Return the Git diff for a focused directory or saved session. |
+| Method                    | Purpose                                                         |
+| ------------------------- | --------------------------------------------------------------- |
+| `provider/model/list`     | List provider-selectable models without starting a turn.        |
+| `provider/session/list`   | Discover provider sessions, optionally globally or active.      |
+| `agent/list`              | List known agents and live status.                              |
+| `workspace/list`          | List registered repositories and managed task mappings.         |
+| `workspace/handoff`       | Release a managed task lease without deleting its checkout.     |
+| `workspace/diff`          | Return the Git diff for a focused directory or saved session.   |
 | `provider/session/delete` | Permanently delete inactive provider history, preserving files. |
-| `agent/start`            | Start in a managed task or explicit working directory.      |
-| `agent/attach`           | Subscribe to an agent owned by the broker.                  |
-| `agent/history`          | Fetch provider-backed projected history.                    |
-| `agent/prompt`           | Start the next normal user turn.                            |
-| `agent/steer`            | Add context or redirect an active turn when supported.      |
-| `agent/interrupt`        | Cancel the active turn without deleting its session.        |
-| `agent/resume`           | Reopen a persisted provider session by ID.                  |
-| `agent/fork`             | Create an alternate session from provider history.          |
-| `agent/archive`          | Hide a completed session; preserve provider history.        |
-| `agent/approval/respond` | Allow, deny, or defer a pending request.                    |
-| `agent/question/respond` | Return structured or free-text clarification.               |
-| `agent/context/add`      | Add an explicit editor-context snapshot.                    |
-| `agent/diff`             | Return the current agent/workspace diff projection.         |
-| `agent/replay`           | Replay events after the supplied sequence number.           |
-| `broker/shutdown`        | Embedded-only and subject to shutdown policy.               |
+| `agent/start`             | Start in a managed task or explicit working directory.          |
+| `agent/attach`            | Subscribe to an agent owned by the broker.                      |
+| `agent/history`           | Fetch provider-backed projected history.                        |
+| `agent/prompt`            | Start the next normal user turn.                                |
+| `agent/steer`             | Add context or redirect an active turn when supported.          |
+| `agent/interrupt`         | Cancel the active turn without deleting its session.            |
+| `agent/resume`            | Reopen a persisted provider session by ID.                      |
+| `agent/fork`              | Create an alternate session from provider history.              |
+| `agent/archive`           | Hide a completed session; preserve provider history.            |
+| `agent/approval/respond`  | Allow, deny, or defer a pending request.                        |
+| `agent/question/respond`  | Return structured or free-text clarification.                   |
+| `agent/context/add`       | Add an explicit editor-context snapshot.                        |
+| `agent/diff`              | Return the current agent/workspace diff projection.             |
+| `agent/replay`            | Replay events after the supplied sequence number.               |
+| `broker/shutdown`         | Embedded-only and subject to shutdown policy.                   |
 
 `provider/session/delete` is deliberately narrower than workspace cleanup. It
 requires an exact provider session ID and canonical cwd, refuses sessions with
@@ -517,12 +518,12 @@ cannot block the worker's async protocol reader or live client streams.
 ### Packaging boundary
 
 The worker is versioned in the same repository but packaged separately from
-the Rust executable. Installation creates a dedicated virtual environment from
-a lock file and exposes a stable module entry point such as
-`python -m agent_manager_claude_worker`. Startup performs no package download,
-upgrade, or mutation. The exact Python floor, packaging tool, and SDK pin are
-frozen during M0 against the implementation workstation and target AI-container
-images.
+the Rust executable. Release construction uses the lock file to assemble a
+self-contained Python prefix and exposes a stable module entry point such as
+`python -m agent_manager_claude_worker`; installation only verifies, extracts,
+and activates that prefix. Startup performs no package download, upgrade, or
+mutation. The exact Python floor, packaging tool, and SDK pin are frozen during
+M0 against the implementation workstation and target AI-container images.
 
 ## Provider integration
 
@@ -684,25 +685,25 @@ arguments remain deliberately small.
 
 Mappings are buffer-local and configurable. Initial defaults are:
 
-| Key                 | Action                                                    |
-| ------------------- | --------------------------------------------------------- |
-| `j` / `k`           | Move through the focused view.                            |
-| `1` / `2` / `3`     | Focus Agents, Conversation prompt, or Activity directly.  |
-| `<Tab>` / `<S-Tab>` | Cycle visible panes.                                      |
-| `<CR>`              | Send in the prompt box; elsewhere open, expand, or act.   |
-| `<C-j>`             | Insert a newline in the prompt box.                       |
-| `sn` / `so`         | Start a session / open or continue a focused session.     |
-| `sf` / `sa`         | Fork / archive a focused session.                         |
-| `am` / `ae`         | Change model / effort for the next prompt.                 |
-| `tp` / `ts`         | Prompt / steer the selected agent.                        |
-| `ti` / `tc`         | Confirm interrupt / queue explicit editor context.        |
-| `df` / `ds`         | Show the focused diff / delete focused provider history.  |
-| `ga` / `gc` / `gt`  | Focus Agents / Conversation / Activity.                   |
-| `gr`                 | Refresh the filesystem and provider sessions.             |
-| `y` / `n`           | Yes/allow or no/deny only for a focused human request.    |
-| `h` / `l`           | Collapse / expand a directory row.                        |
-| `?` / `g?`          | Open visible help.                                        |
-| `q`                 | Close the workspace view, not the durable agent.          |
+| Key                 | Action                                                   |
+| ------------------- | -------------------------------------------------------- |
+| `j` / `k`           | Move through the focused view.                           |
+| `1` / `2` / `3`     | Focus Agents, Conversation prompt, or Activity directly. |
+| `<Tab>` / `<S-Tab>` | Cycle visible panes.                                     |
+| `<CR>`              | Send in the prompt box; elsewhere open, expand, or act.  |
+| `<C-j>`             | Insert a newline in the prompt box.                      |
+| `sn` / `so`         | Start a session / open or continue a focused session.    |
+| `sf` / `sa`         | Fork / archive a focused session.                        |
+| `am` / `ae`         | Change model / effort for the next prompt.               |
+| `tp` / `ts`         | Prompt / steer the selected agent.                       |
+| `ti` / `tc`         | Confirm interrupt / queue explicit editor context.       |
+| `df` / `ds`         | Show the focused diff / delete focused provider history. |
+| `ga` / `gc` / `gt`  | Focus Agents / Conversation / Activity.                  |
+| `gr`                | Refresh the filesystem and provider sessions.            |
+| `y` / `n`           | Yes/allow or no/deny only for a focused human request.   |
+| `h` / `l`           | Collapse / expand a directory row.                       |
+| `?` / `g?`          | Open visible help.                                       |
+| `q`                 | Close the workspace view, not the durable agent.         |
 
 Potentially destructive actions require a second confirmation or a dedicated
 approval view. Closing the workspace never means "approve," "interrupt," or
@@ -926,8 +927,8 @@ runtime failures.
   mappings, modelines, statusline expressions, Lua, or Ex commands merely by
   rendering a response.
 - Disable modelines and swap files in all workspace scratch buffers.
-- Run the installed worker in Python isolated mode from an owner-controlled
-  virtual environment. Do not add the agent's repository cwd to `sys.path`,
+- Run the installed worker in Python isolated mode from an owner-controlled,
+  immutable Python prefix. Do not add the agent's repository cwd to `sys.path`,
   import worker modules from that repository, or honor arbitrary module paths
   supplied by an agent request.
 - Pass the target repository to `ClaudeAgentOptions` as data rather than
@@ -1064,7 +1065,7 @@ internal tables.
 - Neovim and broker/Rust build versions;
 - broker executable and protocol versions;
 - embedded/durable mode and socket permissions;
-- configured Python interpreter, isolated virtual environment, worker package,
+- configured Python interpreter, isolated Python runtime, worker package,
   worker protocol, and `claude-agent-sdk` versions;
 - provider runtime/SDK versions;
 - provider authentication readiness without revealing secrets;
@@ -1212,27 +1213,31 @@ non-sensitive service status.
 
 ### M5: release and configuration adoption
 
-- Complete provider/runtime CI, signed release artifacts, and the production
-  branch workflow matching the UX repository standard.
+- Complete provider/runtime CI and signed release artifacts from the default
+  `bluff` branch.
 - Produce reproducible, checksummed Rust broker artifacts and a locked Python
   worker environment; perform no dependency installation from Neovim startup.
 - Add the plugin to `nvim-config` only after M0-M4 acceptance gates pass.
 - Pin exact broker/UX revisions and reviewed provider compatibility profiles in
   the configuration; record actual provider versions at runtime.
 
-Implementation status: complete on 2026-09-02. v0.1.0 freezes the broker and
-worker protocol at version 1, Codex App Server 0.152.0, Claude Agent SDK
+Implementation status: complete on 2026-09-02; signed v0.1.0 publication is
+pending. The release freezes the broker and worker protocol at version 1,
+Codex App Server 0.152.0, Claude Agent SDK
 0.2.148, Claude Code 2.1.251, and the promoted Foundation/Styling/Chrome
 revisions in `release/compatibility-v1.json`. Independent release builds are
 byte-identical and contain an internal payload checksum manifest plus an outer
-`SHA256SUMS`. Production publication accepts only a verified signed annotated
-tag reachable from `bet`, creates keyless GitHub attestations, and publishes
-repository release assets. The resumable M5 phase verifies, installs,
-behaviorally checks, and can roll back the immutable broker and locked worker
-environment before the M4 unit starts. CI covers Linux release/operations and
-macOS provider/runtime contracts without live provider use. `nvim-config`
-selects durable mode explicitly and pins the compatible production revisions;
-embedded mode remains Agent Manager's default elsewhere.
+`SHA256SUMS`. The payload includes the exact relocatable Python interpreter, so
+the destination does not create a venv or run a resolver. Production
+publication accepts only a verified signed annotated tag reachable from
+`bluff`, creates keyless GitHub attestations, and publishes repository release
+assets. The resumable M5 phase verifies, installs, behaviorally checks, and can
+roll back the immutable broker and worker runtime before the M4 unit starts. CI
+covers Linux release/operations and macOS provider/runtime contracts without
+live provider use. `nvim-config` advances Agent Manager only from a published
+release, runs the packaged installer through Lazy's build lifecycle, and keeps
+embedded mode as the portable default; durable mode remains a host-lifecycle
+opt-in.
 
 ## Acceptance criteria
 

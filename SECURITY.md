@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-Security fixes are applied to the current `bet` branch and latest signed
-release. The `bluff` branch may contain unreleased integration work.
+Security fixes are applied to the current `bluff` branch and latest signed
+release. Supported provider and runtime versions are listed in the release
+compatibility manifest.
 
 ## Reporting a vulnerability
 

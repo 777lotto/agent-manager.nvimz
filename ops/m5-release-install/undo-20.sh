@@ -63,8 +63,8 @@ restore_link \
   "broker link"
 restore_link \
   "$VENV_LINK" \
-  "$VERSIONED_VENV" \
+  "$RELEASE_DIR/python" \
   "$state/venv-existed" \
   "$state/venv-target" \
-  "$VENVS_DIR" \
-  "worker venv link"
+  "$RELEASES_DIR" \
+  "worker runtime link"

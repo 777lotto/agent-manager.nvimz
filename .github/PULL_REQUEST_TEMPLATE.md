@@ -10,7 +10,7 @@
 
 ## Validation
 
-- [ ] I targeted `bluff`, or this is a `bluff` to `bet` promotion.
+- [ ] I targeted the default `bluff` branch.
 - [ ] Commits retain configured signing.
 - [ ] `mise run verify` passes without live provider usage.
 - [ ] Protocol changes include implementation, schema, fixture, and negative-case coverage.

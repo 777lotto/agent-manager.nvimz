@@ -5,9 +5,10 @@ and Claude agents from one keyboard-first workspace. It targets Neovim running
 inside the AI container over SSH: SSH carries keystrokes and terminal output,
 while Neovim, agent processes, and repository files remain container-local.
 
-M5 is complete. Agent Manager now ships as a reproducible, checksummed Linux
-x86_64 broker plus hash-locked Python worker environment, published from signed
-production tags with keyless build attestations. Durable mode keeps multiple
+The M5 implementation is complete and ready for its first signed release.
+Agent Manager's production unit is a reproducible, checksummed Linux x86_64
+broker plus a self-contained, hash-locked Python worker runtime, published from
+signed tags with keyless build attestations. Durable mode keeps multiple
 Codex and Claude agents alive across SSH and Neovim restarts through an
 owner-only Unix socket, bounded replay, provider-backed history resync, and an
 archivable metadata-only registry. New sessions default to lifecycle-managed
@@ -61,12 +62,13 @@ mise run release
 ```
 
 For a source checkout, Agent Manager discovers the release/debug broker and the
-locked Python worker environment relative to the plugin root. The handshake
+locked Python worker environment relative to the plugin root. For a packaged
+install it discovers the stable user-local broker and worker links even when
+`~/.local/bin` is not on `PATH`. The handshake
 checks a public protocol revision, so an older local broker fails immediately
-with rebuild guidance instead of partially accepting a newer UI. Re-run the
-release build after updating the checkout. A packaged
-installation should put `agent-manager-broker` on `PATH` and configure the
-installed worker Python explicitly:
+with reinstall/rebuild guidance instead of partially accepting a newer UI.
+Re-run the source build after updating a development checkout. Explicit paths
+remain available for nonstandard packaged layouts:
 
 ```lua
 require("agent_manager").setup({
@@ -81,7 +83,7 @@ require("agent_manager").setup({
       effort = "high", -- optional initial default
     },
     claude = {
-      python = "/absolute/path/to/agent-manager-worker-venv/bin/python",
+      python = "/absolute/path/to/agent-manager-worker-runtime/bin/python",
       model = "sonnet", -- optional initial default
       effort = "high", -- optional initial default
     },
@@ -115,9 +117,16 @@ require("agent_manager").setup({
 })
 ```
 
-For the production v0.1.0 bundle, download the archive and `SHA256SUMS` from the
-signed GitHub release and verify the keyless build attestation from an
-authenticated control plane:
+The `nvim-config` Lazy spec runs `install-current.sh` as the plugin's build
+hook. Lazy runs that hook after the plugin is first installed or its reviewed
+pin changes; it does not run during `:DevPlugins`. The hook verifies an already
+active matching runtime without network access, or downloads and atomically
+activates the signed release when it is missing. It invokes no Cargo, uv, pip,
+or dependency resolver on the destination machine.
+
+After v0.1.0 is published, a manual production install can download the archive
+and `SHA256SUMS` from the signed GitHub release and optionally require keyless
+attestation verification from a GitHub-authenticated control plane:
 
 ```sh
 gh attestation verify \
@@ -126,8 +135,7 @@ gh attestation verify \
 ```
 
 The resumable [M5 release installation](ops/m5-release-install/README.md)
-verifies and activates the immutable artifact without Cargo, uv, pip, or any
-dependency resolution during Neovim startup. Then apply the
+verifies and activates the immutable artifact. Then apply the
 [M4 durable-service phase](ops/m4-durable-service/README.md), which installs,
 starts, behaviorally verifies, and can roll back the owner-only systemd user
 service. Both phases use reviewed paths, idempotent steps, and paired undo.
@@ -374,10 +382,12 @@ Cached consumers can call `status()`, `running_count()`, or
 `User AgentManagerStateChanged` event carrying only those counts and stable
 agent IDs—never prompt text or tool payloads.
 
-Agent Manager remains a separate repository. After M0-M4 passed, M5 added its
-exact production revision to `nvim-config` with durable mode and the reviewed
-stable broker, socket, and worker paths; the plugin's portable default remains
-embedded mode.
+Agent Manager remains a separate repository. After M0-M4 passed, M5 coupled
+its exact released plugin revision and runtime artifact in `nvim-config`.
+Ordinary installs use Lazy's remote, lock-pinned checkout and the stable
+user-local runtime links; an optional `dev/` checkout remains a maintainer
+override. The portable default is embedded mode, while a supervised durable
+socket remains an explicit host-lifecycle choice.
 
 ## Repository layout
 

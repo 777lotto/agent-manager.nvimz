@@ -11,10 +11,11 @@ require_service_inactive
   --root "$RELEASE_DIR" \
   --version "$RELEASE_VERSION" \
   --target "$RELEASE_TARGET" \
+  "${source_revision_args[@]}" \
   "${clean_source_args[@]}"
-test -x "$VERSIONED_VENV/bin/python" || fail "versioned worker venv is unavailable"
+test -x "$RELEASE_DIR/python/bin/python" || fail "bundled worker Python is unavailable"
 require_managed_link_or_absent "$BROKER_LINK" "$RELEASES_DIR" "broker link"
-require_managed_link_or_absent "$VENV_LINK" "$VENVS_DIR" "worker venv link"
+require_managed_link_or_absent "$VENV_LINK" "$RELEASES_DIR" "worker runtime link"
 install -d -m 0700 "$STATE_DIR"
 install -d -m 0755 "$(dirname -- "$BROKER_LINK")"
 
@@ -42,6 +43,6 @@ elif ! test -d "$state" || test -L "$state"; then
 fi
 
 atomic_link "$RELEASE_DIR/bin/agent-manager-broker" "$BROKER_LINK"
-atomic_link "$VERSIONED_VENV" "$VENV_LINK"
+atomic_link "$RELEASE_DIR/python" "$VENV_LINK"
 
 printf 'PASS activated stable broker and worker paths\n'

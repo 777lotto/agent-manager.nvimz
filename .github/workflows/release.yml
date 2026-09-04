@@ -31,7 +31,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require a verified annotated tag on bet
+      - name: Require a verified annotated tag on bluff
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
@@ -51,9 +51,9 @@ jobs:
             exit 1
           fi
           test "$target_sha" = "$(git rev-parse HEAD)"
-          git fetch --no-tags origin bet
-          git merge-base --is-ancestor "$target_sha" origin/bet || {
-            echo "Release tags must target the production bet branch." >&2
+          git fetch --no-tags origin bluff
+          git merge-base --is-ancestor "$target_sha" origin/bluff || {
+            echo "Release tags must target the default bluff branch." >&2
             exit 1
           }
 
@@ -100,6 +100,8 @@ jobs:
             echo "Tag $TAG_NAME does not match compatibility release v$release_version." >&2
             exit 1
           }
+          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
+          echo "RELEASE_ARCHIVE=agent-manager-v${release_version}-x86_64-unknown-linux-gnu.tar.gz" >> "$GITHUB_ENV"
 
       - name: Run the complete offline handoff gate
         run: mise run verify
@@ -111,7 +113,7 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: |
-            dist/agent-manager-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+            dist/${{ env.RELEASE_ARCHIVE }}
             dist/SHA256SUMS
 
       - name: Publish the GitHub release
@@ -120,7 +122,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release create "$TAG_NAME" \
-            dist/agent-manager-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            "dist/$RELEASE_ARCHIVE" \
             dist/SHA256SUMS \
             --verify-tag \
             --generate-notes
@@ -130,6 +132,6 @@ jobs:
         with:
           name: agent-manager-${{ github.ref_name }}-x86_64-linux
           path: |
-            dist/agent-manager-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+            dist/${{ env.RELEASE_ARCHIVE }}
             dist/SHA256SUMS
           if-no-files-found: error

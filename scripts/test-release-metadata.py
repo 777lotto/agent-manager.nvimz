@@ -120,6 +120,25 @@ class ManifestTests(unittest.TestCase):
                 ),
             )
 
+    def test_source_revision_expectation_is_exact(self) -> None:
+        manifest = {
+            "schema_version": 1,
+            "version": "0.1.0",
+            "source_revision": "1" * 40,
+            "source_dirty": False,
+            "source_date_epoch": 1,
+            "target": "x86_64-unknown-linux-gnu",
+            "compatibility": {
+                "release_version": "0.1.0",
+                "target": "x86_64-unknown-linux-gnu",
+            },
+        }
+        with self.assertRaisesRegex(ReleaseError, "requested revision"):
+            verify_manifest_shape(
+                manifest,
+                ArtifactExpectation(source_revision="2" * 40),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

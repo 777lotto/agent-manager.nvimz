@@ -23,7 +23,7 @@ function M.check()
     vim.health.ok("broker executable: " .. broker.command[1])
   else
     vim.health.error("broker executable is not available", {
-      "Build agent-manager-broker or configure broker.command with an installed artifact.",
+      "Install the packaged runtime, build a development checkout, or configure broker.command.",
     })
   end
   vim.health.info("broker mode: " .. tostring(health.mode or "unknown"))
@@ -80,7 +80,7 @@ function M.check()
     end
   else
     vim.health.warn("Claude worker Python was not discovered", {
-      "Run mise run setup or configure providers.claude.python.",
+      "Install the packaged runtime, run mise run setup in a development checkout, or configure providers.claude.python.",
     })
   end
   local worktrees = health.worktrees or {}

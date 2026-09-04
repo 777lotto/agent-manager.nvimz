@@ -27,6 +27,7 @@ class VerificationInput:
     version: str
     target: str
     require_clean_source: bool
+    source_revision: str | None
 
 
 def utc_now() -> str:
@@ -89,6 +90,8 @@ def verify(spec: VerificationInput) -> dict[str, Any]:
         )
     if spec.require_clean_source and manifest.get("source_dirty") is not False:
         raise VerificationError("installed release was not built from a clean source revision")
+    if spec.source_revision is not None and manifest.get("source_revision") != spec.source_revision:
+        raise VerificationError("installed release source does not match the requested revision")
 
     contract = run_json([str(spec.broker), "contract-info"], "broker contract-info")
     if contract != manifest.get("broker_contract"):
@@ -125,7 +128,7 @@ def verify(spec: VerificationInput) -> dict[str, Any]:
     ):
         raise VerificationError("Claude worker runtime differs from release compatibility metadata")
 
-    python_root = spec.release / "python/site-packages"
+    python_root = spec.release / "python/lib/python3.13/site-packages"
     python_files = [path for path in python_root.rglob("*") if path.is_file()]
     return {
         "schema_version": 1,
@@ -143,14 +146,14 @@ def verify(spec: VerificationInput) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str]) -> int:
-    if len(argv) != 8:
+    if len(argv) != 9:
         print(
             "usage: verify_install.py RELEASE BROKER WORKER_PYTHON STATUS "
-            "VERSION TARGET REQUIRE_CLEAN",
+            "VERSION TARGET REQUIRE_CLEAN SOURCE_REVISION",
             file=sys.stderr,
         )
         return 2
-    release, broker, worker_python, status, version, target, require_clean = argv[1:]
+    release, broker, worker_python, status, version, target, require_clean, revision = argv[1:]
     if require_clean not in {"0", "1"}:
         print("FAIL REQUIRE_CLEAN must be 0 or 1", file=sys.stderr)
         return 2
@@ -164,6 +167,7 @@ def main(argv: Sequence[str]) -> int:
                 version=version,
                 target=target,
                 require_clean_source=require_clean == "1",
+                source_revision=revision or None,
             )
         )
     except (OSError, subprocess.SubprocessError, VerificationError) as error:

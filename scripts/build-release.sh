@@ -8,6 +8,7 @@ compatibility="$repo_root/release/compatibility-v1.json"
 metadata="$repo_root/scripts/release_metadata.py"
 python_dir="$repo_root/python"
 python_bin="$python_dir/.venv/bin/python"
+python_version=3.13
 
 fail() {
   printf 'release build: %s\n' "$1" >&2
@@ -23,8 +24,8 @@ case "$(rustc --version)" in
 esac
 test "$(uv --version)" = "uv 0.12.7 (x86_64-unknown-linux-musl)" \
   || fail "release uv must be 0.12.7 for x86_64 Linux"
-test "$(uname -s)" = Linux || fail "the v0.1.0 release target is Linux"
-test "$(uname -m)" = x86_64 || fail "the v0.1.0 release target is x86_64"
+test "$(uname -s)" = Linux || fail "the release target is Linux"
+test "$(uname -m)" = x86_64 || fail "the release target is x86_64"
 
 source_revision="${RELEASE_SOURCE_REVISION:-$(git -C "$repo_root" rev-parse HEAD)}"
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" show -s --format=%ct "$source_revision")}"
@@ -53,7 +54,9 @@ cleanup() {
 }
 trap cleanup EXIT
 stage="$temporary/$bundle_name"
-mkdir -p "$stage/bin" "$stage/python/site-packages" "$stage/python/wheels" "$output_dir"
+runtime_site_packages="$stage/python/lib/python${python_version}/site-packages"
+mkdir -p "$stage/bin" "$stage/python/bin" "$runtime_site_packages" \
+  "$stage/python/wheels" "$output_dir"
 
 export SOURCE_DATE_EPOCH="$source_date_epoch"
 export CARGO_INCREMENTAL=0
@@ -71,6 +74,19 @@ CARGO_TARGET_DIR="$cargo_target" cargo build \
 install -m 0755 \
   "$cargo_target/$target/release/agent-manager-broker" \
   "$stage/bin/agent-manager-broker"
+
+# Ship the exact interpreter with the worker. Neovim and the installer never
+# need to create a venv or resolve Python dependencies on the destination
+# machine; Python discovers this relocatable prefix from python/bin/python.
+python_base="$($python_bin -I -c 'import sys; print(sys.base_prefix)')"
+test "${python_base:0:1}" = / || fail "Python base prefix must be absolute"
+test -x "$python_base/bin/python3.13" || fail "Python base interpreter is missing"
+test -d "$python_base/lib/python${python_version}" || fail "Python standard library is missing"
+install -m 0755 "$python_base/bin/python3.13" "$stage/python/bin/python"
+cp -a "$python_base/lib/python${python_version}/." "$stage/python/lib/python${python_version}/"
+find "$stage/python/lib/python${python_version}/site-packages" -mindepth 1 -depth -delete
+find "$stage/python/lib/python${python_version}" -depth \
+  \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -delete
 
 wheel_dir="$temporary/wheels"
 mkdir -p "$wheel_dir"
@@ -98,12 +114,14 @@ uv pip install \
   --python "$python_bin" \
   --python-version 3.13.15 \
   --python-platform "$target" \
-  --target "$stage/python/site-packages" \
+  --target "$runtime_site_packages" \
   --require-hashes \
   --only-binary :all: \
   --requirements "$stage/python/requirements.lock"
-rm -f -- "$stage/python/site-packages/.lock"
-"$python_bin" -m zipfile -e "$worker_wheel" "$stage/python/site-packages"
+rm -f -- "$runtime_site_packages/.lock"
+"$python_bin" -m zipfile -e "$worker_wheel" "$runtime_site_packages"
+"$stage/python/bin/python" -B -I -c \
+  'import agent_manager_claude_worker, claude_agent_sdk'
 
 install -m 0644 "$compatibility" "$stage/compatibility-v1.json"
 install -m 0644 "$repo_root/LICENSE" "$stage/LICENSE"

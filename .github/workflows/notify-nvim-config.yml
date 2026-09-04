@@ -5,6 +5,11 @@ on:
     types:
       - published
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable tag to redispatch
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,18 +20,59 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-24.04
     steps:
+      - name: Check out the published tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
       - name: Dispatch released Agent Manager commit
         env:
           GH_TOKEN: ${{ secrets.NVIM_CONFIG_DISPATCH_TOKEN }}
-          PLUGIN_COMMIT: ${{ github.sha }}
-          PLUGIN_TAG: ${{ github.event.release.tag_name }}
+          PLUGIN_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          SOURCE_GH_TOKEN: ${{ github.token }}
         run: |
           if [[ -z "${GH_TOKEN:-}" ]]; then
             echo "::notice title=nvim-config dispatch skipped::Configure NVIM_CONFIG_DISPATCH_TOKEN to enable cross-repository lock refreshes."
             exit 0
           fi
+          if [[ ! "$PLUGIN_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Only stable semantic-version release tags may be dispatched." >&2
+            exit 1
+          fi
+
+          read -r published_tag draft prerelease < <(
+            GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$PLUGIN_TAG" \
+              --jq '[.tag_name, .draft, .prerelease] | @tsv'
+          )
+          if [[ "$published_tag" != "$PLUGIN_TAG" || "$draft" != "false" || "$prerelease" != "false" ]]; then
+            echo "$PLUGIN_TAG is not a published stable release." >&2
+            exit 1
+          fi
+
+          tag_object_type="$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$PLUGIN_TAG" --jq '.object.type')"
+          tag_object_sha="$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$PLUGIN_TAG" --jq '.object.sha')"
+          if [[ "$tag_object_type" != "tag" ]]; then
+            echo "$PLUGIN_TAG is not an annotated tag." >&2
+            exit 1
+          fi
+          verification="$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+            "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.verification.verified')"
+          target_type="$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+            "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.type')"
+          target_sha="$(GH_TOKEN="$SOURCE_GH_TOKEN" gh api \
+            "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.sha')"
+          plugin_commit="$(git rev-list -n 1 "refs/tags/$PLUGIN_TAG")"
+          if [[ "$verification" != "true" || "$target_type" != "commit" || "$target_sha" != "$plugin_commit" ]]; then
+            echo "$PLUGIN_TAG is not a verified signed tag for the checked-out commit." >&2
+            exit 1
+          fi
+
           gh api --method POST repos/777lotto/nvim-config/dispatches \
             --raw-field event_type=plugin-release \
             --field 'client_payload[plugin]=agent-manager.nvimz' \
-            --field "client_payload[commit]=$PLUGIN_COMMIT" \
-            --field "client_payload[tag]=${PLUGIN_TAG:-manual}"
+            --field "client_payload[commit]=$plugin_commit" \
+            --field "client_payload[tag]=$PLUGIN_TAG"

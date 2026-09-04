@@ -5,14 +5,12 @@ or integration problem before the proposed implementation.
 
 ## Branch model
 
-- `bet` is the production/default branch.
-- `bluff` is the persistent integration branch.
+- `bluff` is the default, integration, and release-source branch.
 - Short-lived branches start from and return to `bluff`.
-- A `bluff` to `bet` pull request promotes a verified milestone.
+- Tested releases are signed annotated tags reachable from `bluff`.
 
-Do not target `bet` directly for ordinary changes. Commits and annotated
-Semantic Versioning release tags should retain the repository's configured
-signing behavior.
+Commits and annotated Semantic Versioning release tags should retain the
+repository's configured signing behavior.
 
 ## Local checks
 

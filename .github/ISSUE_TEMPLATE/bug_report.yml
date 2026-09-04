@@ -63,7 +63,7 @@ body:
     attributes:
       label: Checks
       options:
-        - label: I reproduced this on the current bet or bluff branch.
+        - label: I reproduced this on the current bluff branch or latest release.
           required: true
         - label: I removed prompts, tool payloads, credentials, and private paths.
           required: true
