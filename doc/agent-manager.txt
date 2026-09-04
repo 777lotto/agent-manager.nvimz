@@ -31,9 +31,13 @@ isolation.
       providers = {
         codex = {
           executable = "/path/to/codex",
+          model = "gpt-5.4", -- optional initial default
+          effort = "high",  -- optional initial default
         },
         claude = {
           python = "/path/to/worker-venv/bin/python",
+          model = "sonnet", -- optional initial default
+          effort = "high",  -- optional initial default
         },
       },
       worktrees = {
@@ -131,6 +135,10 @@ The Agents pane is a lazy filesystem tree rooted at the full home directory
 (for example, `/home/ai/`). Files and directories appear independently of
 session state. Known managed repositories, broker-owned agents, and active or
 saved standalone Codex/Claude sessions are overlaid beneath their directories.
+Directories containing sessions sort before directories without sessions.
+Directory contents begin collapsed. Each directory's direct sessions are
+indented beneath a highlighted, independently collapsible "Sessions" row and
+ordered by most recent activity across providers.
 The project where Agent Manager was opened carries a `[cwd]` marker; repository
 directories learned from managed sessions or explicit inventory carry
 `[repo]`. Place the cursor on a directory and press `sn` to use it as the
@@ -138,8 +146,10 @@ start-flow hint. Canonical clones and managed worktrees use the required
 `~/<repo>` and `~/worktrees/<repo>/<task>` layout without first running the
 repository-wide lifecycle audit; the lifecycle claim still validates the
 candidate before launch. Nonstandard paths fall back to explicit inventory.
-Choose a provider, enter the stable task ID, wait for the ready notice, then
-press `2` and `tp` to send the first prompt.
+Choose a provider and model. The most recently used model and effort are the
+defaults. Focus moves to Conversation for the initial prompt; no title is
+requested. Submitting that prompt creates the managed worktree using a
+generated task ID, which becomes the session title.
 
 Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
 badge. The different shapes and labels preserve provider identity under themes
@@ -152,6 +162,7 @@ from 1 to 1000.
     1 / 2 / 3 focus Agents / Conversation / Activity
     sn / so start a session / open or continue one
     sf / sa fork / archive a session
+    am / ae change model / effort for the next prompt
     tp / ts prompt / steer the selected agent
     ti / tc confirm interrupt / queue explicit editor context
     df / ds show a focused diff / delete focused provider history
@@ -164,8 +175,8 @@ from 1 to 1000.
     ? / g?  show mapping help
     q       close the workspace view
 
-Mappings are buffer-local. If which-key.nvim is available, `d`, `g`, `s`, and
-`t` open buffer-local groups without `<leader>`; Agent Manager does not change
+Mappings are buffer-local. If which-key.nvim is available, `a`, `d`, `g`, `s`,
+and `t` open buffer-local groups without `<leader>`; Agent Manager does not change
 which-key setup or the user's global/leader mappings. Closing the view does not
 approve, interrupt, or delete provider state. A provider approval or question
 opens a dedicated decision buffer that normal streaming redraws do not replace.
@@ -185,7 +196,8 @@ written automatically. An external change never reloads a modified buffer; use
 Embedded state ends when its broker exits and supports one live runtime. The
 durable broker persists provider identity and transcript-free metadata, replays
 retained events, and reloads provider history when replay is too old. Normal
-starts select a registered repository and stable task ID. The broker asks the
+starts select a registered repository, then generate a task ID when the first
+prompt is submitted. The broker asks the
 installed lifecycle authority to claim or resume the matching `agent/**`
 branch, lease, and linked worktree; it never duplicates that Git logic.
 

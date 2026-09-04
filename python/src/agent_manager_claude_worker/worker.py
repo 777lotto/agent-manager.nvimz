@@ -11,7 +11,7 @@ from typing import Final, Protocol, cast
 from uuid import uuid4
 
 from . import WORKER_PROTOCOL_VERSION, __version__
-from .interfaces import Adapter, Session
+from .interfaces import Adapter, HumanCallback, Session
 from .protocol import (
     MAX_FRAME_BYTES,
     JsonObject,
@@ -70,6 +70,8 @@ class Worker:
         self._initialized = False
         self._shutting_down = False
         self._sessions: dict[str, Session] = {}
+        self._session_options: dict[str, tuple[str | None, str | None]] = {}
+        self._session_callbacks: dict[str, HumanCallback] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._turn_tasks: dict[str, asyncio.Task[None]] = {}
         self._pending_responses: dict[str, int] = {}
@@ -141,6 +143,8 @@ class Worker:
 
         sessions = tuple(self._sessions.values())
         self._sessions.clear()
+        self._session_options.clear()
+        self._session_callbacks.clear()
         self._session_locks.clear()
         self._pending_responses.clear()
         for session in sessions:
@@ -295,6 +299,8 @@ class Worker:
             require_string(params.get("session_id"), "session_id") if resume else None
         )
         callback_session_id = None if fork else provider_session_id
+        model = optional_string(params.get("model"), "model")
+        effort = _claude_effort(params.get("effort"))
 
         async def callback(method: str, payload: JsonObject) -> JsonObject:
             callback_id = str(uuid4())
@@ -333,9 +339,13 @@ class Worker:
                 cwd=cwd,
                 resume=provider_session_id,
                 fork=fork,
+                model=model,
+                effort=effort,
                 callback=callback,
             )
             self._sessions[agent_id] = session
+            self._session_options[agent_id] = (model, effort)
+            self._session_callbacks[agent_id] = callback
             self._session_locks[agent_id] = asyncio.Lock()
             self._pending_responses[agent_id] = 0
             self._sequences[agent_id] = 0
@@ -352,6 +362,27 @@ class Worker:
             if self._active_turn(agent_id):
                 raise ProtocolFault(-32042, "agent already has an active turn")
             text = require_string(params.get("text"), "text")
+            model = optional_string(params.get("model"), "model")
+            effort = _claude_effort(params.get("effort"))
+            current_model, current_effort = self._session_options[agent_id]
+            if effort != current_effort:
+                provider_session_id = session.provider_session_id
+                if provider_session_id is None:
+                    raise ProtocolFault(-32046, "Claude runtime omitted its session identity")
+                await asyncio.wait_for(session.close(), timeout=SESSION_CLOSE_TIMEOUT_SECONDS)
+                session = await self._adapter.open_session(
+                    agent_id=agent_id,
+                    cwd=session.cwd,
+                    resume=provider_session_id,
+                    fork=False,
+                    model=model,
+                    effort=effort,
+                    callback=self._session_callbacks[agent_id],
+                )
+                self._sessions[agent_id] = session
+            elif model != current_model:
+                await session.set_model(model)
+            self._session_options[agent_id] = (model, effort)
             await session.prompt(text)
             self._pending_responses[agent_id] = 1
             task = asyncio.create_task(self._receive_turn(agent_id, session))
@@ -389,6 +420,8 @@ class Worker:
                 await asyncio.gather(task, return_exceptions=True)
             await asyncio.wait_for(session.close(), timeout=SESSION_CLOSE_TIMEOUT_SECONDS)
             del self._sessions[agent_id]
+            del self._session_options[agent_id]
+            del self._session_callbacks[agent_id]
             del self._session_locks[agent_id]
             self._pending_responses.pop(agent_id, None)
             self._sequences.pop(agent_id, None)
@@ -487,6 +520,13 @@ class Worker:
             )
             return
         future.set_result(cast(JsonObject, value))
+
+
+def _claude_effort(value: JsonValue) -> str | None:
+    effort = optional_string(value, "effort")
+    if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise ProtocolFault(-32602, "effort is not supported by Claude")
+    return effort
 
 
 async def run_stdio() -> None:

@@ -24,7 +24,7 @@ use crate::human::{
     codex_approval_response, codex_question_response, codex_request, resolved_event,
 };
 use crate::projection::{history, provider_sessions, render_input};
-use crate::protocol::{EventEnvelope, Provider, ProviderRuntime, RequestId};
+use crate::protocol::{EventEnvelope, Provider, ProviderOptions, ProviderRuntime, RequestId};
 use crate::worker::{
     ClaudeWorker, WorkerCommandSpec, WorkerError, WorkerInbound,
     runtime_identity as claude_runtime_identity,
@@ -47,6 +47,7 @@ pub(crate) enum AgentCommand {
         request_id: RequestId,
         text: String,
         attachments: Vec<Value>,
+        provider_options: ProviderOptions,
     },
     Steer {
         request_id: RequestId,
@@ -127,15 +128,28 @@ impl Default for RuntimeConfig {
     }
 }
 
+pub(crate) struct AgentSpawn {
+    pub provider: Provider,
+    pub agent_id: String,
+    pub cwd: PathBuf,
+    pub start_request_id: RequestId,
+    pub launch: SessionLaunch,
+    pub provider_options: ProviderOptions,
+}
+
 pub(crate) fn spawn_agent(
-    provider: Provider,
-    agent_id: String,
-    cwd: PathBuf,
-    start_request_id: RequestId,
-    launch: SessionLaunch,
+    spawn: AgentSpawn,
     config: RuntimeConfig,
     events: mpsc::UnboundedSender<RuntimeEvent>,
 ) -> (mpsc::Sender<AgentCommand>, JoinHandle<()>) {
+    let AgentSpawn {
+        provider,
+        agent_id,
+        cwd,
+        start_request_id,
+        launch,
+        provider_options,
+    } = spawn;
     let (commands_tx, commands_rx) = mpsc::channel(32);
     let handle = match provider {
         Provider::Codex => tokio::spawn(run_codex(
@@ -143,6 +157,7 @@ pub(crate) fn spawn_agent(
             cwd,
             start_request_id,
             launch,
+            provider_options,
             config.codex,
             config.callback_timeout,
             commands_rx,
@@ -153,6 +168,7 @@ pub(crate) fn spawn_agent(
             cwd,
             start_request_id,
             launch,
+            provider_options,
             config.claude,
             config.callback_timeout,
             commands_rx,
@@ -326,6 +342,7 @@ async fn run_codex(
     cwd: PathBuf,
     start_request_id: RequestId,
     launch: SessionLaunch,
+    provider_options: ProviderOptions,
     spec: CommandSpec,
     callback_timeout: Duration,
     mut commands: mpsc::Receiver<AgentCommand>,
@@ -364,9 +381,21 @@ async fn run_codex(
         return;
     };
     let started = match &launch {
-        SessionLaunch::Start => server.start_thread(&cwd).await,
-        SessionLaunch::Resume(session_id) => server.resume_thread(session_id, &cwd).await,
-        SessionLaunch::Fork(session_id) => server.fork_thread(session_id, &cwd).await,
+        SessionLaunch::Start => {
+            server
+                .start_thread(&cwd, provider_options.model.as_deref())
+                .await
+        }
+        SessionLaunch::Resume(session_id) => {
+            server
+                .resume_thread(session_id, &cwd, provider_options.model.as_deref())
+                .await
+        }
+        SessionLaunch::Fork(session_id) => {
+            server
+                .fork_thread(session_id, &cwd, provider_options.model.as_deref())
+                .await
+        }
     };
     let Ok(started) = started else {
         start_failed(
@@ -428,7 +457,12 @@ async fn run_codex(
                     break;
                 };
                 match command {
-                    AgentCommand::Prompt { request_id, text, attachments } => {
+                    AgentCommand::Prompt {
+                        request_id,
+                        text,
+                        attachments,
+                        provider_options,
+                    } => {
                         if active_turn_id.is_some() {
                             request_rejected(
                                 &events,
@@ -447,7 +481,15 @@ async fn run_codex(
                             );
                             continue;
                         };
-                        match server.start_turn(&provider_session_id, &rendered).await {
+                        match server
+                            .start_turn(
+                                &provider_session_id,
+                                &rendered,
+                                provider_options.model.as_deref(),
+                                provider_options.effort.as_deref(),
+                            )
+                            .await
+                        {
                             Ok(outcome) => {
                                 let Some(new_turn_id) = turn_id(&outcome.result).map(str::to_owned) else {
                                     request_failed(
@@ -1020,6 +1062,7 @@ async fn run_claude(
     cwd: PathBuf,
     start_request_id: RequestId,
     launch: SessionLaunch,
+    provider_options: ProviderOptions,
     spec: WorkerCommandSpec,
     callback_timeout: Duration,
     mut commands: mpsc::Receiver<AgentCommand>,
@@ -1058,14 +1101,34 @@ async fn run_claude(
         return;
     };
     let (open_method, open_params) = match &launch {
-        SessionLaunch::Start => ("session/start", json!({ "agent_id": agent_id, "cwd": cwd })),
+        SessionLaunch::Start => (
+            "session/start",
+            json!({
+                "agent_id": agent_id,
+                "cwd": cwd,
+                "model": provider_options.model,
+                "effort": provider_options.effort,
+            }),
+        ),
         SessionLaunch::Resume(session_id) => (
             "session/resume",
-            json!({ "agent_id": agent_id, "cwd": cwd, "session_id": session_id }),
+            json!({
+                "agent_id": agent_id,
+                "cwd": cwd,
+                "session_id": session_id,
+                "model": provider_options.model,
+                "effort": provider_options.effort,
+            }),
         ),
         SessionLaunch::Fork(session_id) => (
             "session/fork",
-            json!({ "agent_id": agent_id, "cwd": cwd, "session_id": session_id }),
+            json!({
+                "agent_id": agent_id,
+                "cwd": cwd,
+                "session_id": session_id,
+                "model": provider_options.model,
+                "effort": provider_options.effort,
+            }),
         ),
     };
     let Ok(started) = worker.request(open_method, open_params).await else {
@@ -1133,7 +1196,12 @@ async fn run_claude(
                     break;
                 };
                 match command {
-                    AgentCommand::Prompt { request_id, text, attachments } => {
+                    AgentCommand::Prompt {
+                        request_id,
+                        text,
+                        attachments,
+                        provider_options,
+                    } => {
                         if active_turn_id.is_some() {
                             request_rejected(
                                 &events,
@@ -1152,7 +1220,18 @@ async fn run_claude(
                             );
                             continue;
                         };
-                        match worker.request("turn/prompt", json!({ "agent_id": agent_id, "text": rendered })).await {
+                        match worker
+                            .request(
+                                "turn/prompt",
+                                json!({
+                                    "agent_id": agent_id,
+                                    "text": rendered,
+                                    "model": provider_options.model,
+                                    "effort": provider_options.effort,
+                                }),
+                            )
+                            .await
+                        {
                             Ok(outcome) => {
                                 let new_turn_id = Uuid::new_v4().to_string();
                                 let _ = events.send(RuntimeEvent::Response {

@@ -75,6 +75,7 @@ def agent(record: dict[str, Any]) -> dict[str, Any]:
             "adapter_version": None if record["provider"] == "codex" else "0.2.148",
             "executable": "/fixture/provider",
         },
+        "provider_options": record.get("provider_options", {}),
         "title": record["title"],
         "state": record["state"],
         "active_turn_id": record.get("turn_id"),
@@ -152,6 +153,7 @@ class Broker:
         workspace_strategy: str = "shared",
         worktree_path: str | None = None,
         managed_workspace: dict[str, Any] | None = None,
+        provider_options: dict[str, Any] | None = None,
     ) -> None:
         record = {
             "id": f"agent-lua-{len(self.records) + 1}",
@@ -165,6 +167,8 @@ class Broker:
             "workspace_strategy": workspace_strategy,
             "worktree_path": worktree_path,
             "managed_workspace": managed_workspace,
+            "provider_options": provider_options or {},
+            "has_prompted": False,
         }
         self.records.append(record)
         self.current = record
@@ -372,6 +376,7 @@ class Broker:
                         "branch": f"agent/{task_id}",
                         "base_branch": "bluff",
                     },
+                    params.get("provider_options"),
                 )
             else:
                 self.launch(
@@ -380,6 +385,7 @@ class Broker:
                     params["provider"],
                     params["cwd"],
                     "lua fixture",
+                    provider_options=params.get("provider_options"),
                 )
         elif method == "agent/resume":
             managed = params.get("managed_workspace")
@@ -400,6 +406,7 @@ class Broker:
                         "branch": f"agent/{task_id}",
                         "base_branch": "bluff",
                     },
+                    params.get("provider_options"),
                 )
             else:
                 self.launch(
@@ -408,6 +415,7 @@ class Broker:
                     params["provider"],
                     params["cwd"],
                     "resumed lua fixture",
+                    provider_options=params.get("provider_options"),
                 )
         elif method == "agent/attach":
             record = next(record for record in self.records if record["id"] == params["agent_id"])
@@ -425,21 +433,34 @@ class Broker:
                 )
         elif method == "agent/prompt":
             self.prompt_number += 1
+            self.current["provider_options"] = params.get(
+                "provider_options", self.current.get("provider_options", {})
+            )
+            if not self.current["has_prompted"]:
+                self.current["has_prompted"] = True
+                if not self.current.get("managed_workspace"):
+                    words = params["input"]["text"].split()
+                    self.current["title"] = " ".join(words[:6]) or "session"
             turn_id = f"turn-lua-{self.prompt_number}"
             respond(request, {"accepted": True, "turn_id": turn_id})
             self.set_state("running", turn_id)
             self.events.send("turn.started", {"turn": {"id": turn_id}})
-            if self.prompt_number == 1:
-                if not self.queued_context:
-                    raise AssertionError("first M2 prompt must have explicit editor context")
+            if self.prompt_number == 1 and self.queued_context:
                 self.queued_context.clear()
                 self.events.send(
                     "tool.started",
                     {"item": {"id": "tool-lua-1", "type": "commandExecution", "command": "fixture"}},
                 )
                 self.request_approval()
-            else:
+            elif self.prompt_number > 1:
                 self.events.send("message.delta", {"delta": "active"})
+            else:
+                self.events.send("message.delta", {"delta": "fixture response"})
+                self.events.send(
+                    "turn.completed",
+                    {"turn": {"id": turn_id, "status": "completed"}},
+                )
+                self.set_state("completed")
         elif method == "agent/approval/respond":
             if params["approval_id"] != "approval-lua-1":
                 reject(request, "unknown approval")

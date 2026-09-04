@@ -54,6 +54,9 @@ class ClaudeSession:
     async def prompt(self, text: str) -> None:
         await self.client.query(text)
 
+    async def set_model(self, model: str | None) -> None:
+        await self.client.set_model(model)
+
     async def steer(self, text: str) -> None:
         # ClaudeSDKClient.query uses the open streaming input channel. The
         # broker serializes ordinary turns; during an active turn this method
@@ -153,13 +156,15 @@ class ClaudeSdkAdapter:
         except (FileNotFoundError, ValueError) as error:
             raise ProtocolFault(-32041, "Claude session was not found") from error
 
-    async def open_session(
+    async def open_session(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
         cwd: Path,
         resume: str | None,
         fork: bool,
+        model: str | None,
+        effort: str | None,
         callback: HumanCallback,
     ) -> ClaudeSession:
         try:
@@ -216,6 +221,8 @@ class ClaudeSdkAdapter:
             include_partial_messages=True,
             include_hook_events=True,
             can_use_tool=can_use_tool,
+            model=model,
+            effort=cast(Any, effort),
             # M0 intentionally avoids loading executable behavior from the
             # target repository. Later provider configuration may expose a
             # reviewed setting-source policy explicitly.

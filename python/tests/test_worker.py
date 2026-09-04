@@ -43,6 +43,7 @@ class FakeSession(Session):
         self.provider_session_id = provider_session_id or "new-session"
         self.prompts: list[str] = []
         self.steers: list[str] = []
+        self.models: list[str | None] = []
         self.interrupt_count = 0
         self.closed = False
         self.release_turn = asyncio.Event()
@@ -52,6 +53,9 @@ class FakeSession(Session):
 
     async def steer(self, text: str) -> None:
         self.steers.append(text)
+
+    async def set_model(self, model: str | None) -> None:
+        self.models.append(model)
 
     async def receive_turn(self, emit: EventCallback) -> None:
         await emit(
@@ -74,7 +78,7 @@ class FakeAdapter:
     def __init__(self) -> None:
         self.callback: HumanCallback | None = None
         self.session: FakeSession | None = None
-        self.opens: list[tuple[str, Path, str | None, bool]] = []
+        self.opens: list[tuple[str, Path, str | None, bool, str | None, str | None]] = []
         self.deleted: list[tuple[str, str]] = []
         self.activity_available = True
 
@@ -112,17 +116,19 @@ class FakeAdapter:
     async def delete_session(self, session_id: str, directory: str) -> None:
         self.deleted.append((session_id, directory))
 
-    async def open_session(
+    async def open_session(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
         cwd: Path,
         resume: str | None,
         fork: bool,
+        model: str | None,
+        effort: str | None,
         callback: HumanCallback,
     ) -> Session:
         self.callback = callback
-        self.opens.append((agent_id, cwd, resume, fork))
+        self.opens.append((agent_id, cwd, resume, fork, model, effort))
         self.session = FakeSession(agent_id, cwd, "fork-session" if fork else resume)
         return self.session
 
@@ -201,14 +207,39 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             await send_and_wait(
                 worker,
                 writer,
-                request(2, "session/start", {"agent_id": "agent-1", "cwd": directory}),
+                request(
+                    2,
+                    "session/start",
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": directory,
+                        "model": "sonnet",
+                        "effort": "low",
+                    },
+                ),
+            )
+            initial_session = adapter.session
+            assert initial_session is not None
+            self.assertEqual(
+                adapter.opens,
+                [("agent-1", Path(directory), None, False, "sonnet", "low")],
             )
 
             await send_and_wait(
                 worker,
                 writer,
-                request(3, "turn/prompt", {"agent_id": "agent-1", "text": "hello"}),
+                request(
+                    3,
+                    "turn/prompt",
+                    {
+                        "agent_id": "agent-1",
+                        "text": "hello",
+                        "model": "opus",
+                        "effort": "low",
+                    },
+                ),
             )
+            self.assertEqual(initial_session.models, ["opus"])
             event = await writer.wait_for(lambda message: message.get("method") == "session/event")
             self.assertEqual(cast(JsonObject, event["params"])["worker_sequence"], 1)
 
@@ -235,9 +266,23 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             follow_up = await send_and_wait(
                 worker,
                 writer,
-                request(6, "turn/prompt", {"agent_id": "agent-1", "text": "next turn"}),
+                request(
+                    6,
+                    "turn/prompt",
+                    {
+                        "agent_id": "agent-1",
+                        "text": "next turn",
+                        "model": "opus",
+                        "effort": "high",
+                    },
+                ),
             )
             self.assertIs(cast(JsonObject, follow_up["result"])["accepted"], True)
+            self.assertIs(initial_session.closed, True)
+            self.assertEqual(
+                adapter.opens[-1],
+                ("agent-1", Path(directory), "new-session", False, "opus", "high"),
+            )
             await worker.close()
 
     async def test_discovery_history_specific_resume_and_fork(self) -> None:
@@ -322,8 +367,8 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 adapter.opens,
                 [
-                    ("resumed-agent", Path(directory), "source-session", False),
-                    ("forked-agent", Path(directory), "source-session", True),
+                    ("resumed-agent", Path(directory), "source-session", False, None, None),
+                    ("forked-agent", Path(directory), "source-session", True, None, None),
                 ],
             )
             await worker.close()

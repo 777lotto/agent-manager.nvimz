@@ -354,6 +354,7 @@ workspace_strategy    shared | worktree
 worktree_path         canonical path or null
 managed_workspace     repository/task/branch/base metadata or null
 runtime               actual provider/adapter versions, profile, executable
+provider_options      selected model and effort
 title                 user/provider title
 state                 starting | idle | running | waiting_input |
                       waiting_approval | completed | interrupted |
@@ -610,7 +611,11 @@ maintaining a competing set.
   pending-approval count. A lazy filesystem tree begins at the user's full home
   path and shows files and directories independently of session state.
   Known managed repositories, broker-owned agents, and all active and saved
-  external CLI sessions are overlaid below their actual directories. Session
+  external CLI sessions are overlaid below their actual directories.
+  Directories with descendant sessions sort first, directory contents begin
+  collapsed, and each directory's direct sessions appear in a highlighted,
+  independently collapsible `Sessions` branch ordered by latest activity.
+  Session
   refresh does not wait on or initiate the lifecycle authority's full cleanup
   audit. The opening project and a focused directory supply repository context
   to the start flow through the required canonical/worktree layout, with the
@@ -667,6 +672,7 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | `<CR>`              | Open, expand, or act on the stable item under the cursor. |
 | `sn` / `so`         | Start a session / open or continue a focused session.     |
 | `sf` / `sa`         | Fork / archive a focused session.                         |
+| `am` / `ae`         | Change model / effort for the next prompt.                 |
 | `tp` / `ts`         | Prompt / steer the selected agent.                        |
 | `ti` / `tc`         | Confirm interrupt / queue explicit editor context.        |
 | `df` / `ds`         | Show the focused diff / delete focused provider history.  |
@@ -681,7 +687,7 @@ Potentially destructive actions require a second confirmation or a dedicated
 approval view. Closing the workspace never means "approve," "interrupt," or
 "delete."
 
-When which-key.nvim is available, `d`, `g`, `s`, and `t` are registered as
+When which-key.nvim is available, `a`, `d`, `g`, `s`, and `t` are registered as
 buffer-local prefix groups without `<leader>`. The host configures those
 built-in keys through which-key's `opts.triggers` when it wants automatic
 popups. Agent Manager does not call `which-key.show()` from a mapping, configure

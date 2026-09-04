@@ -233,11 +233,16 @@ impl CodexAppServer {
         .await
     }
 
-    pub async fn start_thread(&mut self, cwd: &Path) -> Result<RequestOutcome, CodexError> {
+    pub async fn start_thread(
+        &mut self,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "thread/start",
             json!({
                 "cwd": cwd,
+                "model": model,
                 "approvalPolicy": "on-request",
                 "ephemeral": false
             }),
@@ -249,12 +254,14 @@ impl CodexAppServer {
         &mut self,
         thread_id: &str,
         cwd: &Path,
+        model: Option<&str>,
     ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "thread/resume",
             json!({
                 "threadId": thread_id,
                 "cwd": cwd,
+                "model": model,
                 "approvalPolicy": "on-request"
             }),
         )
@@ -265,12 +272,14 @@ impl CodexAppServer {
         &mut self,
         thread_id: &str,
         cwd: &Path,
+        model: Option<&str>,
     ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "thread/fork",
             json!({
                 "threadId": thread_id,
                 "cwd": cwd,
+                "model": model,
                 "approvalPolicy": "on-request",
                 "ephemeral": false
             }),
@@ -295,12 +304,16 @@ impl CodexAppServer {
         &mut self,
         thread_id: &str,
         prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
     ) -> Result<RequestOutcome, CodexError> {
         self.request(
             "turn/start",
             json!({
                 "threadId": thread_id,
-                "input": [{ "type": "text", "text": prompt }]
+                "input": [{ "type": "text", "text": prompt }],
+                "model": model,
+                "effort": effort
             }),
         )
         .await

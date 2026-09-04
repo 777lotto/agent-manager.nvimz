@@ -26,6 +26,15 @@ pub enum WorkspaceStrategy {
     Worktree,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderOptions {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManagedWorkspace {
     pub repository: String,
@@ -91,6 +100,8 @@ pub struct AgentSummary {
     pub worktree_path: Option<String>,
     pub managed_workspace: Option<ManagedWorkspace>,
     pub runtime: Option<ProviderRuntime>,
+    #[serde(default)]
+    pub provider_options: ProviderOptions,
     pub title: String,
     pub state: AgentState,
     pub active_turn_id: Option<String>,

@@ -77,7 +77,9 @@
       "required": ["agent_id", "cwd"],
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 }
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh", "max", null] }
       }
     },
     "resumeParams": {
@@ -87,7 +89,9 @@
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "cwd": { "type": "string", "minLength": 1, "maxLength": 8192 },
-        "session_id": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh", "max", null] }
       }
     },
     "turnParams": {
@@ -96,7 +100,9 @@
       "required": ["agent_id", "text"],
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "text": { "type": "string", "minLength": 1, "maxLength": 524288 }
+        "text": { "type": "string", "minLength": 1, "maxLength": 524288 },
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh", "max", null] }
       }
     },
     "agentParams": {

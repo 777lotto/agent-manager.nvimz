@@ -7,6 +7,10 @@ local View = require("agent_manager.view")
 
 local M = {}
 local runtime = nil
+local remembered_provider_options = {
+  codex = {},
+  claude = {},
+}
 local state_event_pending = false
 local state_event_data = nil
 local cached_summary = {
@@ -130,6 +134,53 @@ local function selected_agent()
   return runtime and runtime.model:selected_agent() or nil
 end
 
+local function normalized_provider_options(provider, options)
+  options = type(options) == "table" and options or {}
+  local normalized = {}
+  for _, key in ipairs({ "model", "effort" }) do
+    local value = options[key]
+    if value ~= nil and value ~= vim.NIL then
+      if type(value) ~= "string" or value == "" then
+        return nil, structured_error("input", "provider " .. key .. " must be a non-empty string")
+      end
+      normalized[key] = value
+    end
+  end
+  if
+    provider == "claude"
+    and normalized.effort
+    and not vim.tbl_contains({ "low", "medium", "high", "xhigh", "max" }, normalized.effort)
+  then
+    return nil, structured_error(
+      "input",
+      "Claude effort must be low, medium, high, xhigh, or max"
+    )
+  end
+  return normalized
+end
+
+local function agent_by_id(agent_id)
+  for _, agent in ipairs(runtime and runtime.model:list() or {}) do
+    if agent.id == agent_id then
+      return agent
+    end
+  end
+  return nil
+end
+
+local function options_for_agent(agent)
+  if not agent then
+    return {}
+  end
+  return vim.deepcopy(
+    runtime.agent_options[agent.id] or agent.provider_options or remembered_provider_options[agent.provider] or {}
+  )
+end
+
+local function remember_options(provider, options)
+  remembered_provider_options[provider] = vim.deepcopy(options or {})
+end
+
 local function has_live_agent()
   if not runtime then
     return false
@@ -248,6 +299,20 @@ function M.setup(opts)
     archive = function(session)
       M.confirm_archive(session)
     end,
+    model = function()
+      M.model_ui()
+    end,
+    effort = function()
+      M.effort_ui()
+    end,
+    provider_options = function(agent)
+      return options_for_agent(agent)
+    end,
+    select = function(session)
+      runtime.draft = nil
+      view:set_draft(nil)
+      return model:select(session.id)
+    end,
     allow = function(action)
       M.respond_approval(action.agent_id, action.id, "allow")
     end,
@@ -281,7 +346,16 @@ function M.setup(opts)
     client = client,
     view = view,
     ux = ux,
+    draft = nil,
+    agent_options = {},
   }
+  for _, provider in ipairs({ "codex", "claude" }) do
+    local configured = config.providers[provider] or {}
+    if next(remembered_provider_options[provider]) == nil then
+      local options = normalized_provider_options(provider, configured)
+      remembered_provider_options[provider] = options or {}
+    end
+  end
   publish_state(model, "setup")
   return true
 end
@@ -341,6 +415,12 @@ local function request_agent_start(params, callback)
         return
       end
       if result and result.agent then
+        runtime.agent_options[result.agent.id] = vim.deepcopy(
+          result.agent.provider_options or params.provider_options or {}
+        )
+        remember_options(result.agent.provider, runtime.agent_options[result.agent.id])
+        runtime.draft = nil
+        runtime.view:set_draft(nil)
         runtime.model:select(result.agent.id)
         runtime.view:schedule_render()
       end
@@ -365,6 +445,11 @@ function M.start(opts, callback)
     local err = structured_error("input", "provider must be 'codex' or 'claude'")
     finish(callback, nil, err)
     return nil, err
+  end
+  local provider_options, options_err = normalized_provider_options(provider, opts.provider_options)
+  if not provider_options then
+    finish(callback, nil, options_err)
+    return nil, options_err
   end
   if opts.managed_workspace ~= nil then
     local workspace = opts.managed_workspace
@@ -391,6 +476,7 @@ function M.start(opts, callback)
     end
     return request_agent_start({
       provider = provider,
+      provider_options = provider_options,
       managed_workspace = {
         repository = workspace.repository,
         task_id = workspace.task_id,
@@ -432,6 +518,7 @@ function M.start(opts, callback)
   end
   return request_agent_start({
     provider = provider,
+    provider_options = provider_options,
     cwd = cwd,
     workspace_strategy = strategy,
     worktree_path = worktree_path,
@@ -474,10 +561,15 @@ local function send_input(method, kind, agent_id, input, callback)
     finish(callback, nil, err)
     return nil, err
   end
+  local params = { agent_id = agent_id, input = normalized }
+  if kind == "prompt" then
+    local agent = agent_by_id(agent_id)
+    params.provider_options = options_for_agent(agent)
+  end
   return with_client(function()
     local _, request_err = runtime.client:request(
       method,
-      { agent_id = agent_id, input = normalized },
+      params,
       function(result, rpc_err)
         if rpc_err then
           report(rpc_err)
@@ -557,6 +649,10 @@ function M.attach(agent_id, callback)
           return
         end
         if result and result.agent then
+          runtime.draft = nil
+          runtime.view:set_draft(nil)
+          runtime.agent_options[result.agent.id] = vim.deepcopy(result.agent.provider_options or {})
+          remember_options(result.agent.provider, runtime.agent_options[result.agent.id])
           runtime.model:select(result.agent.id)
           runtime.view:schedule_render()
         end
@@ -691,6 +787,12 @@ function M.resume(opts, callback)
     provider = provider,
     provider_session_id = session_id,
   }
+  local provider_options, options_err = normalized_provider_options(provider, opts.provider_options)
+  if not provider_options then
+    finish(callback, nil, options_err)
+    return nil, options_err
+  end
+  params.provider_options = provider_options
   if opts.managed_workspace ~= nil then
     local workspace = opts.managed_workspace
     if type(workspace) ~= "table" then
@@ -767,6 +869,12 @@ function M.resume(opts, callback)
           return
         end
         if result and result.agent then
+          runtime.draft = nil
+          runtime.view:set_draft(nil)
+          runtime.agent_options[result.agent.id] = vim.deepcopy(
+            result.agent.provider_options or provider_options
+          )
+          remember_options(result.agent.provider, runtime.agent_options[result.agent.id])
           runtime.model:select(result.agent.id)
           M.history(result.agent.id)
           runtime.view:schedule_render()
@@ -804,6 +912,10 @@ function M.fork(agent_id, callback)
           return
         end
         if result and result.agent then
+          runtime.draft = nil
+          runtime.view:set_draft(nil)
+          runtime.agent_options[result.agent.id] = vim.deepcopy(result.agent.provider_options or {})
+          remember_options(result.agent.provider, runtime.agent_options[result.agent.id])
           runtime.model:select(result.agent.id)
           M.history(result.agent.id)
           runtime.view:schedule_render()
@@ -1337,89 +1449,45 @@ local function provider_name(provider)
   return provider == "claude" and "Claude Code" or "Codex"
 end
 
-local function started_notice(provider, result)
-  local agent = result and result.agent
-  if not agent then
-    return
-  end
-  vim.notify(
-    string.format(
-      "Agent Manager: %s is ready in %s — press tp to prompt",
-      provider_name(provider),
-      agent.cwd
-    )
-  )
+local function begin_session_draft(provider, context, repository)
+  local options = vim.deepcopy(remembered_provider_options[provider] or {})
+  vim.ui.input({
+    prompt = "New " .. provider_name(provider) .. " session · model (blank for provider default): ",
+    default = options.model or "",
+  }, function(model)
+    if model == nil then
+      return
+    end
+    options.model = model ~= "" and model or nil
+    local normalized, options_err = normalized_provider_options(provider, options)
+    if not normalized then
+      report(options_err)
+      return
+    end
+    remember_options(provider, normalized)
+    schedule_ui(function()
+      if not runtime then
+        return
+      end
+      runtime.draft = {
+        provider = provider,
+        provider_options = normalized,
+        context = vim.deepcopy(context),
+        repository = repository and repository.slug or nil,
+        starting = false,
+      }
+      runtime.view:set_draft(runtime.draft)
+      runtime.view:focus("conversation")
+      runtime.view:render()
+      M.prompt_ui()
+    end)
+  end)
 end
 
 local function start_new_session(provider, context)
   if not runtime.config.worktrees.lifecycle and runtime.config.worktrees.allow_shared then
-    local cwd = context.cwd or project_root()
-    vim.notify(string.format(
-      "Agent Manager: starting a new %s session in %s…",
-      provider_name(provider),
-      cwd
-    ))
-    local ok, start_err = M.start({
-      provider = provider,
-      cwd = cwd,
-      workspace_strategy = "shared",
-    }, function(result, err)
-      if not err then
-        started_notice(provider, result)
-      end
-    end)
-    if not ok and start_err then
-      report(start_err)
-    end
+    begin_session_draft(provider, context, nil)
     return
-  end
-
-  local function choose_session_name(repository)
-    schedule_ui(function()
-      vim.ui.input({
-        prompt = string.format(
-          "New %s session in %s · name (lowercase-with-hyphens): ",
-          provider_name(provider),
-          repository.slug
-        ),
-      }, function(session_name)
-        if not session_name or session_name == "" then
-          return
-        end
-        if not valid_managed_identifier(session_name, false) then
-          vim.notify(
-            "Agent Manager: session name must use lowercase letters, numbers, and single hyphens",
-            vim.log.levels.ERROR
-          )
-          return
-        end
-        schedule_ui(function()
-          vim.notify(
-            string.format(
-              "Agent Manager: starting a new %s session in %s/%s…",
-              provider_name(provider),
-              repository.slug,
-              session_name
-            )
-          )
-          local ok, start_err = M.start({
-            provider = provider,
-            managed_workspace = {
-              repository = repository.slug,
-              task_id = session_name,
-              resume = false,
-            },
-          }, function(result, err)
-            if not err then
-              started_notice(provider, result)
-            end
-          end)
-          if not ok and start_err then
-            report(start_err)
-          end
-        end)
-      end)
-    end)
   end
 
   local cached = runtime.model:workspace_list()
@@ -1435,7 +1503,7 @@ local function start_new_session(provider, context)
     known = known or { slug = layout.repository }
   end
   if known then
-    choose_session_name(known)
+    begin_session_draft(provider, context, known)
     return
   end
 
@@ -1446,7 +1514,7 @@ local function start_new_session(provider, context)
     end
     local repository = contextual_repository(repositories, context)
     if repository then
-      choose_session_name(repository)
+      begin_session_draft(provider, context, repository)
       return
     end
     vim.ui.select(repositories, {
@@ -1454,7 +1522,9 @@ local function start_new_session(provider, context)
       format_item = repository_label,
     }, function(selected)
       if selected then
-        choose_session_name(selected)
+        schedule_ui(function()
+          begin_session_draft(provider, context, selected)
+        end)
       end
     end)
   end)
@@ -1529,6 +1599,7 @@ local function resume_with_workspace(session, managed_workspace)
   local ok, resume_err = M.resume({
     provider = session.provider,
     provider_session_id = session.provider_session_id,
+    provider_options = session.provider_options or remembered_provider_options[session.provider],
     managed_workspace = managed_workspace,
   }, function(result, err)
     if not err then
@@ -1665,6 +1736,7 @@ function M.resume_session_ui(session)
       M.resume({
         provider = session.provider,
         provider_session_id = session.provider_session_id,
+        provider_options = session.provider_options or remembered_provider_options[session.provider],
         cwd = session.cwd,
         workspace_strategy = "shared",
       }, function(result, err)
@@ -1712,9 +1784,164 @@ local function input_ui(prompt, callback)
   end)
 end
 
+local function draft_task_id()
+  local suffix = math.floor(vim.uv.hrtime() % 1000000)
+  return string.format("session-%s-%06d", os.date("!%Y%m%d-%H%M%S"), suffix)
+end
+
+local function start_draft_with_prompt(text)
+  local draft = runtime and runtime.draft
+  if not draft then
+    return nil, structured_error("input", "no session draft is configured")
+  end
+  if draft.starting then
+    vim.notify("Agent Manager: the session is already starting", vim.log.levels.WARN)
+    return true
+  end
+  draft.starting = true
+  runtime.view:set_draft(draft)
+  local start_options = {
+    provider = draft.provider,
+    provider_options = draft.provider_options,
+  }
+  if draft.repository then
+    start_options.managed_workspace = {
+      repository = draft.repository,
+      task_id = draft_task_id(),
+      resume = false,
+    }
+  else
+    start_options.cwd = draft.context.cwd or project_root()
+    start_options.workspace_strategy = "shared"
+  end
+  local ok, start_err = M.start(start_options, function(result, err)
+    if err then
+      if runtime and runtime.draft == draft then
+        draft.starting = false
+        runtime.view:set_draft(draft)
+      end
+      return
+    end
+    local agent = result and result.agent
+    if not agent then
+      return
+    end
+    local prompted, prompt_err = M.prompt(agent.id, text)
+    if not prompted and prompt_err then
+      report(prompt_err)
+    end
+  end)
+  if not ok then
+    draft.starting = false
+    runtime.view:set_draft(draft)
+    if start_err then
+      report(start_err)
+    end
+  end
+  return ok, start_err
+end
+
+local function provider_option_subject()
+  if runtime.draft then
+    return runtime.draft.provider, runtime.draft.provider_options, runtime.draft
+  end
+  local agent = selected_agent()
+  if not agent then
+    return nil
+  end
+  return agent.provider, options_for_agent(agent), agent
+end
+
+local function update_provider_option(provider, subject, key, value)
+  local options = vim.deepcopy(
+    subject == runtime.draft and subject.provider_options or options_for_agent(subject)
+  )
+  options[key] = value
+  local normalized, options_err = normalized_provider_options(provider, options)
+  if not normalized then
+    report(options_err)
+    return false
+  end
+  subject.provider_options = normalized
+  remember_options(provider, normalized)
+  if subject == runtime.draft then
+    runtime.draft.provider_options = normalized
+    runtime.view:set_draft(runtime.draft)
+  else
+    runtime.agent_options[subject.id] = normalized
+    runtime.view:schedule_render()
+  end
+  return true
+end
+
+function M.model_ui()
+  if not ensure_setup() then
+    return
+  end
+  local provider, options, subject = provider_option_subject()
+  if not provider then
+    vim.notify("Agent Manager: start or select a session before changing its model", vim.log.levels.WARN)
+    return
+  end
+  vim.ui.input({
+    prompt = provider_name(provider) .. " model (blank for provider default): ",
+    default = options.model or "",
+  }, function(model)
+    if model ~= nil then
+      update_provider_option(provider, subject, "model", model ~= "" and model or nil)
+    end
+  end)
+end
+
+function M.effort_ui()
+  if not ensure_setup() then
+    return
+  end
+  local provider, options, subject = provider_option_subject()
+  if not provider then
+    vim.notify("Agent Manager: start or select a session before changing effort", vim.log.levels.WARN)
+    return
+  end
+  local choices = provider == "claude"
+      and { "default", "low", "medium", "high", "xhigh", "max" }
+    or { "default", "minimal", "low", "medium", "high", "xhigh", "max" }
+  local current = options.effort or "default"
+  for index, value in ipairs(choices) do
+    if value == current and index > 1 then
+      table.remove(choices, index)
+      table.insert(choices, 1, value)
+      break
+    end
+  end
+  vim.ui.select(choices, {
+    prompt = provider_name(provider) .. " effort",
+    format_item = function(value)
+      return value == current and (value .. " (current)") or value
+    end,
+  }, function(effort)
+    if effort then
+      update_provider_option(
+        provider,
+        subject,
+        "effort",
+        effort ~= "default" and effort or nil
+      )
+    end
+  end)
+end
+
 function M.prompt_ui(initial)
   if not ensure_setup() then
     return
+  end
+  if runtime.draft then
+    if initial and initial ~= "" then
+      return start_draft_with_prompt(initial)
+    end
+    input_ui("Prompt: ", function(text)
+      start_draft_with_prompt(text)
+    end)
+    return true
   end
   local agent = selected_agent()
   if not agent then
