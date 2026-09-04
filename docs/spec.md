@@ -288,6 +288,8 @@ socket. Every connection begins with `initialize` and `initialized`.
 The initialization response includes:
 
 - protocol version;
+- protocol revision, which prevents a same-major stale broker from serving a
+  newer checkout partially;
 - broker version;
 - provider compatibility profiles and tested schema/package baselines;
 - supported request and event capabilities;
@@ -628,11 +630,10 @@ maintaining a competing set.
   refresh does not wait on or initiate the lifecycle authority's full cleanup
   audit. The opening project and a focused directory supply repository context
   to the start flow through the required canonical/worktree layout, with the
-  lifecycle claim validating the candidate before launch. Provider
-  badges use distinct labels and shapes in addition to semantic blue/orange
-  styling; green `ACTIVE`, dark `RESUME`, and fail-closed `CHECK` badges expose
-  session ownership without relying on color alone. Records are de-duplicated
-  by provider session ID.
+  lifecycle claim validating the candidate before launch. A key at the top maps
+  distinct provider and session-state symbols to semantic colors. Rows retain
+  only the provider symbol, state symbol, and title so repeated labels do not
+  crowd the directory tree. Records are de-duplicated by provider session ID.
 - **Conversation:** user and assistant messages with incremental updates,
   compaction boundaries, provider notices, and a persistent bottom prompt box.
   The prompt wraps at word boundaries, expands between configured minimum and
@@ -644,7 +645,8 @@ maintaining a competing set.
   streaming redraws.
 - **Diff:** repository or file diff with provider/agent attribution.
 - **Input:** the multiline Conversation prompt box with explicit attachments
-  and target agent.
+  and target agent. Submitted text clears only after the broker accepts it;
+  failed submissions remain available to edit and retry.
 - **Help:** visible, responsive mapping guide.
 
 Every view uses scratch buffers with a stable `filetype` and no swap file. The

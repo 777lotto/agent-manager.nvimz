@@ -20,6 +20,18 @@ local function inline(value)
   return value:gsub("%z", "�"):gsub("[\r\n]", " ")
 end
 
+local function add_phrase_highlight(highlights, line_number, line, phrase, group)
+  local start = line:find(phrase, 1, true)
+  if start then
+    table.insert(highlights, {
+      line = line_number,
+      group = group,
+      start = start - 1,
+      finish = start - 1 + #phrase,
+    })
+  end
+end
+
 local function text_lines(value)
   value = tostring(value or ""):gsub("%z", "�"):gsub("\r", "")
   return vim.split(value, "\n", { plain = true })
@@ -53,15 +65,15 @@ end
 
 local function session_badge(session)
   if session_is_active(session) then
-    return "● ACTIVE", "AgentManagerStatusSuccess"
+    return "●", "AgentManagerStatusSuccess"
   end
   if not broker_session_is_active(session) and session.activity_known == false then
-    return "? CHECK", "AgentManagerStatusWaiting"
+    return "?", "AgentManagerStatusWaiting"
   end
   if type(session.provider_session_id) == "string" and session.provider_session_id ~= "" then
-    return "○ RESUME", "AgentManagerInput"
+    return "○", "AgentManagerInput"
   end
-  return "× ENDED", "AgentManagerMuted"
+  return "×", "AgentManagerMuted"
 end
 
 local function usage_lines(value, prefix, lines, depth)
@@ -375,6 +387,7 @@ function View.new(model, actions, opts)
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
     prompt_namespace = vim.api.nvim_create_namespace("AgentManagerPrompt"),
     render_pending = false,
+    prompt_submitting = false,
     last_action_id = nil,
   }, View)
   self:_create_autocmds()
@@ -898,9 +911,22 @@ function View:_submit_prompt()
   if not self.actions.prompt then
     return false
   end
-  local ok = self.actions.prompt(text)
-  if ok then
-    self:_clear_prompt()
+  if self.prompt_submitting then
+    return false
+  end
+  self.prompt_submitting = true
+  local ok = self.actions.prompt(text, function(_, err)
+    self.prompt_submitting = false
+    if err or not valid_buffer(buffer) then
+      return
+    end
+    local current = table.concat(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), "\n")
+    if current == text then
+      self:_clear_prompt()
+    end
+  end)
+  if not ok then
+    self.prompt_submitting = false
   end
   return ok and true or false
 end
@@ -1147,15 +1173,27 @@ end
 
 function View:_render_agents()
   local sessions = self.model:session_list()
+  local provider_legend = " key · ● Codex · ◆ Claude"
+  local primary_state_legend = "       ● active · ○ resume"
+  local secondary_state_legend = "       ? check · × ended"
   local lines = {
     " 1 AGENTS · BY DIRECTORY",
     string.format(" broker: %s · sessions: %d", inline(self.model.client_state), #sessions),
+    provider_legend,
+    primary_state_legend,
+    secondary_state_legend,
     "",
   }
   local highlights = {
     { line = 1, group = "AgentManagerTitle" },
     { line = 2, group = "AgentManagerMuted" },
   }
+  add_phrase_highlight(highlights, 3, provider_legend, "● Codex", "AgentManagerProviderCodex")
+  add_phrase_highlight(highlights, 3, provider_legend, "◆ Claude", "AgentManagerProviderClaude")
+  add_phrase_highlight(highlights, 4, primary_state_legend, "● active", "AgentManagerStatusSuccess")
+  add_phrase_highlight(highlights, 4, primary_state_legend, "○ resume", "AgentManagerInput")
+  add_phrase_highlight(highlights, 5, secondary_state_legend, "? check", "AgentManagerStatusWaiting")
+  add_phrase_highlight(highlights, 5, secondary_state_legend, "× ended", "AgentManagerMuted")
   self.agent_rows = {}
   self.session_rows = {}
   self.session_group_rows = {}
@@ -1188,7 +1226,7 @@ function View:_render_agents()
     session = vim.deepcopy(session)
     session.cwd = session_path(session.cwd, self.home)
     local selected = session.managed and session.id == self.model.selected_agent_id and ">" or " "
-    local provider = session.provider == "claude" and "◆ CLAUDE" or "● CODEX"
+    local provider = session.provider == "claude" and "◆" or "●"
     local badge, badge_group = session_badge(session)
     local pending = session.managed and #self.model:pending(session.id) or 0
     local marker = pending > 0 and (" !" .. tostring(pending)) or ""

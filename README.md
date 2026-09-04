@@ -59,7 +59,10 @@ cargo build --release -p agent-manager-broker
 ```
 
 For a source checkout, Agent Manager discovers the release/debug broker and the
-locked Python worker environment relative to the plugin root. A packaged
+locked Python worker environment relative to the plugin root. The handshake
+checks a public protocol revision, so an older local broker fails immediately
+with rebuild guidance instead of partially accepting a newer UI. Re-run the
+release build after updating the checkout. A packaged
 installation should put `agent-manager-broker` on `PATH` and configure the
 installed worker Python explicitly:
 
@@ -145,13 +148,14 @@ To start a session from the workspace:
    That row uses the configured or most recently selected model when present,
    otherwise the provider default.
 4. Focus moves directly to the prompt box at the bottom of Conversation. It
-   wraps at word boundaries, grows up to `ui.prompt_max_height`, and returns to
-   `ui.prompt_min_height` after `<CR>` sends the prompt. Use `<C-j>` for a
-   newline. Only the first submitted prompt creates the safe worktree and
-   starts the provider. Managed sessions use the generated worktree name as
-   their title; shared sessions use the first few prompt words in the live UI.
-   Use `am` or `ae` before this prompt or between later turns to change model or
-   effort.
+   wraps at word boundaries and grows up to `ui.prompt_max_height`. After
+   `<CR>`, the text remains in place until the broker accepts it; a rejection
+   leaves it available to edit and retry. Accepted text clears and the box
+   returns to `ui.prompt_min_height`. Use `<C-j>` for a newline. Only the first
+   submitted prompt creates the safe worktree and starts the provider. Managed
+   sessions use the generated worktree name as their title; shared sessions use
+   the first few prompt words in the live UI. Use `am` or `ae` before this
+   prompt or between later turns to change model or effort.
 
 Starting from another pane still works; Agent Manager asks which registered
 repository to use. `:AgentManagerStart [codex|claude]` uses the current project
@@ -188,18 +192,16 @@ Directories with sessions anywhere below them sort before directories without
 sessions. Child directory contents begin collapsed. A visible directory's
 direct sessions remain available in a highlighted, independently expandable
 `Sessions` branch even while that directory's files and subdirectories are
-collapsed. Sessions are ordered by latest activity across both providers.
-Codex rows use a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE`
-badge, so provider identity remains clear even when a theme does not preserve
-the intended color.
-Green `● ACTIVE` labels identify live writers. Dark `○ RESUME` labels identify
-saved sessions with no live writer; focus one and press `<CR>` or `so` to
-continue it. A `? CHECK` label means activity could not be verified, so Agent
-Manager will not risk opening a second writer. Sessions are discovered across
-the AI container when the workspace opens and whenever `gr` refreshes the view. Set
+collapsed. Sessions are ordered by latest activity across both providers. The
+key at the top maps provider symbols (`● Codex`, `◆ Claude`) and state symbols
+(`● active`, `○ resume`, `? check`, `× ended`) to their semantic colors. Each
+session row contains only its two colored symbols and title. A resumable session
+has no live writer; focus it and press `<CR>` or `so` to continue it. The check
+state means activity could not be verified, so Agent Manager will not risk
+opening a second writer. Sessions are discovered across the AI container when
+the workspace opens and whenever `gr` refreshes the view. Set
 `ui.external_sessions = false` to disable discovery, or lower
-`ui.external_session_limit` from its default of 1000 to cap each provider
-query.
+`ui.external_session_limit` from its default of 1000 to cap each provider query.
 
 ### Runtime safety boundary
 

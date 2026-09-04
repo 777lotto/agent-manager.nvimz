@@ -12,7 +12,10 @@ language bindings and fixtures must agree with them.
 Requests require a string or integer ID. Parse/invalid-request error responses
 may carry the JSON-RPC-required null ID when the peer could not recover a valid
 request ID. The public connection completes its handshake with an `initialized`
-notification after a successful `initialize` response.
+notification after a successful `initialize` response. That response carries
+both major protocol version 1 and protocol revision 1. The revision lets the
+co-shipped Neovim client reject an older same-major broker before it attempts
+new additive methods or request shapes.
 
 Codex App Server is a provider protocol, not either Agent Manager contract.
 The reviewed 0.152.0 schema baseline deliberately omits the JSON-RPC header on

@@ -22,7 +22,7 @@ use crate::codex::{CODEX_COMPATIBILITY_PROFILE, CODEX_SCHEMA_BASELINE_VERSION, C
 use crate::framing::{BoundedFrame, read_bounded_line};
 use crate::protocol::{
     AgentState, AgentSummary, Capability, CapabilityName, EventEnvelope, ManagedWorkspace,
-    PROTOCOL_VERSION, Provider, ProviderOptions, RequestId, WorkspaceStrategy,
+    PROTOCOL_REVISION, PROTOCOL_VERSION, Provider, ProviderOptions, RequestId, WorkspaceStrategy,
 };
 use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
@@ -665,6 +665,7 @@ impl Broker {
             request_id,
             json!({
                 "protocol_version": PROTOCOL_VERSION,
+                "protocol_revision": PROTOCOL_REVISION,
                 "broker_version": BROKER_VERSION,
                 "mode": self.mode.name(),
                 "providers": {
