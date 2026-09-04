@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "MIT"
 authors = [{ name = "zemrip-ai" }]
-dependencies = ["claude-agent-sdk==0.2.148"]
+dependencies = ["claude-agent-sdk==0.2.150"]
 
 [project.scripts]
 agent-manager-claude-worker = "agent_manager_claude_worker.__main__:main"
