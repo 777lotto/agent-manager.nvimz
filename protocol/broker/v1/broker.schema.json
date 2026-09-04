@@ -285,6 +285,38 @@
         "active_only": { "type": "boolean", "default": false }
       }
     },
+    "providerModelListParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" }
+      }
+    },
+    "providerModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "description", "is_default"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "description": { "type": ["string", "null"], "maxLength": 4096 },
+        "is_default": { "type": "boolean" }
+      }
+    },
+    "providerModelListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "models"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/provider" },
+        "models": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/providerModel" }
+        }
+      }
+    },
     "providerSessionDeleteParams": {
       "type": "object",
       "additionalProperties": false,
@@ -450,6 +482,7 @@
             "workspace/list",
             "workspace/handoff",
             "workspace/diff",
+            "provider/model/list",
             "provider/session/list",
             "provider/session/delete",
             "agent/start",
@@ -476,6 +509,7 @@
         { "if": { "properties": { "method": { "enum": ["agent/list", "workspace/list", "broker/shutdown"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
         { "if": { "properties": { "method": { "const": "workspace/handoff" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/managedWorkspaceParams" } } } },
         { "if": { "properties": { "method": { "const": "workspace/diff" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/workspaceDiffParams" } } } },
+        { "if": { "properties": { "method": { "const": "provider/model/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerModelListParams" } } } },
         { "if": { "properties": { "method": { "const": "provider/session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionListParams" } } } },
         { "if": { "properties": { "method": { "const": "provider/session/delete" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/providerSessionDeleteParams" } } } },
         { "if": { "properties": { "method": { "const": "agent/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },

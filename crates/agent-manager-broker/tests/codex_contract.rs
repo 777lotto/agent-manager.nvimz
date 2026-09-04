@@ -19,6 +19,9 @@ async fn proves_initialize_history_turn_event_and_approval_flow() {
     let initialized = server.initialize().await.expect("initialize");
     assert_eq!(initialized["platformOs"], "linux");
 
+    let models = server.list_models(None, 100).await.expect("list models");
+    assert_eq!(models.result["data"][0]["model"], "gpt-test");
+
     let listed = server.list_threads(None, 10).await.expect("list threads");
     assert_eq!(
         listed.result["data"].as_array().expect("data array").len(),

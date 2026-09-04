@@ -92,6 +92,12 @@ INVALID_CASES: dict[str, tuple[dict[str, Any], ...]] = {
                 },
             },
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "provider/model/list",
+            "params": {"provider": "other"},
+        },
     ),
     "worker.schema.json": (
         {"jsonrpc": "2.0", "id": True, "method": "session/list", "params": {}},

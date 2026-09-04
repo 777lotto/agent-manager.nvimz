@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": "models-1",
+  "result": {
+    "provider": "codex",
+    "models": [
+      {
+        "id": "gpt-fixture",
+        "display_name": "GPT Fixture",
+        "description": "Deterministic fixture model",
+        "is_default": true
+      }
+    ]
+  }
+}

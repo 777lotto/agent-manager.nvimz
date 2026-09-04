@@ -37,6 +37,8 @@ generated bundle is a review baseline, not a required installed CLI version.
 - The additive `provider/session/list` `active_only` flag and optional `cwd`
   support metadata-only cross-project CLI discovery; omitting the flag retains
   resumable-session behavior.
+- Additive `provider/model/list` projects the selectable model catalog without
+  starting a model turn. Provider-specific IDs and descriptions remain intact.
 - Additive `provider/session/delete` and private `session/delete` requests
   hard-delete only an exact inactive provider history record. They fail closed
   when writer activity cannot be verified and do not delete workspace files.

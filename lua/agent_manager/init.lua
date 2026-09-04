@@ -270,8 +270,8 @@ function M.setup(opts)
     start = function(context)
       M.start_ui(context)
     end,
-    prompt = function()
-      M.prompt_ui()
+    prompt = function(text)
+      return M.prompt_ui(text)
     end,
     steer = function()
       M.steer_ui()
@@ -348,6 +348,7 @@ function M.setup(opts)
     ux = ux,
     draft = nil,
     agent_options = {},
+    model_catalogs = {},
   }
   for _, provider in ipairs({ "codex", "claude" }) do
     local configured = config.providers[provider] or {}
@@ -756,6 +757,37 @@ function M.sessions(opts, callback)
       "provider/session/list",
       params,
       function(result, rpc_err)
+        if rpc_err then
+          report(rpc_err)
+        end
+        finish(callback, result, rpc_err)
+      end
+    )
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
+function M.models(provider, callback)
+  if provider ~= "codex" and provider ~= "claude" then
+    local err = structured_error("input", "model discovery requires a Codex or Claude provider")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  if runtime and runtime.model_catalogs[provider] then
+    finish(callback, vim.deepcopy(runtime.model_catalogs[provider]), nil)
+    return true
+  end
+  return with_client(function()
+    local _, request_err = runtime.client:request(
+      "provider/model/list",
+      { provider = provider },
+      function(result, rpc_err)
+        if runtime and result and type(result.models) == "table" then
+          runtime.model_catalogs[provider] = vim.deepcopy(result)
+        end
         if rpc_err then
           report(rpc_err)
         end
@@ -1449,39 +1481,118 @@ local function provider_name(provider)
   return provider == "claude" and "Claude Code" or "Codex"
 end
 
-local function begin_session_draft(provider, context, repository)
-  local options = vim.deepcopy(remembered_provider_options[provider] or {})
-  vim.ui.input({
-    prompt = "New " .. provider_name(provider) .. " session · model (blank for provider default): ",
-    default = options.model or "",
-  }, function(model)
-    if model == nil then
-      return
+local function picker_text(value)
+  return tostring(value or ""):gsub("%z", "�"):gsub("[\r\n]", " ")
+end
+
+local function picker_key(index)
+  if index <= 9 then
+    return tostring(index)
+  end
+  if index <= 35 then
+    return string.char(string.byte("a") + index - 10)
+  end
+  return tostring(index)
+end
+
+local function model_choices(models, default_model)
+  local choices = {
+    {
+      model = default_model,
+      display_name = "Default",
+      description = default_model and ("Use " .. default_model) or "Use the provider default",
+      default_choice = true,
+    },
+  }
+  local seen = {}
+  for _, model in ipairs(type(models) == "table" and models or {}) do
+    if
+      type(model) == "table"
+      and type(model.id) == "string"
+      and model.id ~= ""
+      and not seen[model.id]
+    then
+      seen[model.id] = true
+      table.insert(choices, {
+        model = model.id,
+        display_name = type(model.display_name) == "string" and model.display_name or model.id,
+        description = type(model.description) == "string" and model.description or nil,
+        provider_default = model.is_default == true,
+      })
     end
-    options.model = model ~= "" and model or nil
-    local normalized, options_err = normalized_provider_options(provider, options)
-    if not normalized then
-      report(options_err)
-      return
-    end
-    remember_options(provider, normalized)
+  end
+  for index, choice in ipairs(choices) do
+    choice.key = picker_key(index)
+  end
+  return choices
+end
+
+local function model_choice_label(choice)
+  local label = choice.key .. "  " .. picker_text(choice.display_name)
+  if choice.provider_default then
+    label = label .. " (provider default)"
+  end
+  if choice.description and choice.description ~= "" then
+    label = label .. " — " .. picker_text(choice.description)
+  end
+  return label
+end
+
+local function select_model(provider, default_model, prompt, callback)
+  local expected_runtime = runtime
+  M.models(provider, function(result)
     schedule_ui(function()
-      if not runtime then
+      if not runtime or runtime ~= expected_runtime then
         return
       end
-      runtime.draft = {
-        provider = provider,
-        provider_options = normalized,
-        context = vim.deepcopy(context),
-        repository = repository and repository.slug or nil,
-        starting = false,
-      }
-      runtime.view:set_draft(runtime.draft)
-      runtime.view:focus("conversation")
-      runtime.view:render()
-      M.prompt_ui()
+      local choices = model_choices(result and result.models or {}, default_model)
+      vim.ui.select(choices, {
+        prompt = prompt,
+        format_item = model_choice_label,
+      }, function(choice)
+        if choice then
+          schedule_ui(function()
+            if runtime == expected_runtime then
+              callback(choice.model)
+            end
+          end)
+        end
+      end)
     end)
   end)
+end
+
+local function begin_session_draft(provider, context, repository)
+  local options = vim.deepcopy(remembered_provider_options[provider] or {})
+  select_model(
+    provider,
+    options.model,
+    "New " .. provider_name(provider) .. " session · choose model",
+    function(model)
+      options.model = model
+      local normalized, options_err = normalized_provider_options(provider, options)
+      if not normalized then
+        report(options_err)
+        return
+      end
+      remember_options(provider, normalized)
+      schedule_ui(function()
+        if not runtime then
+          return
+        end
+        runtime.draft = {
+          provider = provider,
+          provider_options = normalized,
+          context = vim.deepcopy(context),
+          repository = repository and repository.slug or nil,
+          starting = false,
+        }
+        runtime.view:set_draft(runtime.draft)
+        runtime.view:render()
+        runtime.view:focus_prompt()
+      end)
+    end
+  )
 end
 
 local function start_new_session(provider, context)
@@ -1883,13 +1994,8 @@ function M.model_ui()
     vim.notify("Agent Manager: start or select a session before changing its model", vim.log.levels.WARN)
     return
   end
-  vim.ui.input({
-    prompt = provider_name(provider) .. " model (blank for provider default): ",
-    default = options.model or "",
-  }, function(model)
-    if model ~= nil then
-      update_provider_option(provider, subject, "model", model ~= "" and model or nil)
-    end
+  select_model(provider, options.model, provider_name(provider) .. " model", function(model)
+    update_provider_option(provider, subject, "model", model)
   end)
 end
 
@@ -1934,14 +2040,15 @@ function M.prompt_ui(initial)
   if not ensure_setup() then
     return
   end
+  local function focus_prompt()
+    runtime.view:open()
+    return runtime.view:focus_prompt()
+  end
   if runtime.draft then
     if initial and initial ~= "" then
       return start_draft_with_prompt(initial)
     end
-    input_ui("Prompt: ", function(text)
-      start_draft_with_prompt(text)
-    end)
-    return true
+    return focus_prompt()
   end
   local agent = selected_agent()
   if not agent then
@@ -1967,13 +2074,7 @@ function M.prompt_ui(initial)
     end
     return ok, err
   end
-  input_ui("Prompt: ", function(text)
-    local ok, err = M.prompt(nil, text)
-    if not ok and err then
-      report(err)
-    end
-  end)
-  return true
+  return focus_prompt()
 end
 
 function M.steer_ui(initial)

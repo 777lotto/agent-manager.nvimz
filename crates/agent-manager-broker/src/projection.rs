@@ -43,6 +43,46 @@ pub(crate) fn provider_sessions(
     })
 }
 
+pub(crate) fn provider_models(provider: Provider, result: &Value) -> Value {
+    let records = result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut seen = HashSet::new();
+    let models = records
+        .iter()
+        .filter(|record| record.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|record| {
+            let id = first_string(record, &["model", "id"])?;
+            if id.is_empty()
+                || id.chars().count() > 256
+                || id.chars().any(char::is_control)
+                || !seen.insert(id.to_owned())
+            {
+                return None;
+            }
+            let display_name = first_string(record, &["displayName", "display_name", "name"])
+                .filter(|value| !value.is_empty() && value.chars().count() <= 256)
+                .unwrap_or(id);
+            let description = first_string(record, &["description"])
+                .filter(|value| !value.is_empty() && value.chars().count() <= 4_096);
+            Some(json!({
+                "id": id,
+                "display_name": display_name,
+                "description": description,
+                "is_default": record
+                    .get("isDefault")
+                    .or_else(|| record.get("is_default"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }))
+        })
+        .take(1_000)
+        .collect::<Vec<_>>();
+    json!({ "provider": provider, "models": models })
+}
+
 pub(crate) fn history(provider: Provider, result: &Value) -> Value {
     let messages = match provider {
         Provider::Codex => codex_history(result),
@@ -229,7 +269,7 @@ mod tests {
 
     use std::collections::HashSet;
 
-    use super::{history, provider_sessions, render_input};
+    use super::{history, provider_models, provider_sessions, render_input};
     use crate::protocol::Provider;
 
     #[test]
@@ -257,6 +297,36 @@ mod tests {
         );
         assert_eq!(projected["cursor"], "next");
         assert!(!projected.to_string().contains("sensitive first prompt"));
+    }
+
+    #[test]
+    fn projects_visible_provider_models_in_catalog_order() {
+        let projected = provider_models(
+            Provider::Codex,
+            &json!({
+                "data": [
+                    {
+                        "id": "model-default",
+                        "model": "model-default",
+                        "displayName": "Model Default",
+                        "description": "Default model",
+                        "hidden": false,
+                        "isDefault": true
+                    },
+                    {
+                        "id": "hidden-model",
+                        "model": "hidden-model",
+                        "displayName": "Hidden",
+                        "hidden": true,
+                        "isDefault": false
+                    }
+                ]
+            }),
+        );
+        assert_eq!(projected["provider"], "codex");
+        assert_eq!(projected["models"].as_array().map(Vec::len), Some(1));
+        assert_eq!(projected["models"][0]["id"], "model-default");
+        assert_eq!(projected["models"][0]["is_default"], true);
     }
 
     #[test]

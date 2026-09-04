@@ -76,6 +76,8 @@ local function defaults()
       max_events = 2000,
       agent_width = 40,
       activity_width = 38,
+      prompt_min_height = 3,
+      prompt_max_height = 12,
       external_sessions = true,
       external_session_limit = 1000,
     },
@@ -226,6 +228,21 @@ function M.resolve(opts)
   end
   if type(config.ui.max_events) ~= "number" or config.ui.max_events < 1 then
     return nil, { kind = "configuration", message = "ui.max_events must be positive" }
+  end
+  for _, key in ipairs({ "prompt_min_height", "prompt_max_height" }) do
+    local value = config.ui[key]
+    if type(value) ~= "number" or value < 1 or value % 1 ~= 0 then
+      return nil, {
+        kind = "configuration",
+        message = "ui." .. key .. " must be a positive integer",
+      }
+    end
+  end
+  if config.ui.prompt_max_height < config.ui.prompt_min_height then
+    return nil, {
+      kind = "configuration",
+      message = "ui.prompt_max_height must be at least ui.prompt_min_height",
+    }
   end
   if type(config.ui.external_sessions) ~= "boolean" then
     return nil, { kind = "configuration", message = "ui.external_sessions must be a boolean" }

@@ -85,6 +85,10 @@ require("agent_manager").setup({
     lifecycle = "/absolute/path/to/zemrip-agent-workspace",
     allow_shared = false,
   },
+  ui = {
+    prompt_min_height = 3,
+    prompt_max_height = 12,
+  },
 })
 ```
 
@@ -130,16 +134,21 @@ Then open Neovim and use:
 
 To start a session from the workspace:
 
-1. Press `1` to focus Agents and place the cursor on the desired directory.
-   The project where Agent Manager was opened is marked `[cwd]`; repositories
-   already known from managed sessions or explicit inventory are marked
-   `[repo]`.
+1. Agent Manager opens with focus in Agents. Place the cursor on the desired
+   directory. The project where Agent Manager was opened is marked `[cwd]`;
+   repositories already known from managed sessions or explicit inventory are
+   marked `[repo]`.
 2. Press `sn` and choose Codex or Claude. `sn` always means “start a new
    session”; continuing old work is not mixed into this flow.
-3. Choose a model. The last model and effort are reused by default, and focus
-   moves directly to Conversation for the initial prompt.
-4. Submit the prompt. Only then does Agent Manager create the safe worktree and
-   start the provider. Managed sessions use the generated worktree name as
+3. Choose from the provider's model catalog. Choices are labeled `1` through
+   `z`; `Default` is first and initially highlighted, so `<CR>` accepts it.
+   That row uses the configured or most recently selected model when present,
+   otherwise the provider default.
+4. Focus moves directly to the prompt box at the bottom of Conversation. It
+   wraps at word boundaries, grows up to `ui.prompt_max_height`, and returns to
+   `ui.prompt_min_height` after `<CR>` sends the prompt. Use `<C-j>` for a
+   newline. Only the first submitted prompt creates the safe worktree and
+   starts the provider. Managed sessions use the generated worktree name as
    their title; shared sessions use the first few prompt words in the live UI.
    Use `am` or `ae` before this prompt or between later turns to change model or
    effort.
@@ -150,8 +159,9 @@ as the directory hint and follows the same managed-workspace flow. Prompting
 without a selected agent now explains how to start one instead of accepting
 input that cannot be sent.
 
-The workspace maps `1`, `2`, and `3` directly to Agents, Conversation, and
-Activity. `<Tab>` and `<S-Tab>` still cycle panes. Commands are grouped under
+The workspace initially focuses Agents and maps `1`, `2`, and `3` directly to
+Agents, the Conversation prompt box, and Activity. `<Tab>` and `<S-Tab>` still
+cycle panes. Commands are grouped under
 buffer-local prefixes: `a` for agent settings (`am`, `ae`), `s` for sessions
 (`sn`, `so`, `sf`, `sa`), `t` for the current turn (`tp`, `ts`, `ti`, `tc`),
 `d` for diff/delete (`df`, `ds`), and `g` for navigation/refresh (`ga`, `gc`,
@@ -175,11 +185,13 @@ example, `/home/ai/`). It includes ordinary files and directories whether or
 not a session exists there; known managed repositories and every discovered
 Codex/Claude session—live or saved—are overlaid beneath their directory.
 Directories with sessions anywhere below them sort before directories without
-sessions. Child directory contents begin collapsed. Direct sessions appear in
-a highlighted, independently expandable `Sessions` branch and are ordered by
-latest activity across both providers. Codex rows use
-a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
-identity remains clear even when a theme does not preserve the intended color.
+sessions. Child directory contents begin collapsed. A visible directory's
+direct sessions remain available in a highlighted, independently expandable
+`Sessions` branch even while that directory's files and subdirectories are
+collapsed. Sessions are ordered by latest activity across both providers.
+Codex rows use a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE`
+badge, so provider identity remains clear even when a theme does not preserve
+the intended color.
 Green `● ACTIVE` labels identify live writers. Dark `○ RESUME` labels identify
 saved sessions with no live writer; focus one and press `<CR>` or `so` to
 continue it. A `? CHECK` label means activity could not be verified, so Agent

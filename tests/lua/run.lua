@@ -295,11 +295,15 @@ local function workspace_view_navigation_test()
   assert(buffer_contains(status.buffers.agents, "○ RESUME"), "saved session badge")
   assert(not buffer_contains(status.buffers.agents, "◆ CLAUDE"), "nested sessions start collapsed")
   assert(not buffer_contains(status.buffers.agents, "project.txt"), "directory files start collapsed")
+  assert_equal(view:status().active_pane, "agents", "directory pane receives initial focus")
+  assert_equal(vim.api.nvim_get_current_buf(), status.buffers.agents, "directory buffer focus")
+  assert(vim.api.nvim_win_is_valid(status.windows.prompt), "persistent prompt window")
+  assert_equal(vim.bo[status.buffers.prompt].modifiable, true, "prompt buffer is editable")
   local projects_row = assert(buffer_line_number(status.buffers.agents, "projects/"))
   local notes_row = assert(buffer_line_number(status.buffers.agents, "notes/"))
   assert(projects_row < notes_row, "directories containing sessions sort first")
-  for index, pane in ipairs({ "agents", "conversation", "activity" }) do
-    vim.api.nvim_feedkeys(tostring(index), "x", false)
+  for _, pane in ipairs({ "agents", "conversation", "activity" }) do
+    assert(view:focus(pane))
     assert_equal(view:status().active_pane, pane, "numbered pane navigation")
   end
 
@@ -309,6 +313,9 @@ local function workspace_view_navigation_test()
   assert(vim.wait(1000, function()
     return buffer_contains(status.buffers.agents, "agent-manager/  [repo]")
   end), "projects directory expansion")
+  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "directory sessions ignore file collapse")
+  assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "dedicated session group")
+  assert(not buffer_contains(status.buffers.agents, "project.txt"), "collapsed directory hides files only")
   local repository_row = assert(
     buffer_line_number(status.buffers.agents, "agent-manager/  [repo]"),
     "registered repository row"
@@ -316,10 +323,15 @@ local function workspace_view_navigation_test()
   vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
   vim.api.nvim_feedkeys("l", "x", false)
   assert(vim.wait(1000, function()
-    return buffer_contains(status.buffers.agents, "◆ CLAUDE")
-  end), "repository session expansion")
-  assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "dedicated session group")
-  assert(buffer_contains(status.buffers.agents, "project.txt"), "expanded directory file")
+    return buffer_contains(status.buffers.agents, "project.txt")
+  end), "expanded directory file")
+  vim.api.nvim_win_set_cursor(0, { repository_row, 0 })
+  vim.api.nvim_feedkeys("h", "x", false)
+  assert(vim.wait(1000, function()
+    return not buffer_contains(status.buffers.agents, "project.txt")
+  end), "directory file collapse")
+  assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "session group survives file collapse")
+  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "session rows survive file collapse")
   local session_group_row = assert(buffer_line_number(status.buffers.agents, "Sessions (3)"))
   vim.api.nvim_win_set_cursor(0, { session_group_row, 0 })
   vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
@@ -352,6 +364,51 @@ local function workspace_view_navigation_test()
   vim.api.nvim_win_set_cursor(0, { saved_row, 0 })
   vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
   assert_equal(resumed_session.provider_session_id, "codex-saved-view", "saved row resume action")
+  view:teardown()
+  vim.fn.delete(home, "rf")
+end
+
+local function conversation_prompt_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local home = vim.fn.tempname() .. "-agent-manager-prompt"
+  assert_equal(vim.fn.mkdir(home, "p"), 1, "prompt test home creation")
+  local submitted = nil
+  local view = View.new(Model.new({ max_events = 8 }), {
+    prompt = function(text)
+      submitted = text
+      return true
+    end,
+  }, {
+    home = home,
+    prompt_min_height = 3,
+    prompt_max_height = 12,
+  })
+  assert(view:open())
+  local status = view:status()
+  assert_equal(status.active_pane, "agents", "prompt test initial directory focus")
+  assert_equal(vim.wo[status.windows.prompt].wrap, true, "prompt wraps")
+  assert_equal(vim.wo[status.windows.prompt].linebreak, true, "prompt wraps at words")
+
+  view:set_draft({ provider = "codex", provider_options = {} })
+  view:render()
+  assert(view:focus_prompt())
+  assert_equal(vim.api.nvim_get_current_win(), status.windows.prompt, "prompt window focus")
+  assert_equal(vim.api.nvim_get_current_buf(), status.buffers.prompt, "prompt buffer focus")
+  vim.cmd("stopinsert")
+  local long_prompt = string.rep("wrapped prompt words ", 40)
+  vim.api.nvim_buf_set_lines(status.buffers.prompt, 0, -1, false, { long_prompt })
+  view:_resize_prompt()
+  assert(vim.api.nvim_win_get_height(status.windows.prompt) > 3, "long prompt expands input")
+  assert(vim.api.nvim_win_get_height(status.windows.prompt) <= 12, "prompt expansion is capped")
+  assert(view:_submit_prompt())
+  assert_equal(submitted, long_prompt, "prompt box submits its text")
+  assert_equal(
+    vim.api.nvim_buf_get_lines(status.buffers.prompt, 0, -1, false),
+    { "" },
+    "sent prompt clears input"
+  )
+  assert_equal(vim.api.nvim_win_get_height(status.windows.prompt), 3, "sent prompt resets height")
   view:teardown()
   vim.fn.delete(home, "rf")
 end
@@ -451,6 +508,12 @@ end
 
 local function public_input_validation_test()
   local manager = require("agent_manager")
+  local Config = require("agent_manager.config")
+  local _, config_err = Config.resolve({ ui = { prompt_min_height = 0 } })
+  assert_equal(config_err.kind, "configuration", "invalid prompt minimum error")
+  _, config_err = Config.resolve({ ui = { prompt_min_height = 5, prompt_max_height = 4 } })
+  assert_equal(config_err.kind, "configuration", "invalid prompt height range error")
+
   local result, err = manager.prompt(nil, "")
   assert_equal(result, nil, "empty string prompt result")
   assert_equal(err.kind, "input", "empty string prompt error")
@@ -462,6 +525,10 @@ local function public_input_validation_test()
   result, err = manager.sessions({ provider = "codex", active_only = "yes" })
   assert_equal(result, nil, "invalid active-only discovery result")
   assert_equal(err.kind, "input", "invalid active-only discovery error")
+
+  result, err = manager.models("other")
+  assert_equal(result, nil, "invalid model discovery result")
+  assert_equal(err.kind, "input", "invalid model discovery error")
 
   result, err = manager.workspace_diff(42)
   assert_equal(result, nil, "invalid workspace diff result")
@@ -636,7 +703,7 @@ local function integration_test()
   local agents_buffer = external_status.view.buffers.agents
   assert_equal(manager.list(), {}, "external CLI sessions are not broker-owned agents")
   assert(not buffer_contains(agents_buffer, "workspace/"), "outside directories start collapsed")
-  assert(manager.status().view.active_pane == "conversation")
+  assert(manager.status().view.active_pane == "agents")
   vim.api.nvim_feedkeys("1", "x", false)
   local function expand_tree(parent, child)
     local row = assert(buffer_line_number(agents_buffer, parent), "missing tree row " .. parent)
@@ -916,36 +983,44 @@ local function managed_workspace_ui_test()
   assert_equal(prompt_ok, nil, "prompt without an agent")
   assert_equal(prompt_err.kind, "input", "prompt without an agent error")
   assert_equal(prompt_input_opened, false, "prompt should fail before opening input")
+  vim.ui.input = function()
+    prompt_input_opened = true
+  end
 
   local original_select = vim.ui.select
   local select_count = 0
   local ui_active = false
-  vim.ui.select = function(items, _, callback)
+  local model_labels = nil
+  vim.ui.select = function(items, opts, callback)
     assert_equal(ui_active, false, "start picker nesting")
     ui_active = true
     select_count = select_count + 1
-    callback(items[1])
-    ui_active = false
-  end
-  local input_prompts = {}
-  vim.ui.input = function(opts, callback)
-    assert_equal(ui_active, false, "start input nesting")
-    ui_active = true
-    table.insert(input_prompts, opts.prompt)
-    if opts.prompt:find("model", 1, true) then
-      callback("gpt-fixture")
+    if opts.prompt:find("provider", 1, true) then
+      callback(items[1])
     else
-      assert_equal(opts.prompt, "Prompt: ", "first prompt opens after model selection")
-      callback("build the managed feature")
+      model_labels = vim.tbl_map(opts.format_item, items)
+      assert_equal(items[1].display_name, "Default", "Default is the initial model choice")
+      callback(items[2])
     end
     ui_active = false
   end
   assert(manager.status().model.workspace_repositories[1], "workspace inventory model")
-  assert(manager.status().view.active_pane == "conversation")
+  assert(manager.status().view.active_pane == "agents")
   manager.start_ui({
     cwd = inventory.repositories[1].canonical_path,
     repository = "agent-manager",
   })
+  await("managed prompt focus", function()
+    local status = manager.status()
+    return status.view.active_pane == "conversation"
+      and vim.api.nvim_get_current_buf() == status.view.buffers.prompt
+  end)
+  assert(model_labels[1]:find("1  Default", 1, true), "Default model is numbered first")
+  assert(model_labels[2]:find("2  GPT Fixture", 1, true), "available model is numbered")
+  assert(model_labels[3]:find("3  GPT Fixture Fast", 1, true), "all models are listed")
+  assert(model_labels[10]:find("a  GPT Fixture 9", 1, true), "model numbering continues to z")
+  assert_equal(prompt_input_opened, false, "new-session prompt stays out of command-line input")
+  assert(manager.prompt_ui("build the managed feature"))
   await("managed agent startup", function()
     local agent = manager.list()[1]
     return agent and agent.state == "completed"
@@ -954,10 +1029,7 @@ local function managed_workspace_ui_test()
   vim.ui.input = original_input
 
   local agent = manager.list()[1]
-  assert_equal(select_count, 1, "new session only asks for a provider")
-  assert_equal(#input_prompts, 2, "model selection flows directly to the initial prompt")
-  assert(input_prompts[1]:find("New Codex session", 1, true), "model prompt wording")
-  assert(not input_prompts[1]:find("name", 1, true), "new sessions do not request a title")
+  assert_equal(select_count, 2, "new session asks for provider and model")
   assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
   assert(agent.managed_workspace.task_id:match("^session%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-%d%d%d%d%d%d$"), "generated managed task ID")
@@ -984,25 +1056,41 @@ local function managed_workspace_ui_test()
     "conversation heading shows title, provider, model, and effort"
   )
 
-  vim.ui.input = function(opts, callback)
-    assert(opts.prompt:find("Codex model", 1, true), "am model prompt")
-    callback("gpt-switched")
+  local model_setting_selected = false
+  vim.ui.select = function(items, opts, callback)
+    if opts.prompt:find("model", 1, true) then
+      for _, item in ipairs(items) do
+        if item.model == "gpt-fixture-fast" then
+          model_setting_selected = true
+          callback(item)
+          return
+        end
+      end
+    end
   end
   manager.model_ui()
+  await("changed model selection", function()
+    return model_setting_selected
+  end)
+  local effort_setting_selected = false
   vim.ui.select = function(items, _, callback)
     for _, item in ipairs(items) do
       if item == "high" then
+        effort_setting_selected = true
         callback(item)
         return
       end
     end
   end
   manager.effort_ui()
+  await("changed effort selection", function()
+    return effort_setting_selected
+  end)
   assert(manager.prompt(agent.id, "apply the changed settings"))
   await("changed model and effort", function()
     local current = manager.list()[1]
     return current
-      and current.provider_options.model == "gpt-switched"
+      and current.provider_options.model == "gpt-fixture-fast"
       and current.provider_options.effort == "high"
   end)
   assert(manager.interrupt(agent.id))
@@ -1031,30 +1119,31 @@ local function managed_start_uses_focused_layout_without_inventory_test()
   )
 
   local original_select = vim.ui.select
-  local original_input = vim.ui.input
-  vim.ui.select = function(items, _, callback)
-    callback(items[1])
-  end
   local remembered_model = nil
-  vim.ui.input = function(opts, callback)
-    if opts.prompt:find("model", 1, true) then
-      remembered_model = opts.default
-      callback(opts.default)
+  vim.ui.select = function(items, opts, callback)
+    if opts.prompt:find("provider", 1, true) then
+      callback(items[1])
     else
-      callback("inspect the focused layout")
+      remembered_model = items[1].model
+      callback(items[1])
     end
   end
 
   manager.start_ui({ cwd = root })
+  await("focused-layout prompt focus", function()
+    local status = manager.status()
+    return status.view.active_pane == "conversation"
+      and vim.api.nvim_get_current_buf() == status.view.buffers.prompt
+  end)
+  assert(manager.prompt_ui("inspect the focused layout"))
   await("focused-layout managed startup", function()
     local agent = manager.list()[1]
     return agent and agent.state == "completed"
   end)
 
   vim.ui.select = original_select
-  vim.ui.input = original_input
   local agent = manager.list()[1]
-  assert_equal(remembered_model, "gpt-switched", "new session defaults to the last model")
+  assert_equal(remembered_model, "gpt-fixture-fast", "new session defaults to the last model")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "focused repository")
   assert(agent.managed_workspace.task_id:match("^session%-"), "focused task uses a generated ID")
   assert_equal(agent.provider_options.effort, "high", "new session defaults to the last effort")
@@ -1179,6 +1268,7 @@ local function run()
   pure_model_test()
   layout_test()
   workspace_view_navigation_test()
+  conversation_prompt_test()
   which_key_prefix_test()
   native_presentation_test()
   public_input_validation_test()

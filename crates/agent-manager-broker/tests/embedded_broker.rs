@@ -348,6 +348,28 @@ async fn prove_embedded_flow(provider: Provider) {
         .await;
     assert_eq!(empty_state["params"]["agents"], json!([]));
 
+    harness
+        .send(request(
+            19,
+            "provider/model/list",
+            json!({ "provider": provider }),
+        ))
+        .await;
+    let catalog = harness.response(19).await;
+    assert_eq!(catalog["result"]["provider"], json!(provider));
+    assert!(
+        catalog["result"]["models"]
+            .as_array()
+            .is_some_and(|models| !models.is_empty())
+    );
+    if provider == Provider::Codex {
+        assert_eq!(
+            catalog["result"]["models"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(catalog["result"]["models"][1]["id"], "gpt-m1-fast");
+    }
+
     let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .expect("canonical manifest directory");
