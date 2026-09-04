@@ -52,6 +52,8 @@ function M.check()
     vim.health.ok(
       "public protocol "
         .. tostring(broker.initialized.protocol_version)
+        .. ", revision "
+        .. tostring(broker.initialized.protocol_revision)
         .. ", broker "
         .. tostring(broker.initialized.broker_version)
     )

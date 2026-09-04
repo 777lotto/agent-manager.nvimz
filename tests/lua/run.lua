@@ -61,6 +61,7 @@ local function pure_client_resync_test()
     assert_equal(params.last_sequence, 3, "resync request cursor")
     callback({
       protocol_version = 1,
+      protocol_revision = 1,
       mode = "durable",
       replay = { resync_required = true, oldest = 40, latest = 41 },
     }, nil)
@@ -74,6 +75,30 @@ local function pure_client_resync_test()
   assert_equal(client.last_sequence, 41, "resync advances the reconnect cursor")
   assert_equal(observed_resync.latest, 41, "resync callback receives the baseline")
   assert_equal(client.state, "connected", "resync handshake reaches connected state")
+end
+
+local function pure_client_revision_mismatch_test()
+  local Client = require("agent_manager.client")
+  local client = Client.new({
+    mode = "embedded",
+    command = { "/fixture/stale-agent-manager-broker", "serve" },
+  })
+  client.request = function(_, _, _, callback)
+    callback({
+      protocol_version = 1,
+      mode = "embedded",
+    }, nil)
+    return 1
+  end
+  client.notify = function()
+    error("an incompatible broker must not receive initialized")
+  end
+  client:_begin_initialize()
+  assert_equal(client.state, "failed", "stale broker handshake fails closed")
+  assert(
+    client.last_error.message:find("rebuild", 1, true),
+    "stale broker error explains how to restore a matching artifact"
+  )
 end
 
 local function pure_model_test()
@@ -291,9 +316,14 @@ local function workspace_view_navigation_test()
   assert(buffer_contains(status.buffers.agents, "notes/"), "unrelated home directory")
   assert(buffer_contains(status.buffers.agents, "README.txt"), "unrelated home file")
   assert(not buffer_contains(status.buffers.agents, "(unknown)"), "blank session cwd uses home")
-  assert(buffer_contains(status.buffers.agents, "● CODEX"), "Codex badge")
-  assert(buffer_contains(status.buffers.agents, "○ RESUME"), "saved session badge")
-  assert(not buffer_contains(status.buffers.agents, "◆ CLAUDE"), "nested sessions start collapsed")
+  assert(buffer_contains(status.buffers.agents, "key · ● Codex · ◆ Claude"), "provider legend")
+  assert(buffer_contains(status.buffers.agents, "● active · ○ resume"), "live-state legend")
+  assert(buffer_contains(status.buffers.agents, "? check · × ended"), "inactive-state legend")
+  assert(buffer_contains(status.buffers.agents, "● ○ · home codex fixture"), "compact Codex row")
+  assert(
+    not buffer_contains(status.buffers.agents, "· claude fixture"),
+    "nested sessions start collapsed"
+  )
   assert(not buffer_contains(status.buffers.agents, "project.txt"), "directory files start collapsed")
   assert_equal(view:status().active_pane, "agents", "directory pane receives initial focus")
   assert_equal(vim.api.nvim_get_current_buf(), status.buffers.agents, "directory buffer focus")
@@ -313,7 +343,10 @@ local function workspace_view_navigation_test()
   assert(vim.wait(1000, function()
     return buffer_contains(status.buffers.agents, "agent-manager/  [repo]")
   end), "projects directory expansion")
-  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "directory sessions ignore file collapse")
+  assert(
+    buffer_contains(status.buffers.agents, "◆ ● · claude fixture"),
+    "directory sessions ignore file collapse"
+  )
   assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "dedicated session group")
   assert(not buffer_contains(status.buffers.agents, "project.txt"), "collapsed directory hides files only")
   local repository_row = assert(
@@ -331,7 +364,7 @@ local function workspace_view_navigation_test()
     return not buffer_contains(status.buffers.agents, "project.txt")
   end), "directory file collapse")
   assert(buffer_contains(status.buffers.agents, "Sessions (3)"), "session group survives file collapse")
-  assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "session rows survive file collapse")
+  assert(buffer_contains(status.buffers.agents, "◆ ● · claude fixture"), "session rows survive file collapse")
   local session_group_row = assert(buffer_line_number(status.buffers.agents, "Sessions (3)"))
   vim.api.nvim_win_set_cursor(0, { session_group_row, 0 })
   vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
@@ -374,9 +407,11 @@ local function conversation_prompt_test()
   local home = vim.fn.tempname() .. "-agent-manager-prompt"
   assert_equal(vim.fn.mkdir(home, "p"), 1, "prompt test home creation")
   local submitted = nil
+  local completed = nil
   local view = View.new(Model.new({ max_events = 8 }), {
-    prompt = function(text)
+    prompt = function(text, callback)
       submitted = text
+      completed = callback
       return true
     end,
   }, {
@@ -405,10 +440,26 @@ local function conversation_prompt_test()
   assert_equal(submitted, long_prompt, "prompt box submits its text")
   assert_equal(
     vim.api.nvim_buf_get_lines(status.buffers.prompt, 0, -1, false),
+    { long_prompt },
+    "pending prompt remains editable until accepted"
+  )
+  completed({ accepted = true }, nil)
+  assert_equal(
+    vim.api.nvim_buf_get_lines(status.buffers.prompt, 0, -1, false),
     { "" },
     "sent prompt clears input"
   )
   assert_equal(vim.api.nvim_win_get_height(status.windows.prompt), 3, "sent prompt resets height")
+
+  local retry_prompt = "keep this prompt after failure"
+  vim.api.nvim_buf_set_lines(status.buffers.prompt, 0, -1, false, { retry_prompt })
+  assert(view:_submit_prompt())
+  completed(nil, { message = "fixture rejection" })
+  assert_equal(
+    vim.api.nvim_buf_get_lines(status.buffers.prompt, 0, -1, false),
+    { retry_prompt },
+    "rejected prompt remains available for retry"
+  )
   view:teardown()
   vim.fn.delete(home, "rf")
 end
@@ -723,13 +774,13 @@ local function integration_test()
   end
   expand_tree("▸ /  [missing]", "workspace/")
   expand_tree("workspace/", "repos/")
-  expand_tree("agent-manager/  [missing]", "○ RESUME")
+  expand_tree("agent-manager/  [missing]", "codex resumable fixture")
   expand_tree("repos/", "alpha/")
   expand_tree("alpha/", "api/")
   expand_tree("api/", "Codex terminal session")
   expand_tree("web/", "Claude terminal session")
-  assert(buffer_contains(agents_buffer, "● ACTIVE"), "active external label")
-  assert(buffer_contains(agents_buffer, "○ RESUME"), "resumable external label")
+  assert(buffer_contains(agents_buffer, "● ● · Codex terminal session"), "active external symbols")
+  assert(buffer_contains(agents_buffer, "● ○ · codex resumable fixture"), "resumable external symbols")
   assert(
     buffer_contains(agents_buffer, "sn new · so open · am model · ae effort"),
     "session action note"
@@ -987,7 +1038,29 @@ local function managed_workspace_ui_test()
     prompt_input_opened = true
   end
 
+  local original_models = manager.models
   local original_select = vim.ui.select
+  local failed_catalog_picker_opened = false
+  manager.models = function(_, callback)
+    callback(nil, { kind = "rpc", message = "fixture model discovery failure" })
+    return true
+  end
+  vim.ui.select = function()
+    failed_catalog_picker_opened = true
+  end
+  manager.start_ui({
+    provider = "codex",
+    cwd = inventory.repositories[1].canonical_path,
+    repository = "agent-manager",
+  })
+  assert_equal(
+    failed_catalog_picker_opened,
+    false,
+    "failed model discovery must not show a misleading Default-only picker"
+  )
+  manager.models = original_models
+  vim.ui.select = original_select
+
   local select_count = 0
   local ui_active = false
   local model_labels = nil
@@ -1000,7 +1073,7 @@ local function managed_workspace_ui_test()
     else
       model_labels = vim.tbl_map(opts.format_item, items)
       assert_equal(items[1].display_name, "Default", "Default is the initial model choice")
-      callback(items[2])
+      callback(items[1])
     end
     ui_active = false
   end
@@ -1034,7 +1107,7 @@ local function managed_workspace_ui_test()
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
   assert(agent.managed_workspace.task_id:match("^session%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-%d%d%d%d%d%d$"), "generated managed task ID")
   assert_equal(agent.managed_workspace.base_branch, "bluff", "managed task base")
-  assert_equal(agent.provider_options.model, "gpt-fixture", "selected model reaches the broker")
+  assert_equal(agent.provider_options.model, nil, "provider default reaches the broker")
   assert_equal(agent.runtime.provider_version, "0.153.0", "actual runtime version")
   local status = manager.status()
   assert(
@@ -1051,7 +1124,7 @@ local function managed_workspace_ui_test()
   assert(
     buffer_contains(
       status.view.buffers.conversation,
-      agent.managed_workspace.task_id .. " · Codex — gpt-fixture / default"
+      agent.managed_workspace.task_id .. " · Codex — default / default"
     ),
     "conversation heading shows title, provider, model, and effort"
   )
@@ -1265,6 +1338,7 @@ end
 
 local function run()
   pure_client_resync_test()
+  pure_client_revision_mismatch_test()
   pure_model_test()
   layout_test()
   workspace_view_navigation_test()

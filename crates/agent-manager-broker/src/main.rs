@@ -8,7 +8,7 @@ use agent_manager_broker::codex::{
 };
 use agent_manager_broker::durable::{self, DurableConfig};
 use agent_manager_broker::embedded::{self, EmbeddedConfig};
-use agent_manager_broker::protocol::PROTOCOL_VERSION;
+use agent_manager_broker::protocol::{PROTOCOL_REVISION, PROTOCOL_VERSION};
 use agent_manager_broker::worker::{
     CLAUDE_COMPATIBILITY_PROFILE, TESTED_CLAUDE_CODE_VERSION, TESTED_CLAUDE_SDK_VERSION,
     WORKER_PROTOCOL_VERSION,
@@ -40,6 +40,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string_pretty(&json!({
                     "broker_version": BROKER_VERSION,
                     "broker_protocol_version": PROTOCOL_VERSION,
+                    "broker_protocol_revision": PROTOCOL_REVISION,
                     "codex_compatibility_profile": CODEX_COMPATIBILITY_PROFILE,
                     "codex_schema_baseline_version": CODEX_SCHEMA_BASELINE_VERSION,
                     "claude_worker_protocol_version": WORKER_PROTOCOL_VERSION,

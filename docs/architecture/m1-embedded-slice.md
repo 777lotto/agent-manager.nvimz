@@ -26,9 +26,10 @@ Neovim tab
 ## Runtime contract
 
 The Lua client launches an argv list directly with piped stdin/stdout. It sends
-`initialize`, verifies public protocol version 1, sends `initialized`, and then
-accepts `broker/state` and sequenced `agent/event` notifications. It never runs
-Cargo, uv, pip, or a shell during startup.
+`initialize`, verifies public protocol version 1 and the co-shipped protocol
+revision, sends `initialized`, and then accepts `broker/state` and sequenced
+`agent/event` notifications. It never runs Cargo, uv, pip, or a shell during
+startup.
 
 Embedded mode supports one agent and these public operations:
 

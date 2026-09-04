@@ -339,6 +339,7 @@ async fn prove_embedded_flow(provider: Provider) {
         .await;
     let initialized = harness.response(1).await;
     assert_eq!(initialized["result"]["protocol_version"], 1);
+    assert_eq!(initialized["result"]["protocol_revision"], 1);
     assert_eq!(initialized["result"]["mode"], "embedded");
     harness
         .send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))

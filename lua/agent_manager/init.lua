@@ -156,7 +156,7 @@ local function normalized_provider_options(provider, options)
       "Claude effort must be low, medium, high, xhigh, or max"
     )
   end
-  return normalized
+  return next(normalized) and normalized or vim.empty_dict()
 end
 
 local function agent_by_id(agent_id)
@@ -270,8 +270,8 @@ function M.setup(opts)
     start = function(context)
       M.start_ui(context)
     end,
-    prompt = function(text)
-      return M.prompt_ui(text)
+    prompt = function(text, callback)
+      return M.prompt_ui(text, callback)
     end,
     steer = function()
       M.steer_ui()
@@ -565,7 +565,20 @@ local function send_input(method, kind, agent_id, input, callback)
   local params = { agent_id = agent_id, input = normalized }
   if kind == "prompt" then
     local agent = agent_by_id(agent_id)
-    params.provider_options = options_for_agent(agent)
+    if not agent then
+      local err = structured_error("input", "the selected agent is no longer available")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    local provider_options, options_err = normalized_provider_options(
+      agent.provider,
+      options_for_agent(agent)
+    )
+    if not provider_options then
+      finish(callback, nil, options_err)
+      return nil, options_err
+    end
+    params.provider_options = provider_options
   end
   return with_client(function()
     local _, request_err = runtime.client:request(
@@ -1540,7 +1553,10 @@ end
 
 local function select_model(provider, default_model, prompt, callback)
   local expected_runtime = runtime
-  M.models(provider, function(result)
+  M.models(provider, function(result, err)
+    if err then
+      return
+    end
     schedule_ui(function()
       if not runtime or runtime ~= expected_runtime then
         return
@@ -1900,10 +1916,12 @@ local function draft_task_id()
   return string.format("session-%s-%06d", os.date("!%Y%m%d-%H%M%S"), suffix)
 end
 
-local function start_draft_with_prompt(text)
+local function start_draft_with_prompt(text, callback)
   local draft = runtime and runtime.draft
   if not draft then
-    return nil, structured_error("input", "no session draft is configured")
+    local err = structured_error("input", "no session draft is configured")
+    finish(callback, nil, err)
+    return nil, err
   end
   if draft.starting then
     vim.notify("Agent Manager: the session is already starting", vim.log.levels.WARN)
@@ -1911,6 +1929,14 @@ local function start_draft_with_prompt(text)
   end
   draft.starting = true
   runtime.view:set_draft(draft)
+  local callback_finished = false
+  local function complete(result, err)
+    if callback_finished then
+      return
+    end
+    callback_finished = true
+    finish(callback, result, err)
+  end
   local start_options = {
     provider = draft.provider,
     provider_options = draft.provider_options,
@@ -1931,15 +1957,24 @@ local function start_draft_with_prompt(text)
         draft.starting = false
         runtime.view:set_draft(draft)
       end
+      complete(nil, err)
       return
     end
     local agent = result and result.agent
     if not agent then
+      local missing_err = structured_error("protocol", "broker start response omitted the agent")
+      if runtime and runtime.draft == draft then
+        draft.starting = false
+        runtime.view:set_draft(draft)
+      end
+      report(missing_err)
+      complete(nil, missing_err)
       return
     end
-    local prompted, prompt_err = M.prompt(agent.id, text)
+    local prompted, prompt_err = M.prompt(agent.id, text, complete)
     if not prompted and prompt_err then
       report(prompt_err)
+      complete(nil, prompt_err)
     end
   end)
   if not ok then
@@ -1948,6 +1983,7 @@ local function start_draft_with_prompt(text)
     if start_err then
       report(start_err)
     end
+    complete(nil, start_err)
   end
   return ok, start_err
 end
@@ -2036,7 +2072,7 @@ function M.effort_ui()
   end)
 end
 
-function M.prompt_ui(initial)
+function M.prompt_ui(initial, callback)
   if not ensure_setup() then
     return
   end
@@ -2046,7 +2082,7 @@ function M.prompt_ui(initial)
   end
   if runtime.draft then
     if initial and initial ~= "" then
-      return start_draft_with_prompt(initial)
+      return start_draft_with_prompt(initial, callback)
     end
     return focus_prompt()
   end
@@ -2057,18 +2093,20 @@ function M.prompt_ui(initial)
       "no agent is selected — press 1, focus a directory, then press sn"
     )
     report(err)
+    finish(callback, nil, err)
     return nil, err
   end
   if agent.state == "disconnected" or agent.state == "failed" then
     local err = structured_error(
       "input",
-      "the selected session is not active — press 1, focus its RESUME row, then press Enter"
+      "the selected session is not active — press 1, focus its resumable row, then press Enter"
     )
     report(err)
+    finish(callback, nil, err)
     return nil, err
   end
   if initial and initial ~= "" then
-    local ok, err = M.prompt(nil, initial)
+    local ok, err = M.prompt(nil, initial, callback)
     if not ok and err then
       report(err)
     end

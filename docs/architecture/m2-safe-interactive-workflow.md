@@ -137,8 +137,9 @@ decision, diff, and prompt views alongside agents, conversation, and activity.
 All disable swap, modelines, and undo files. Rendered views reject direct
 modification; the prompt is the sole writable scratch buffer. It stays below
 Conversation, wraps words, expands to a configured cap, and resets to its
-minimum height after a successful send. Capability rows appear with each
-selected agent; the latest provider-native usage object is flattened
+minimum height after the broker accepts a send. A rejected submission remains
+in place for editing or retry. Capability rows appear with each selected agent;
+the latest provider-native usage object is flattened
 deterministically in the activity pane. Rendering never evaluates provider text
 as Lua, Ex, mappings, options, or modelines.
 

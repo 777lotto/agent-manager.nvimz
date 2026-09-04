@@ -395,6 +395,9 @@ class Broker:
                 )
                 self.publish_state()
         elif method == "agent/start":
+            if not isinstance(params.get("provider_options"), dict):
+                reject(request, "provider_options must be an object")
+                return True
             managed = params.get("managed_workspace")
             if managed:
                 task_id = managed["task_id"]
@@ -425,6 +428,9 @@ class Broker:
                     provider_options=params.get("provider_options"),
                 )
         elif method == "agent/resume":
+            if not isinstance(params.get("provider_options"), dict):
+                reject(request, "provider_options must be an object")
+                return True
             managed = params.get("managed_workspace")
             if managed:
                 task_id = managed["task_id"]
@@ -469,6 +475,9 @@ class Broker:
                     {"queued": True, "count": len(self.queued_context), "context": context},
                 )
         elif method == "agent/prompt":
+            if not isinstance(params.get("provider_options"), dict):
+                reject(request, "provider_options must be an object")
+                return True
             self.prompt_number += 1
             self.current["provider_options"] = params.get(
                 "provider_options", self.current.get("provider_options", {})
@@ -594,6 +603,7 @@ def main() -> None:
         initialize,
         {
             "protocol_version": 1,
+            "protocol_revision": 1,
             "broker_version": "0.2.0",
             "mode": "embedded",
             "providers": {

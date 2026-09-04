@@ -1,6 +1,9 @@
 local Client = {}
 Client.__index = Client
 
+local protocol_version = 1
+local protocol_revision = 1
+
 local function error_object(kind, message, code)
   return { kind = kind, message = message, code = code }
 end
@@ -248,7 +251,7 @@ function Client:_begin_initialize()
   local _, err = self:request(
     "initialize",
     {
-      protocol_version = 1,
+      protocol_version = protocol_version,
       client = {
         name = "agent-manager.nvim",
         title = "Agent Manager",
@@ -267,11 +270,20 @@ function Client:_begin_initialize()
       end
       if
         not result
-        or result.protocol_version ~= 1
+        or result.protocol_version ~= protocol_version
         or (self.mode == "durable" and result.mode ~= "durable")
         or (self.mode == "embedded" and result.mode ~= "embedded")
       then
         self:_protocol_fault(error_object("protocol", "broker protocol or lifecycle mode mismatch"))
+        return
+      end
+      if result.protocol_revision ~= protocol_revision then
+        self:_protocol_fault(error_object(
+          "protocol",
+          "broker executable does not match this Agent Manager checkout; "
+            .. "rebuild it with cargo build --release -p agent-manager-broker from the plugin root "
+            .. "or configure a matching artifact"
+        ))
         return
       end
       self.initialized = result

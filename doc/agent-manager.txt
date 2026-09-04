@@ -54,8 +54,10 @@ isolation.
 <
 
 A source checkout discovers target/release or target/debug broker artifacts
-and python/.venv/bin/python relative to the plugin root when present. Startup
-never builds or installs dependencies.
+and python/.venv/bin/python relative to the plugin root when present. A public
+protocol revision check rejects a stale broker with rebuild guidance instead
+of allowing a partially compatible UI. Startup never builds or installs
+dependencies.
 
 Durable mode requires an already supervised broker plus absolute executable
 and socket paths:
@@ -156,18 +158,18 @@ the first and initially highlighted choice, so <CR> accepts it immediately. It
 uses the configured or most recently selected model when present, otherwise the
 provider default. Focus then moves to the persistent prompt box at the bottom
 of Conversation; no title is requested. The box wraps words, expands from
-ui.prompt_min_height up to ui.prompt_max_height, and returns to its minimum
-height after <CR> sends. Use <C-j> to insert a newline. Submitting the first
-prompt creates the managed worktree using a generated task ID, which becomes
-the session title.
+ui.prompt_min_height up to ui.prompt_max_height. Use <C-j> to insert a newline.
+Submitting the first prompt creates the managed worktree using a generated task
+ID, which becomes the session title. Submitted text stays in the prompt until
+the broker accepts it; accepted text clears and returns the box to its minimum
+height, while failed submissions remain available to edit and retry.
 
-Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
-badge. The different shapes and labels preserve provider identity under themes
-that alter colors. External rows are labeled "cli-running" and remain read-only
-while the originating terminal owns them. The tree is refreshed when the
-workspace opens and with `gr`. Set `ui.external_sessions` to false to hide
-external CLI sessions; `ui.external_session_limit` caps each provider query
-from 1 to 1000.
+The key at the top maps `● Codex` and `◆ Claude` plus `● active`, `○ resume`,
+`? check`, and `× ended` to their semantic colors. Session rows show only the
+two symbols and title. Active external rows remain read-only while the
+originating terminal owns them. The tree is refreshed when the workspace opens
+and with `gr`. Set `ui.external_sessions` to false to hide external CLI
+sessions; `ui.external_session_limit` caps each provider query from 1 to 1000.
 
     1 / 2 / 3 focus Agents / Conversation / Activity
     sn / so start a session / open or continue one
