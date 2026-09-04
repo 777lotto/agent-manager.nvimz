@@ -329,30 +329,39 @@ local function which_key_prefix_test()
   local home = vim.fn.tempname() .. "-agent-manager-which-key"
   assert_equal(vim.fn.mkdir(home, "p"), 1, "which-key test home creation")
   local specs = {}
-  local shown = nil
   local previous_which_key = package.loaded["which-key"]
   package.loaded["which-key"] = {
     add = function(spec)
       vim.list_extend(specs, vim.deepcopy(spec))
     end,
     show = function(opts)
-      shown = vim.deepcopy(opts)
+      error("Agent Manager must not call which-key.show() from a keymap: " .. vim.inspect(opts))
     end,
   }
   local view = View.new(Model.new({ max_events = 8 }), {}, { home = home })
   assert(view:open())
   assert(view:focus("agents"))
-  vim.api.nvim_feedkeys("d", "x", false)
 
   local groups = {}
+  local buffer = view:status().buffers.agents
   for _, spec in ipairs(specs) do
-    groups[spec[1]] = spec.group
+    if spec.buffer == buffer then
+      groups[spec[1]] = spec.group
+    end
   end
-  assert_equal(groups.d, "diff / delete", "buffer-local d which-key group")
-  assert_equal(groups.s, "session", "buffer-local s which-key group")
-  assert_equal(shown.keys, "d", "d opens its which-key prefix")
-  assert_equal(shown.buf, view:status().buffers.agents, "which-key uses the focused buffer")
-  assert_equal(shown.global, false, "which-key menu remains buffer-local")
+  assert_equal(groups, {
+    d = "diff / delete",
+    g = "go",
+    s = "session",
+    t = "turn",
+  }, "buffer-local which-key groups")
+  local prefix_maps = {}
+  for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buffer, "n")) do
+    prefix_maps[mapping.lhs] = true
+  end
+  for _, prefix in ipairs({ "d", "g", "s", "t" }) do
+    assert(not prefix_maps[prefix], prefix .. " must be owned by which-key opts.triggers")
+  end
 
   view:teardown()
   package.loaded["which-key"] = previous_which_key

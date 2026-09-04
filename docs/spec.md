@@ -680,9 +680,11 @@ approval view. Closing the workspace never means "approve," "interrupt," or
 "delete."
 
 When which-key.nvim is available, `d`, `g`, `s`, and `t` are registered as
-buffer-local prefix groups without `<leader>`. Agent Manager does not configure
-which-key or mutate global/leader mappings; the sequences remain usable without
-which-key.
+buffer-local prefix groups without `<leader>`. The host configures those
+built-in keys through which-key's `opts.triggers` when it wants automatic
+popups. Agent Manager does not call `which-key.show()` from a mapping, configure
+which-key, or mutate global/leader mappings; the sequences remain usable
+without which-key.
 
 ## Editor context and filesystem behavior
 

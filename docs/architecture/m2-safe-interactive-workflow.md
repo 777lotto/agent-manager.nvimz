@@ -137,7 +137,8 @@ The Agents pane now starts at the full home path and lazily reads the filesystem
 session and repository rows are overlays rather than the source of the directory
 shape. Buffer-local `s`, `t`, `d`, and `g` command families are advertised to
 which-key when it is available, without configuring the plugin or changing its
-normal `<leader>` menu.
+normal `<leader>` menu. The host owns any `opts.triggers` entries for those
+built-in prefixes; Agent Manager never maps a prefix to `which-key.show()`.
 
 M3 now owns the implemented Foundation, Styling, native Panels fallback, and
 Chrome integration. M4 owns the Unix socket, persistent registry,
