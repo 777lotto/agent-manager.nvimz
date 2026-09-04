@@ -159,6 +159,10 @@ impl ManagedWorkspaceFixture {
             "agent-manager-managed-workspace-test-{}",
             uuid::Uuid::new_v4()
         ));
+        fs::create_dir(&root).expect("create managed workspace fixture root");
+        let root = root
+            .canonicalize()
+            .expect("canonical managed workspace fixture root");
         let canonical = root.join("canonical");
         let worktree = root.join("worktrees/agent-manager/managed-task");
         fs::create_dir_all(&canonical).expect("create canonical fixture");
