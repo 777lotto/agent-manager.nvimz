@@ -1,6 +1,7 @@
 //! Adapter for the workstation's authoritative repository/worktree lifecycle.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -129,6 +130,12 @@ struct AuditWorktree {
     reasons: Vec<String>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ClaimReceipt {
+    path: String,
+    branch: String,
+}
+
 impl WorkspaceLifecycle {
     #[must_use]
     pub fn new(command: WorkspaceCommandSpec) -> Self {
@@ -152,29 +159,58 @@ impl WorkspaceLifecycle {
         if resume {
             arguments.push("--resume");
         }
-        self.run(&arguments).await?;
+        let output = self.run(&arguments).await?;
+        if let Ok(receipt) = parse_claim_receipt(&output, repository, task_id)
+            && let Ok(base_branch) = validate_claim_receipt(&receipt, repository, task_id).await
+        {
+            return Ok((
+                receipt.path,
+                ManagedWorkspace {
+                    repository: repository.to_owned(),
+                    task_id: task_id.to_owned(),
+                    branch: receipt.branch,
+                    base_branch,
+                },
+            ));
+        }
 
-        let inventory = self.audit(Some(repository)).await?;
-        let repository = inventory
+        // Older lifecycle implementations did not emit a machine-readable
+        // claim receipt. Keep their safe, albeit expensive, audit projection
+        // as a compatibility fallback.
+        let inventory = match self.audit(Some(repository)).await {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                let _ = self.handoff(repository, task_id).await;
+                return Err(error);
+            }
+        };
+        let Some(repository_summary) = inventory
             .repositories
             .into_iter()
             .find(|candidate| candidate.slug == repository)
-            .ok_or(WorkspaceError::UnsafeRepository)?;
-        let task = repository
+        else {
+            let _ = self.handoff(repository, task_id).await;
+            return Err(WorkspaceError::UnsafeRepository);
+        };
+        let Some(task) = repository_summary
             .tasks
             .into_iter()
             .find(|candidate| candidate.task_id == task_id)
-            .ok_or(WorkspaceError::MissingTask)?;
+        else {
+            let _ = self.handoff(repository, task_id).await;
+            return Err(WorkspaceError::MissingTask);
+        };
         if task.branch != format!("agent/{task_id}") || !Path::new(&task.path).is_absolute() {
+            let _ = self.handoff(repository, task_id).await;
             return Err(WorkspaceError::MissingTask);
         }
         Ok((
             task.path,
             ManagedWorkspace {
-                repository: repository.slug,
+                repository: repository_summary.slug,
                 task_id: task_id.to_owned(),
                 branch: task.branch,
-                base_branch: repository.base_branch,
+                base_branch: repository_summary.base_branch,
             },
         ))
     }
@@ -221,6 +257,116 @@ impl WorkspaceLifecycle {
         }
         Ok(output.stdout)
     }
+}
+
+fn parse_claim_receipt(
+    output: &[u8],
+    repository: &str,
+    task_id: &str,
+) -> Result<ClaimReceipt, WorkspaceError> {
+    let output = std::str::from_utf8(output).map_err(|_| WorkspaceError::UnsafeRepository)?;
+    let first_line = output.lines().next().ok_or(WorkspaceError::MissingTask)?;
+    let prefix = format!("claimed: {repository}/{task_id}: ");
+    let branch = format!("agent/{task_id}");
+    let suffix = format!(" branch={branch} lease=held");
+    let path = first_line
+        .strip_prefix(&prefix)
+        .and_then(|line| line.strip_suffix(&suffix))
+        .filter(|path| !path.is_empty())
+        .ok_or(WorkspaceError::MissingTask)?;
+    Ok(ClaimReceipt {
+        path: path.to_owned(),
+        branch,
+    })
+}
+
+async fn validate_claim_receipt(
+    receipt: &ClaimReceipt,
+    repository: &str,
+    task_id: &str,
+) -> Result<String, WorkspaceError> {
+    let path = Path::new(&receipt.path);
+    if !path.is_absolute()
+        || path.file_name().and_then(|name| name.to_str()) != Some(task_id)
+        || path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            != Some(repository)
+    {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| WorkspaceError::UnsafeRepository)?;
+    if canonical != path || !canonical.is_dir() {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+    let marker = fs::symlink_metadata(canonical.join(".git"))
+        .map_err(|_| WorkspaceError::UnsafeRepository)?;
+    if !marker.file_type().is_file() || marker.len() > 8_192 {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+
+    let top_level = git_value(&canonical, &["rev-parse", "--show-toplevel"]).await?;
+    let top_level = Path::new(&top_level)
+        .canonicalize()
+        .map_err(|_| WorkspaceError::UnsafeRepository)?;
+    let git_directory = git_path(&canonical, "--git-dir").await?;
+    let common_directory = git_path(&canonical, "--git-common-dir").await?;
+    if top_level != canonical || git_directory == common_directory {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+
+    let branch = git_value(&canonical, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    if branch != receipt.branch {
+        return Err(WorkspaceError::MissingTask);
+    }
+    let merge_key = format!("branch.{}.merge", receipt.branch);
+    let merge = git_value(&canonical, &["config", "--get", &merge_key]).await?;
+    let base_branch = merge
+        .strip_prefix("refs/heads/")
+        .filter(|value| validate_repository(value).is_ok())
+        .ok_or(WorkspaceError::UnsafeRepository)?;
+    Ok(base_branch.to_owned())
+}
+
+async fn git_path(cwd: &Path, argument: &str) -> Result<PathBuf, WorkspaceError> {
+    let raw = git_value(cwd, &["rev-parse", argument]).await?;
+    let raw = Path::new(&raw);
+    let path = if raw.is_absolute() {
+        raw.to_owned()
+    } else {
+        cwd.join(raw)
+    };
+    path.canonicalize()
+        .map_err(|_| WorkspaceError::UnsafeRepository)
+}
+
+async fn git_value(cwd: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| WorkspaceError::Timeout)?
+        .map_err(|_| WorkspaceError::Spawn)?;
+    if !output.status.success() || output.stdout.len() > 8_192 {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| WorkspaceError::UnsafeRepository)?
+        .trim();
+    if value.is_empty() {
+        return Err(WorkspaceError::UnsafeRepository);
+    }
+    Ok(value.to_owned())
 }
 
 fn project_inventory(document: AuditDocument) -> Result<WorkspaceInventory, WorkspaceError> {
@@ -326,7 +472,32 @@ fn valid_identifier(value: &str, allow_dot: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditDocument, project_inventory};
+    use super::{AuditDocument, ClaimReceipt, parse_claim_receipt, project_inventory};
+
+    #[test]
+    fn parses_only_the_exact_claim_receipt() {
+        let receipt = parse_claim_receipt(
+            b"claimed: agent-manager/fast-start: /home/ai/worktrees/agent-manager/fast-start branch=agent/fast-start lease=held\nhand off with: ignored\n",
+            "agent-manager",
+            "fast-start",
+        )
+        .expect("claim receipt");
+        assert_eq!(
+            receipt,
+            ClaimReceipt {
+                path: "/home/ai/worktrees/agent-manager/fast-start".to_owned(),
+                branch: "agent/fast-start".to_owned(),
+            }
+        );
+        assert!(
+            parse_claim_receipt(
+                b"claimed: other/fast-start: /tmp/fast-start branch=agent/fast-start lease=held\n",
+                "agent-manager",
+                "fast-start",
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn projects_only_stable_task_mappings() {

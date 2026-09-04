@@ -609,10 +609,12 @@ maintaining a competing set.
 - **Agents:** provider, title, cwd/worktree, precise status, unread marker, and
   pending-approval count. A lazy filesystem tree begins at the user's full home
   path and shows files and directories independently of session state.
-  Registered repositories, broker-owned agents, and all active and saved
-  external CLI sessions are overlaid below their actual directories. The
-  opening project and a focused directory supply repository context to the
-  start flow. Provider
+  Known managed repositories, broker-owned agents, and all active and saved
+  external CLI sessions are overlaid below their actual directories. Session
+  refresh does not wait on or initiate the lifecycle authority's full cleanup
+  audit. The opening project and a focused directory supply repository context
+  to the start flow through the required canonical/worktree layout, with the
+  lifecycle claim validating the candidate before launch. Provider
   badges use distinct labels and shapes in addition to semantic blue/orange
   styling; green `ACTIVE`, dark `RESUME`, and fail-closed `CHECK` badges expose
   session ownership without relying on color alone. Records are de-duplicated
