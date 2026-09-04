@@ -149,12 +149,15 @@ and `n` means no/deny only for the focused human request. `<CR>` toggles a
 directory, opens a file or session, or answers a question; `h` and `l` collapse
 and expand tree rows. `q` closes only the view.
 
-When `which-key.nvim` is available, those four prefixes appear as buffer-local
-which-key groups without requiring `<leader>`. Agent Manager does not call
-which-key setup or replace global mappings, so the normal `<leader>` menu keeps
-the user's existing options. The key sequences still work when which-key is
-absent. Wide displays show agents, conversation, and activity together; medium
-and narrow displays switch the same buffers without losing model state.
+When `which-key.nvim` is available, Agent Manager registers those four prefixes
+as buffer-local groups without requiring `<leader>`. Because `d`, `g`, `s`, and
+`t` are built-in keys, a host that wants their menus to open automatically must
+include them as normal-mode entries in which-key's `opts.triggers`; its
+`<auto>` trigger intentionally skips existing built-ins. Agent Manager does not
+call `which-key.show()` from a mapping, call which-key setup, or replace global
+mappings. The key sequences still work when which-key is absent. Wide displays
+show agents, conversation, and activity together; medium and narrow displays
+switch the same buffers without losing model state.
 
 The Agents pane is a lazy filesystem tree rooted at the full home path (for
 example, `/home/ai/`). It includes ordinary files and directories whether or

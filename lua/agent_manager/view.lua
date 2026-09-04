@@ -581,19 +581,6 @@ function View:_map_buffer(buffer)
       { "s", group = "session", buffer = buffer },
       { "t", group = "turn", buffer = buffer },
     })
-    if type(which_key.show) == "function" then
-      for _, prefix in ipairs({ "d", "g", "s", "t" }) do
-        local keys = prefix
-        map(keys, function()
-          which_key.show({
-            keys = keys,
-            mode = "n",
-            buf = buffer,
-            global = false,
-          })
-        end, keys .. " menu")
-      end
-    end
   end
 end
 
