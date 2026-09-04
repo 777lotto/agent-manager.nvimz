@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - bluff
+  pull_request:
+    branches:
+      - bluff
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODEX_VERSION: 0.152.0
+  UX_FOUNDATION_ROOT: ${{ github.workspace }}/_deps/UX-foundation.nvim
+  UX_STYLING_ROOT: ${{ github.workspace }}/_deps/UX-styling.nvim
+  UX_CHROME_ROOT: ${{ github.workspace }}/_deps/UX-chrome.nvim
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Reject whitespace errors
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff-tree --check --no-commit-id --root -r HEAD
+          fi
+
+  linux-verify:
+    name: linux-verify (pinned providers and release)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out pinned UX Foundation
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-foundation.nvim
+          ref: 7b8700db546b35e7b6a40b9a41b129354981587f
+          path: _deps/UX-foundation.nvim
+
+      - name: Check out pinned UX Styling
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-styling.nvim
+          ref: 3379b8ba03380316a5a8f3ad3671509e9283b518
+          path: _deps/UX-styling.nvim
+
+      - name: Check out pinned UX Chrome
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-chrome.nvim
+          ref: a6a20a2135603484cd451ba7f338cf0b6fa7dbad
+          path: _deps/UX-chrome.nvim
+
+      - name: Install Node and the pinned Codex runtime
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Codex
+        run: npm install --global "@openai/codex@$CODEX_VERSION"
+
+      - name: Install pinned toolchains
+        uses: jdx/mise-action@v2
+
+      - name: Run the complete offline handoff gate
+        run: mise run verify
+
+  macos-runtime:
+    name: macos-runtime (pinned providers)
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out pinned UX Foundation
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-foundation.nvim
+          ref: 7b8700db546b35e7b6a40b9a41b129354981587f
+          path: _deps/UX-foundation.nvim
+
+      - name: Check out pinned UX Styling
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-styling.nvim
+          ref: 3379b8ba03380316a5a8f3ad3671509e9283b518
+          path: _deps/UX-styling.nvim
+
+      - name: Check out pinned UX Chrome
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-chrome.nvim
+          ref: a6a20a2135603484cd451ba7f338cf0b6fa7dbad
+          path: _deps/UX-chrome.nvim
+
+      - name: Install Node and the pinned Codex runtime
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Codex
+        run: npm install --global "@openai/codex@$CODEX_VERSION"
+
+      - name: Install pinned toolchains
+        uses: jdx/mise-action@v2
+
+      - name: Verify the pinned runtime contracts
+        run: |
+          test "$(codex --version)" = "codex-cli $CODEX_VERSION"
+          mise run setup
+          mise run fmt
+          mise run lint
+          mise run test
+          mise run ux-test
+          bash -n scripts/*.sh ops/m4-durable-service/*.sh ops/m5-release-install/*.sh
+          shellcheck scripts/*.sh
+          git diff --check

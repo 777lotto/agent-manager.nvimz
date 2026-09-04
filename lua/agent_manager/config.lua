@@ -12,21 +12,54 @@ local function executable(path)
   return type(path) == "string" and vim.fn.executable(path) == 1
 end
 
+local function user_path(environment, fallback)
+  local root = vim.env[environment]
+  if type(root) ~= "string" or root == "" then
+    local home = vim.env.HOME
+    if type(home) ~= "string" or home == "" or home:sub(1, 1) ~= "/" then
+      return nil
+    end
+    root = home .. fallback
+  end
+  if root:sub(1, 1) ~= "/" then
+    return nil
+  end
+  return vim.fs.normalize(root)
+end
+
+local function installed_broker()
+  local bin = user_path("XDG_BIN_HOME", "/.local/bin")
+  return bin and bin .. "/agent-manager-broker" or nil
+end
+
+local function installed_worker_python()
+  local data = user_path("XDG_DATA_HOME", "/.local/share")
+  return data and data .. "/agent-manager/venv/bin/python" or nil
+end
+
 local function default_broker_command(root)
   local release = root .. "/target/release/agent-manager-broker"
   local debug = root .. "/target/debug/agent-manager-broker"
+  local installed = installed_broker()
   if executable(release) then
     return { release, "serve" }
   end
   if executable(debug) then
     return { debug, "serve" }
   end
+  if executable(installed) then
+    return { installed, "serve" }
+  end
   return { "agent-manager-broker", "serve" }
 end
 
 local function default_claude_python(root)
-  local python = root .. "/python/.venv/bin/python"
-  return executable(python) and python or nil
+  local source = root .. "/python/.venv/bin/python"
+  if executable(source) then
+    return source
+  end
+  local installed = installed_worker_python()
+  return executable(installed) and installed or nil
 end
 
 local function discovered_executable(name)

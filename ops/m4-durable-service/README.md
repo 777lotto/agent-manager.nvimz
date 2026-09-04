@@ -2,9 +2,10 @@
 
 This phase installs Agent Manager as an `ai` user service owned by the
 container's systemd lifecycle manager. It does not install the broker binary or
-the locked Claude environment; those stable M5 artifact paths must already
-exist. The unit keeps provider processes alive across SSH and Neovim exits,
-while the broker exposes only an owner-only Unix socket.
+the locked Claude environment; first activate those stable paths with the
+reviewed `ops/m5-release-install/` phase. The unit keeps provider processes
+alive across SSH and Neovim exits, while the broker exposes only an owner-only
+Unix socket.
 
 The service passes absolute Codex, Claude worker, and workspace-lifecycle
 paths. Its broker policy permits lifecycle-managed task worktrees and rejects

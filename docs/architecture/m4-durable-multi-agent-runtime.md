@@ -134,5 +134,7 @@ for:
 - lifecycle scripts, unit syntax, paired undo structure, and behavioral
   verification code.
 
-M5 still owns release artifact production, checksums/signing, stable artifact
-installation, provider/runtime CI, and adoption in `nvim-config`.
+M5 now supplies release artifact production, checksums and attestations, stable
+artifact installation, provider/runtime CI, and exact adoption in
+`nvim-config`; see
+[M5 release and configuration adoption](m5-release-configuration-adoption.md).

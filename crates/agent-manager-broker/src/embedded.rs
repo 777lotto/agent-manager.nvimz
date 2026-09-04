@@ -76,6 +76,7 @@ impl EmbeddedConfig {
         self.runtime.claude = WorkerCommandSpec {
             program: python.into(),
             args: vec![
+                "-B".to_owned(),
                 "-I".to_owned(),
                 "-m".to_owned(),
                 "agent_manager_claude_worker".to_owned(),

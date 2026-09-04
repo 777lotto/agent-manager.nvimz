@@ -17,6 +17,7 @@ agent-manager-claude-worker = "agent_manager_claude_worker.__main__:main"
 
 [dependency-groups]
 dev = [
+  "hatchling==1.32.0",
   "jsonschema>=4.25,<5",
   "pyright>=1.1.405,<2",
   "ruff>=0.12,<1",
@@ -43,4 +44,5 @@ ignore = ["PLR2004"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
+extraPaths = ["../scripts"]
 reportMissingTypeStubs = false

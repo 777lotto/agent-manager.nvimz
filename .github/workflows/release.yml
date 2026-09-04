@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CODEX_VERSION: 0.152.0
+  UX_FOUNDATION_ROOT: ${{ github.workspace }}/_deps/UX-foundation.nvim
+  UX_STYLING_ROOT: ${{ github.workspace }}/_deps/UX-styling.nvim
+  UX_CHROME_ROOT: ${{ github.workspace }}/_deps/UX-chrome.nvim
+
+jobs:
+  release:
+    name: verify, attest, and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the signed tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a verified annotated tag on bluff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_object_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.type')"
+          tag_object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')"
+          if [[ "$tag_object_type" != "tag" ]]; then
+            echo "Release tags must be annotated, not lightweight." >&2
+            exit 1
+          fi
+
+          verification="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.verification.verified')"
+          target_type="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.type')"
+          target_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" --jq '.object.sha')"
+          if [[ "$verification" != "true" || "$target_type" != "commit" ]]; then
+            echo "Release tags must have a verified signature and target a commit." >&2
+            exit 1
+          fi
+          test "$target_sha" = "$(git rev-parse HEAD)"
+          git fetch --no-tags origin bluff
+          git merge-base --is-ancestor "$target_sha" origin/bluff || {
+            echo "Release tags must target the default bluff branch." >&2
+            exit 1
+          }
+
+      - name: Check out pinned UX Foundation
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-foundation.nvim
+          ref: 7b8700db546b35e7b6a40b9a41b129354981587f
+          path: _deps/UX-foundation.nvim
+
+      - name: Check out pinned UX Styling
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-styling.nvim
+          ref: 3379b8ba03380316a5a8f3ad3671509e9283b518
+          path: _deps/UX-styling.nvim
+
+      - name: Check out pinned UX Chrome
+        uses: actions/checkout@v7
+        with:
+          repository: 777lotto/UX-chrome.nvim
+          ref: a6a20a2135603484cd451ba7f338cf0b6fa7dbad
+          path: _deps/UX-chrome.nvim
+
+      - name: Install Node and the pinned Codex runtime
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Codex
+        run: npm install --global "@openai/codex@$CODEX_VERSION"
+
+      - name: Install pinned toolchains
+        uses: jdx/mise-action@v2
+
+      - name: Require the tag to match the compatibility release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          mise run setup
+          release_version="$(python/.venv/bin/python -c 'import json; print(json.load(open("release/compatibility-v1.json", encoding="utf-8"))["release_version"])')"
+          test "$TAG_NAME" = "v$release_version" || {
+            echo "Tag $TAG_NAME does not match compatibility release v$release_version." >&2
+            exit 1
+          }
+          echo "RELEASE_VERSION=$release_version" >> "$GITHUB_ENV"
+          echo "RELEASE_ARCHIVE=agent-manager-v${release_version}-x86_64-unknown-linux-gnu.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Run the complete offline handoff gate
+        run: mise run verify
+
+      - name: Build the clean release assets
+        run: mise run release
+
+      - name: Attest the release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/${{ env.RELEASE_ARCHIVE }}
+            dist/SHA256SUMS
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            "dist/$RELEASE_ARCHIVE" \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes
+
+      - name: Retain the release assets with the workflow run
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-manager-${{ github.ref_name }}-x86_64-linux
+          path: |
+            dist/${{ env.RELEASE_ARCHIVE }}
+            dist/SHA256SUMS
+          if-no-files-found: error

@@ -281,8 +281,8 @@ function Client:_begin_initialize()
         self:_protocol_fault(error_object(
           "protocol",
           "broker executable does not match this Agent Manager checkout; "
-            .. "rebuild it with cargo build --release -p agent-manager-broker from the plugin root "
-            .. "or configure a matching artifact"
+            .. "reinstall its matching release artifact (or rebuild a development checkout) "
+            .. "and restart Neovim"
         ))
         return
       end
