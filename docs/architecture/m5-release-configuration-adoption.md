@@ -75,7 +75,11 @@ is successful, whose target is a commit reachable from `bluff`, and whose versio
 matches the compatibility lock. GitHub Actions rebuilds from that clean tag,
 runs the complete gate, issues keyless artifact attestations for the archive
 and checksum file, and publishes both assets. Publishing a stable release then
-dispatches its peeled tag commit and tag name to `nvim-config`.
+dispatches its peeled tag commit and tag name to `nvim-config`. The release
+workflow calls the least-privilege notification workflow directly after
+publication because events created with GitHub Actions' repository token do not
+start another workflow. Release-event and manual-dispatch triggers remain as
+recovery paths for releases published outside the standard workflow.
 
 The v0.1.0 binary remains a repository release asset. A separate package or
 registry would add another trust and version boundary without solving a first

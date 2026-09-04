@@ -419,6 +419,7 @@ workflow changes require an operator-approved one-use ticket. The broker cannot
 push `bluff` or tags, publish Releases, or administer repository secrets.
 
 Publishing a stable GitHub Release can notify `nvim-config` to test and pin the
-exact tagged commit. The operator provisions the repository-scoped
-`NVIM_CONFIG_DISPATCH_TOKEN`; the credential-free agent plane never receives
-its value.
+exact tagged commit. The release workflow invokes the isolated notifier as a
+dependent reusable job, while its manual trigger provides a recovery path. The
+operator provisions the repository-scoped `NVIM_CONFIG_DISPATCH_TOKEN`; the
+credential-free agent plane never receives its value.

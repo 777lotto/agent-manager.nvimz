@@ -135,3 +135,14 @@ jobs:
             dist/${{ env.RELEASE_ARCHIVE }}
             dist/SHA256SUMS
           if-no-files-found: error
+
+  notify-nvim-config:
+    name: notify nvim-config
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/notify-nvim-config.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      NVIM_CONFIG_DISPATCH_TOKEN: ${{ secrets.NVIM_CONFIG_DISPATCH_TOKEN }}
