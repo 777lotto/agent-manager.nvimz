@@ -233,6 +233,22 @@ impl CodexAppServer {
         .await
     }
 
+    pub async fn list_models(
+        &mut self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<RequestOutcome, CodexError> {
+        self.request(
+            "model/list",
+            json!({
+                "cursor": cursor,
+                "includeHidden": false,
+                "limit": limit,
+            }),
+        )
+        .await
+    }
+
     pub async fn start_thread(
         &mut self,
         cwd: &Path,

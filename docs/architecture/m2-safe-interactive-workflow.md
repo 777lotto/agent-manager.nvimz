@@ -24,6 +24,12 @@ Neovim decision/context/diff views
 
 ## Session lifecycle
 
+`provider/model/list` exposes model selection without accepting arbitrary text.
+Codex uses a transient App Server `model/list` request; Claude exposes the
+aliases supported by the pinned SDK/CLI contract. Neither path starts a model
+turn. The UI numbers the resulting catalog from `1` through `z`, places
+`Default` first, and focuses the Conversation prompt after selection.
+
 `provider/session/list` starts a transient provider adapter and returns
 redacted session metadata. Its original flow filters one canonical cwd; the
 additive global `active_only` flow used by the Agents tree is described in
@@ -127,15 +133,20 @@ conflict.
 ## Native presentation
 
 M2 remains dependency-free native Neovim UI. Stable scratch buffers now include
-decision and diff views alongside agents, conversation, and activity. All
-disable swap, modelines, undo files, and direct modification. Capability rows
-appear with each selected agent; the latest provider-native usage object is
-flattened deterministically in the activity pane. Rendering never evaluates
-provider text as Lua, Ex, mappings, options, or modelines.
+decision, diff, and prompt views alongside agents, conversation, and activity.
+All disable swap, modelines, and undo files. Rendered views reject direct
+modification; the prompt is the sole writable scratch buffer. It stays below
+Conversation, wraps words, expands to a configured cap, and resets to its
+minimum height after a successful send. Capability rows appear with each
+selected agent; the latest provider-native usage object is flattened
+deterministically in the activity pane. Rendering never evaluates provider text
+as Lua, Ex, mappings, options, or modelines.
 
 The Agents pane now starts at the full home path and lazily reads the filesystem;
 session and repository rows are overlays rather than the source of the directory
-shape. Buffer-local `s`, `t`, `d`, and `g` command families are advertised to
+shape. A directory's direct `Sessions` branch stays visible independently of
+that directory's filesystem expansion, and Agents receives initial focus.
+Buffer-local `s`, `t`, `d`, and `g` command families are advertised to
 which-key when it is available, without configuring the plugin or changing its
 normal `<leader>` menu. The host owns any `opts.triggers` entries for those
 built-in prefixes; Agent Manager never maps a prefix to `which-key.show()`.
@@ -149,21 +160,22 @@ writable-worktree isolation.
 
 The default gate remains deterministic and offline:
 
-- Rust pipe tests exercise Codex and Claude session discovery and deletion,
-  start, specific resume, fork, history, explicit context, approval, question,
-  usage, file events, follow-up, steer, interrupt, replay, directory diff, and
-  shutdown.
+- Rust pipe tests exercise Codex model discovery, Codex and Claude session
+  discovery and deletion, start, specific resume, fork, history, explicit
+  context, approval, question, usage, file events, follow-up, steer, interrupt,
+  replay, directory diff, and shutdown.
 - Separate timeout and interrupt tests hold both provider callbacks unanswered
   and prove the provider receives denial while the public request resolves
   fail-closed.
-- Headless Neovim tests exercise the full-home filesystem tree, buffer-local
-  which-key groups, session facade, capability and usage rendering, focused
+- Headless Neovim tests exercise the full-home filesystem tree, persistent
+  wrapping prompt, model picker, buffer-local which-key groups, session facade,
+  capability and usage rendering, focused
   approval/question controls, unsupported-defer behavior, explicit unsaved
   context, dirty-buffer preservation, conflict resolution, history, diff,
   deletion, fork, and specific resume.
-- Protocol fixtures cover session discovery and M2 response/context request
-  shapes, while rejection cases exclude fabricated approval choices and
-  invalid question decisions.
+- Protocol fixtures cover model and session discovery plus M2 response/context
+  request shapes, while rejection cases exclude fabricated approval choices
+  and invalid question decisions.
 
 No live provider turn, credential, authentication state, or provider quota is
 used by `mise run verify`.

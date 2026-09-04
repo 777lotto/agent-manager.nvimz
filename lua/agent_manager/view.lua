@@ -328,6 +328,8 @@ local function set_window_options(window, wrap, pane)
   vim.wo[window].foldcolumn = "0"
   vim.wo[window].list = false
   vim.wo[window].wrap = wrap
+  vim.wo[window].linebreak = wrap
+  vim.wo[window].breakindent = wrap
   vim.wo[window].cursorline = true
   vim.w[window].agent_manager = {
     plugin_id = "agent.manager",
@@ -357,8 +359,8 @@ function View.new(model, actions, opts)
     windows = {},
     tab = nil,
     mode = nil,
-    active_pane = "conversation",
-    pane_index = 2,
+    active_pane = "agents",
+    pane_index = 1,
     agent_rows = {},
     session_rows = {},
     session_group_rows = {},
@@ -371,6 +373,7 @@ function View.new(model, actions, opts)
     expanded_session_groups = {},
     directory_cache = {},
     namespace = vim.api.nvim_create_namespace("AgentManagerView"),
+    prompt_namespace = vim.api.nvim_create_namespace("AgentManagerPrompt"),
     render_pending = false,
     last_action_id = nil,
   }, View)
@@ -443,8 +446,11 @@ function View:_create_autocmds()
         if valid_tab(self.tab) and vim.api.nvim_get_current_tabpage() == self.tab then
           local next_mode = View.layout_for(vim.o.columns).mode
           if next_mode ~= self.mode then
-            self:_build_layout()
+            local active_pane = self.active_pane
+            self:_build_layout(active_pane)
             self:render()
+          else
+            self:_resize_prompt()
           end
         end
       end)
@@ -464,14 +470,58 @@ function View:_buffer(name)
   vim.bo[buffer].swapfile = false
   vim.bo[buffer].undofile = false
   vim.bo[buffer].modeline = false
-  vim.bo[buffer].modifiable = false
+  vim.bo[buffer].modifiable = name == "prompt"
   vim.bo[buffer].filetype = "agent-manager-" .. name
   vim.b[buffer].agent_manager = {
     plugin_id = "agent.manager",
     pane = name,
   }
-  self:_map_buffer(buffer)
+  if name == "prompt" then
+    self:_map_prompt_buffer(buffer)
+    vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+      group = self.augroup,
+      buffer = buffer,
+      callback = function()
+        self:_render_prompt()
+        self:_resize_prompt()
+      end,
+    })
+  else
+    self:_map_buffer(buffer)
+  end
   return buffer
+end
+
+function View:_map_prompt_buffer(buffer)
+  local opts = function(description)
+    return {
+      buffer = buffer,
+      silent = true,
+      nowait = true,
+      desc = "Agent Manager: " .. description,
+    }
+  end
+  local submit = function()
+    vim.schedule(function()
+      self:_submit_prompt()
+    end)
+  end
+  vim.keymap.set({ "n", "i" }, "<CR>", submit, opts("send prompt"))
+  vim.keymap.set("n", "q", function()
+    self:close()
+  end, opts("close workspace"))
+  vim.keymap.set("n", "<Tab>", function()
+    self:cycle(1)
+  end, opts("next pane"))
+  vim.keymap.set("n", "<S-Tab>", function()
+    self:cycle(-1)
+  end, opts("previous pane"))
+  for index, pane in ipairs(pane_names) do
+    local target = pane
+    vim.keymap.set("n", tostring(index), function()
+      self:focus(target)
+    end, opts("focus " .. target .. " pane"))
+  end
 end
 
 function View:_map_buffer(buffer)
@@ -635,14 +685,15 @@ function View:open()
   for _, name in ipairs(pane_names) do
     self:_buffer(name)
   end
+  self:_buffer("prompt")
   vim.cmd("tabnew")
   self.tab = vim.api.nvim_get_current_tabpage()
-  self:_build_layout()
+  self:_build_layout("agents")
   self:render()
   return true
 end
 
-function View:_build_layout()
+function View:_build_layout(initial_pane)
   if not valid_tab(self.tab) or vim.api.nvim_get_current_tabpage() ~= self.tab then
     return
   end
@@ -683,9 +734,21 @@ function View:_build_layout()
     set_window_options(activity, true, "activity")
     self.windows.activity = activity
   end
+
   vim.api.nvim_set_current_win(main)
-  self.active_pane = "conversation"
-  self.pane_index = 2
+  vim.cmd("belowright split")
+  local prompt = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(prompt, self:_buffer("prompt"))
+  vim.wo[prompt].winfixheight = true
+  set_window_options(prompt, true, "prompt")
+  vim.wo[prompt].cursorline = false
+  self.windows.prompt = prompt
+  self:_resize_prompt()
+
+  initial_pane = vim.tbl_contains(pane_names, initial_pane) and initial_pane or "agents"
+  if not self:focus(initial_pane) then
+    self:focus("conversation")
+  end
 end
 
 function View:cycle(direction)
@@ -712,6 +775,14 @@ function View:focus(pane)
   pane = pane_names[index]
   self.pane_index = index
   self.active_pane = pane
+  if pane == "conversation" then
+    local content = self.windows.conversation
+    if valid_window(content) then
+      vim.api.nvim_win_set_buf(content, self:_buffer("conversation"))
+      set_window_options(content, true, "conversation")
+    end
+    return self:focus_prompt()
+  end
   local window = self.windows[pane]
   if valid_window(window) then
     vim.api.nvim_win_set_buf(window, self:_buffer(pane))
@@ -731,6 +802,107 @@ function View:focus(pane)
     return true
   end
   return false
+end
+
+function View:focus_prompt()
+  if not valid_tab(self.tab) then
+    return false
+  end
+  local prompt = self.windows.prompt
+  if not valid_window(prompt) then
+    return false
+  end
+  if vim.api.nvim_get_current_tabpage() ~= self.tab then
+    vim.api.nvim_set_current_tabpage(self.tab)
+  end
+  vim.api.nvim_win_set_buf(prompt, self:_buffer("prompt"))
+  set_window_options(prompt, true, "prompt")
+  vim.wo[prompt].cursorline = false
+  vim.api.nvim_set_current_win(prompt)
+  local lines = vim.api.nvim_buf_get_lines(self.buffers.prompt, 0, -1, false)
+  local last_line = math.max(1, #lines)
+  local last_column = #(lines[last_line] or "")
+  vim.api.nvim_win_set_cursor(prompt, { last_line, last_column })
+  self.active_pane = "conversation"
+  self.pane_index = 2
+  vim.cmd("startinsert")
+  return true
+end
+
+function View:_prompt_height()
+  local prompt = self.buffers.prompt
+  local window = self.windows.prompt
+  local minimum = math.max(1, tonumber(self.opts.prompt_min_height) or 3)
+  local maximum = math.max(minimum, tonumber(self.opts.prompt_max_height) or 12)
+  if not valid_buffer(prompt) or not valid_window(window) then
+    return minimum
+  end
+  local width = math.max(1, vim.api.nvim_win_get_width(window) - 1)
+  local height = 0
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(prompt, 0, -1, false)) do
+    local columns = vim.fn.strdisplaywidth(line)
+    height = height + math.max(1, math.ceil(columns / width))
+  end
+  return math.max(minimum, math.min(maximum, height))
+end
+
+function View:_resize_prompt()
+  local window = self.windows.prompt
+  if not valid_window(window) then
+    return false
+  end
+  pcall(vim.api.nvim_win_set_height, window, self:_prompt_height())
+  return true
+end
+
+function View:_render_prompt()
+  local buffer = self.buffers.prompt
+  if not valid_buffer(buffer) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(buffer, self.prompt_namespace, 0, -1)
+  local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+  local empty = #lines == 0 or (#lines == 1 and lines[1] == "")
+  if empty then
+    local hint = (self.draft or self.model:selected_agent()) and "Type a prompt…"
+      or "Start or select a session in pane 1"
+    pcall(vim.api.nvim_buf_set_extmark, buffer, self.prompt_namespace, 0, 0, {
+      virt_text = { { hint, "AgentManagerMuted" } },
+      virt_text_pos = "overlay",
+      hl_mode = "combine",
+    })
+  end
+end
+
+function View:_clear_prompt()
+  local buffer = self.buffers.prompt
+  if not valid_buffer(buffer) then
+    return
+  end
+  vim.bo[buffer].modifiable = true
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "" })
+  vim.bo[buffer].modified = false
+  self:_render_prompt()
+  self:_resize_prompt()
+end
+
+function View:_submit_prompt()
+  local buffer = self.buffers.prompt
+  if not valid_buffer(buffer) then
+    return false
+  end
+  local text = table.concat(vim.api.nvim_buf_get_lines(buffer, 0, -1, false), "\n")
+  if not text:find("%S") then
+    return false
+  end
+  if not self.actions.prompt then
+    return false
+  end
+  local ok = self.actions.prompt(text)
+  if ok then
+    self:_clear_prompt()
+  end
+  return ok and true or false
 end
 
 function View:_start_context()
@@ -946,6 +1118,8 @@ function View:render()
   self:_render_agents()
   self:_render_conversation()
   self:_render_activity()
+  self:_render_prompt()
+  self:_resize_prompt()
   local action = self.model:focused_action()
   self:_render_decision(action)
   self:_sync_decision(action)
@@ -1070,9 +1244,9 @@ function View:_render_agents()
   end
 
   local render_home_node
-  render_home_node = function(node, prefix, exists)
+  render_home_node = function(node, prefix, exists, filesystem_expanded)
     local entries, read_error = {}, nil
-    if exists ~= false then
+    if filesystem_expanded and exists ~= false then
       entries, read_error = self:_directory_listing(node.path)
     end
     local directories = {}
@@ -1088,8 +1262,10 @@ function View:_render_agents()
         table.insert(files, entry)
       end
     end
-    for name, child in pairs(node.directories) do
-      directories[name] = directories[name] or { name = name, node = child, exists = false }
+    if filesystem_expanded then
+      for name, child in pairs(node.directories) do
+        directories[name] = directories[name] or { name = name, node = child, exists = false }
+      end
     end
     local items = {}
     if #(node.sessions or {}) > 0 then
@@ -1127,9 +1303,12 @@ function View:_render_agents()
           line = #lines,
           group = item.node.repository and "AgentManagerTitle" or "AgentManagerMuted",
         })
-        if expanded then
-          render_home_node(item.node, prefix .. (last and "   " or "│  "), item.exists)
-        end
+        render_home_node(
+          item.node,
+          prefix .. (last and "   " or "│  "),
+          item.exists,
+          expanded
+        )
       elseif item.kind == "file" then
         local suffix = item.file.type == "link" and "@" or ""
         table.insert(lines, prefix .. connector .. "  " .. inline(item.file.name) .. suffix)
@@ -1158,15 +1337,15 @@ function View:_render_agents()
   )
   add_directory_row(home_root, true)
   table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
-  if home_expanded then
-    render_home_node(home_root, " ", true)
-  end
+  render_home_node(home_root, " ", true, home_expanded)
 
   local render_virtual_node
-  render_virtual_node = function(node, prefix)
+  render_virtual_node = function(node, prefix, filesystem_expanded)
     local directories = {}
-    for name, child in pairs(node.directories) do
-      directories[name] = { name = name, node = child }
+    if filesystem_expanded then
+      for name, child in pairs(node.directories) do
+        directories[name] = { name = name, node = child }
+      end
     end
     local items = {}
     if #(node.sessions or {}) > 0 then
@@ -1193,9 +1372,7 @@ function View:_render_agents()
         )
         add_directory_row(item.node, false)
         table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
-        if expanded then
-          render_virtual_node(item.node, prefix .. (last and "   " or "│  "))
-        end
+        render_virtual_node(item.node, prefix .. (last and "   " or "│  "), expanded)
       end
     end
   end
@@ -1210,9 +1387,7 @@ function View:_render_agents()
     )
     add_directory_row(root, false)
     table.insert(highlights, { line = #lines, group = "AgentManagerTitle" })
-    if expanded then
-      render_virtual_node(root, " ")
-    end
+    render_virtual_node(root, " ", expanded)
   end
 
   table.insert(lines, "")
@@ -1306,9 +1481,9 @@ function View:_render_conversation()
   local messages = self.draft and {} or self.model:conversation()
   if #messages == 0 then
     if agent then
-      table.insert(lines, " Press tp to compose a prompt.")
+      table.insert(lines, " Type in the prompt box below and press <CR> to send.")
     elseif self.draft then
-      table.insert(lines, " Enter the first prompt to start this session.")
+      table.insert(lines, " Enter the first prompt below to start this session.")
     else
       table.insert(lines, " Start a session in pane 1 with sn.")
     end
@@ -1565,6 +1740,7 @@ function View:show_help()
     " y / n   yes / allow or no / deny focused request",
     " 1 / 2 / 3 focus agents / conversation / activity",
     " <Tab>   cycle panes",
+    " prompt: <CR> send · <C-j> newline",
     " <CR>    expand directory, open file/session, or answer question",
     " h / l   collapse / expand directory",
     " q       close workspace",

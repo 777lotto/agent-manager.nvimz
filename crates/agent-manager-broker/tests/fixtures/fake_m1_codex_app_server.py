@@ -177,6 +177,43 @@ def main() -> None:
     expect("initialized")
 
     opening = read()
+    if opening.get("method") == "model/list":
+        respond(
+            opening,
+            {
+                "data": [
+                    {
+                        "id": "gpt-m1",
+                        "model": "gpt-m1",
+                        "displayName": "GPT M1",
+                        "description": "Broker model fixture",
+                        "hidden": False,
+                        "isDefault": True,
+                    }
+                ],
+                "nextCursor": "models-page-2",
+            },
+        )
+        continuation = expect("model/list")
+        if continuation.get("params", {}).get("cursor") != "models-page-2":
+            raise AssertionError("model/list cursor was not forwarded")
+        respond(
+            continuation,
+            {
+                "data": [
+                    {
+                        "id": "gpt-m1-fast",
+                        "model": "gpt-m1-fast",
+                        "displayName": "GPT M1 Fast",
+                        "description": "Broker paginated model fixture",
+                        "hidden": False,
+                        "isDefault": False,
+                    }
+                ],
+                "nextCursor": None,
+            },
+        )
+        return
     if opening.get("method") == "thread/list":
         requested_cwd = opening.get("params", {}).get("cwd", "/tmp")
         sessions = [

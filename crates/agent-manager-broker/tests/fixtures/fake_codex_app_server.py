@@ -47,6 +47,24 @@ def main() -> None:
     )
     expect("initialized")
 
+    models = expect("model/list")
+    respond(
+        models,
+        {
+            "data": [
+                {
+                    "id": "gpt-test",
+                    "model": "gpt-test",
+                    "displayName": "GPT Test",
+                    "description": "Codex adapter fixture",
+                    "hidden": False,
+                    "isDefault": True,
+                }
+            ],
+            "nextCursor": None,
+        },
+    )
+
     message = read()
     if message.get("method") == "thread/list":
         respond(message, {"data": [], "nextCursor": None})

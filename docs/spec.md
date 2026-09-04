@@ -298,6 +298,7 @@ The initialization response includes:
 
 | Method                   | Purpose                                                     |
 | ------------------------ | ----------------------------------------------------------- |
+| `provider/model/list`    | List provider-selectable models without starting a turn.   |
 | `provider/session/list`  | Discover provider sessions, optionally globally or active.  |
 | `agent/list`             | List known agents and live status.                          |
 | `workspace/list`         | List registered repositories and managed task mappings.     |
@@ -342,6 +343,13 @@ active/state fields. The response also reports whether cross-process activity
 observation was available. Prompt previews and transcript content are excluded.
 `provider/session/delete` uses the same activity authority and fails closed if
 writer ownership cannot be verified.
+
+`provider/model/list` accepts a provider and returns its selectable model IDs,
+display names, descriptions, and provider-default marker. Codex projects the
+App Server model catalog; Claude projects the model aliases supported by the
+pinned SDK/CLI contract. Discovery starts no model turn and consumes no model
+quota. The UI's initially selected `Default` row resolves to a configured or
+remembered model when present, otherwise the provider default.
 
 ### Agent summary
 
@@ -613,8 +621,9 @@ maintaining a competing set.
   Known managed repositories, broker-owned agents, and all active and saved
   external CLI sessions are overlaid below their actual directories.
   Directories with descendant sessions sort first, directory contents begin
-  collapsed, and each directory's direct sessions appear in a highlighted,
-  independently collapsible `Sessions` branch ordered by latest activity.
+  collapsed, and each visible directory's direct sessions remain in a
+  highlighted, independently collapsible `Sessions` branch even when its
+  filesystem children are collapsed. Sessions are ordered by latest activity.
   Session
   refresh does not wait on or initiate the lifecycle authority's full cleanup
   audit. The opening project and a focused directory supply repository context
@@ -625,18 +634,23 @@ maintaining a competing set.
   session ownership without relying on color alone. Records are de-duplicated
   by provider session ID.
 - **Conversation:** user and assistant messages with incremental updates,
-  compaction boundaries, and provider notices.
+  compaction boundaries, provider notices, and a persistent bottom prompt box.
+  The prompt wraps at word boundaries, expands between configured minimum and
+  maximum heights, resets after a successful send, and receives focus after
+  model selection.
 - **Activity:** ordered tool, command, file, and usage events with expandable
   native detail.
 - **Approval/question:** focused decision view that cannot be hidden by normal
   streaming redraws.
 - **Diff:** repository or file diff with provider/agent attribution.
-- **Input:** multiline prompt with explicit attachments and target agent.
+- **Input:** the multiline Conversation prompt box with explicit attachments
+  and target agent.
 - **Help:** visible, responsive mapping guide.
 
-Every view uses scratch buffers with a stable `filetype`, no swap file, and
-explicit modifiability transitions during render. Rendering preserves the
-logical selection by stable item ID rather than cursor row.
+Every view uses scratch buffers with a stable `filetype` and no swap file. The
+prompt buffer is persistently modifiable; rendered buffers use explicit
+modifiability transitions. Rendering preserves the logical selection by stable
+item ID rather than cursor row. The workspace initially focuses Agents.
 
 ### Commands
 
@@ -647,7 +661,7 @@ Final command names follow the selected package name. The working surface is:
 | `:AgentManager`                 | Open or focus the full-tab workspace.                   |
 | `:AgentManagerSplit`            | Open the compact split.                                 |
 | `:AgentManagerStart [provider]` | Start a new session with the current project as a hint. |
-| `:AgentManagerSend`             | Open prompt input for the selected agent.               |
+| `:AgentManagerSend`             | Focus prompt input for the selected agent.              |
 | `:AgentManagerSteer`            | Add input to the selected active turn.                  |
 | `:AgentManagerAttach`           | Open an active session or continue a saved session.     |
 | `:AgentManagerInterrupt`        | Confirm and interrupt active work.                      |
@@ -667,9 +681,10 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | Key                 | Action                                                    |
 | ------------------- | --------------------------------------------------------- |
 | `j` / `k`           | Move through the focused view.                            |
-| `1` / `2` / `3`     | Focus Agents, Conversation, or Activity directly.         |
+| `1` / `2` / `3`     | Focus Agents, Conversation prompt, or Activity directly.  |
 | `<Tab>` / `<S-Tab>` | Cycle visible panes.                                      |
-| `<CR>`              | Open, expand, or act on the stable item under the cursor. |
+| `<CR>`              | Send in the prompt box; elsewhere open, expand, or act.   |
+| `<C-j>`             | Insert a newline in the prompt box.                       |
 | `sn` / `so`         | Start a session / open or continue a focused session.     |
 | `sf` / `sa`         | Fork / archive a focused session.                         |
 | `am` / `ae`         | Change model / effort for the next prompt.                 |
@@ -1010,6 +1025,7 @@ agents.start({
 agents.workspaces()
 agents.handoff_workspace("repo", "task")
 agents.attach(agent_id)
+agents.models("codex")
 agents.sessions({ provider = "codex", cwd = "..." })
 agents.delete_session(session)
 agents.prompt(agent_id, input)

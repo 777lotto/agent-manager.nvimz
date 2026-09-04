@@ -23,7 +23,7 @@ use crate::human::{
     HumanRequestKind, claude_approval_response, claude_question_response, claude_request,
     codex_approval_response, codex_question_response, codex_request, resolved_event,
 };
-use crate::projection::{history, provider_sessions, render_input};
+use crate::projection::{history, provider_models, provider_sessions, render_input};
 use crate::protocol::{EventEnvelope, Provider, ProviderOptions, ProviderRuntime, RequestId};
 use crate::worker::{
     ClaudeWorker, WorkerCommandSpec, WorkerError, WorkerInbound,
@@ -258,6 +258,82 @@ pub(crate) async fn discover_sessions(
                 )
             })
         }
+    }
+}
+
+pub(crate) async fn discover_models(
+    provider: Provider,
+    config: &RuntimeConfig,
+) -> Result<Value, &'static str> {
+    match provider {
+        Provider::Codex => {
+            let mut server = CodexAppServer::spawn(&config.codex)
+                .map_err(|_| "Codex App Server could not be started")?;
+            if server
+                .initialize()
+                .await
+                .ok()
+                .and_then(|value| codex_runtime_identity(&value, &config.codex).ok())
+                .is_none()
+            {
+                let _ = server.shutdown().await;
+                return Err("Codex App Server initialization failed");
+            }
+            let mut data = Vec::new();
+            let mut cursor = None::<String>;
+            for _ in 0..10 {
+                let outcome = server
+                    .list_models(cursor.as_deref(), 100)
+                    .await
+                    .map_err(|_| "Codex model discovery failed")?;
+                data.extend(
+                    outcome
+                        .result
+                        .get("data")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                cursor = outcome
+                    .result
+                    .get("nextCursor")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if cursor.is_none() || data.len() >= 1_000 {
+                    break;
+                }
+            }
+            let _ = server.shutdown().await;
+            Ok(provider_models(provider, &json!({ "data": data })))
+        }
+        Provider::Claude => Ok(provider_models(
+            provider,
+            &json!({
+                "data": [
+                    {
+                        "model": "fable",
+                        "displayName": "Fable",
+                        "description": "Latest Claude Fable model alias"
+                    },
+                    {
+                        "model": "opus",
+                        "displayName": "Opus",
+                        "description": "Latest Claude Opus model alias"
+                    },
+                    {
+                        "model": "sonnet",
+                        "displayName": "Sonnet",
+                        "description": "Latest Claude Sonnet model alias"
+                    },
+                    {
+                        "model": "haiku",
+                        "displayName": "Haiku",
+                        "description": "Latest Claude Haiku model alias"
+                    }
+                ]
+            }),
+        )),
     }
 }
 

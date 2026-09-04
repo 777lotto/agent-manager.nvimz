@@ -45,6 +45,8 @@ isolation.
         allow_shared = false,
       },
       ui = {
+        prompt_min_height = 3,
+        prompt_max_height = 12,
         external_sessions = true,
         external_session_limit = 1000,
       },
@@ -89,7 +91,8 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 :AgentManagerAttach        Select a broker agent or resumable provider session.
 
                                                    *:AgentManagerSend*
-:AgentManagerSend [text]   Send a prompt, or open native input without text.
+:AgentManagerSend [text]   Send a prompt, or focus the Conversation prompt box
+                           without text.
 
                                                    *:AgentManagerSteer*
 :AgentManagerSteer [text]  Add input to the selected active turn.
@@ -126,9 +129,10 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 ==============================================================================
 4. Workspace                                      *agent-manager-workspace*
 
-The native workspace uses agents, conversation, and activity buffers. Their
-headings are numbered: 1 focuses Agents, 2 focuses Conversation, and 3 focuses
-Activity. Wide displays show all three. Medium and narrow displays may also use
+The native workspace opens with focus in Agents and uses agents, conversation,
+prompt, and activity buffers. Their headings are numbered: 1 focuses Agents, 2
+focuses the prompt box at the bottom of Conversation, and 3 focuses Activity.
+Wide displays show all three panes. Medium and narrow displays may also use
 <Tab> and <S-Tab> to cycle panes.
 
 The Agents pane is a lazy filesystem tree rooted at the full home directory
@@ -136,9 +140,10 @@ The Agents pane is a lazy filesystem tree rooted at the full home directory
 session state. Known managed repositories, broker-owned agents, and active or
 saved standalone Codex/Claude sessions are overlaid beneath their directories.
 Directories containing sessions sort before directories without sessions.
-Directory contents begin collapsed. Each directory's direct sessions are
-indented beneath a highlighted, independently collapsible "Sessions" row and
-ordered by most recent activity across providers.
+Directory contents begin collapsed. Each visible directory's direct sessions
+remain indented beneath a highlighted, independently collapsible "Sessions"
+row even while that directory's files and subdirectories are collapsed. They
+are ordered by most recent activity across providers.
 The project where Agent Manager was opened carries a `[cwd]` marker; repository
 directories learned from managed sessions or explicit inventory carry
 `[repo]`. Place the cursor on a directory and press `sn` to use it as the
@@ -146,10 +151,15 @@ start-flow hint. Canonical clones and managed worktrees use the required
 `~/<repo>` and `~/worktrees/<repo>/<task>` layout without first running the
 repository-wide lifecycle audit; the lifecycle claim still validates the
 candidate before launch. Nonstandard paths fall back to explicit inventory.
-Choose a provider and model. The most recently used model and effort are the
-defaults. Focus moves to Conversation for the initial prompt; no title is
-requested. Submitting that prompt creates the managed worktree using a
-generated task ID, which becomes the session title.
+Choose a provider, then choose from its numbered model catalog. "Default" is
+the first and initially highlighted choice, so <CR> accepts it immediately. It
+uses the configured or most recently selected model when present, otherwise the
+provider default. Focus then moves to the persistent prompt box at the bottom
+of Conversation; no title is requested. The box wraps words, expands from
+ui.prompt_min_height up to ui.prompt_max_height, and returns to its minimum
+height after <CR> sends. Use <C-j> to insert a newline. Submitting the first
+prompt creates the managed worktree using a generated task ID, which becomes
+the session title.
 
 Codex rows use a blue `● CODEX` badge and Claude rows use an orange `◆ CLAUDE`
 badge. The different shapes and labels preserve provider identity under themes
@@ -169,7 +179,8 @@ from 1 to 1000.
     ga/gc/gt focus Agents / Conversation / Activity
     gr      refresh the filesystem and provider sessions
     y / n   yes/allow or no/deny only the focused human request
-    <CR>    toggle a directory, open a file/session, or answer a question
+    <CR>    send in the prompt box; otherwise toggle/open/answer the focused row
+    <C-j>   insert a newline in the prompt box
     h / l   collapse / expand a directory
     <Tab>   cycle panes
     ? / g?  show mapping help

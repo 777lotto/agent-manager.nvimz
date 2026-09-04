@@ -28,7 +28,7 @@ use crate::registry::RegistryStore;
 use crate::replay::{ReplayBuffer, ReplayResult};
 use crate::runtime::{
     AgentCommand, AgentSpawn, RuntimeConfig, RuntimeEvent, SessionLaunch, delete_provider_session,
-    discover_sessions, spawn_agent,
+    discover_models, discover_sessions, spawn_agent,
 };
 use crate::status::StatusStore;
 use crate::worker::{
@@ -577,6 +577,7 @@ impl Broker {
             "workspace/list" => self.list_workspaces(request_id).await,
             "workspace/handoff" => self.handoff_workspace(request_id, params).await,
             "workspace/diff" => self.workspace_diff(request_id, params).await,
+            "provider/model/list" => self.provider_models(request_id, params).await,
             "provider/session/list" => self.provider_sessions(request_id, params).await,
             "provider/session/delete" => self.delete_session(request_id, params).await,
             "agent/start" => {
@@ -809,6 +810,20 @@ impl Broker {
         )
         .await
         {
+            Ok(result) => self.send(success_response(request_id, result)),
+            Err(message) => self.send(error_response(Some(request_id), -32_020, message, None)),
+        }
+    }
+
+    async fn provider_models(&self, request_id: RequestId, params: Value) {
+        let Ok(parsed) = serde_json::from_value::<ProviderModelListParams>(params) else {
+            self.send(invalid_params(
+                request_id,
+                "invalid provider model list parameters",
+            ));
+            return;
+        };
+        match discover_models(parsed.provider, &self.config.runtime).await {
             Ok(result) => self.send(success_response(request_id, result)),
             Err(message) => self.send(error_response(Some(request_id), -32_020, message, None)),
         }
@@ -2246,6 +2261,12 @@ struct ProviderSessionListParams {
     limit: Option<u32>,
     #[serde(default)]
     active_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderModelListParams {
+    provider: Provider,
 }
 
 #[derive(Debug, Deserialize)]

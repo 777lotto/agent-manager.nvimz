@@ -282,6 +282,43 @@ class Broker:
                     "task_id": params["task_id"],
                 },
             )
+        elif method == "provider/model/list":
+            provider = params["provider"]
+            models = (
+                [
+                    {
+                        "id": "gpt-fixture",
+                        "display_name": "GPT Fixture",
+                        "description": "Deterministic Codex model",
+                        "is_default": True,
+                    },
+                    {
+                        "id": "gpt-fixture-fast",
+                        "display_name": "GPT Fixture Fast",
+                        "description": "Fast deterministic Codex model",
+                        "is_default": False,
+                    },
+                ]
+                + [
+                    {
+                        "id": f"gpt-fixture-{index}",
+                        "display_name": f"GPT Fixture {index}",
+                        "description": "Additional deterministic Codex model",
+                        "is_default": False,
+                    }
+                    for index in range(3, 10)
+                ]
+                if provider == "codex"
+                else [
+                    {
+                        "id": "sonnet",
+                        "display_name": "Sonnet",
+                        "description": "Deterministic Claude model",
+                        "is_default": True,
+                    }
+                ]
+            )
+            respond(request, {"provider": provider, "models": models})
         elif method == "provider/session/list":
             provider = params["provider"]
             active_sessions = {
