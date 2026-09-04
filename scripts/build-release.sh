@@ -38,8 +38,11 @@ case "$(rustc --version)" in
   "rustc 1.98.0 "*) ;;
   *) fail "release Rust must be 1.98.0" ;;
 esac
-test "$(uv --version)" = "uv 0.12.7 (x86_64-unknown-linux-musl)" \
-  || fail "release uv must be 0.12.7 for x86_64 Linux"
+case "$(uv --version)" in
+  "uv 0.12.7 (x86_64-unknown-linux-gnu)" | \
+    "uv 0.12.7 (x86_64-unknown-linux-musl)") ;;
+  *) fail "release uv must be 0.12.7 for x86_64 Linux" ;;
+esac
 test "$(uname -s)" = Linux || fail "the release target is Linux"
 test "$(uname -m)" = x86_64 || fail "the release target is x86_64"
 
