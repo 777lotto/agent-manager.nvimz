@@ -737,7 +737,10 @@ local function integration_test()
     assert_equal(vim.fn.exists(":" .. command), 2, command .. " command")
   end
 
-  local test_file = vim.fn.tempname() .. "-agent-manager-m2.txt"
+  local test_file = vim.fs.joinpath(
+    "/tmp",
+    vim.fs.basename(vim.fn.tempname()) .. "-agent-manager-m2.txt"
+  )
   vim.fn.writefile({ "disk original" }, test_file)
   vim.env.AGENT_MANAGER_TEST_FILE = test_file
   vim.cmd("edit " .. vim.fn.fnameescape(test_file))
