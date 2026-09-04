@@ -33,14 +33,14 @@ impl DurableServer {
     }
 
     async fn start_with_codex(replay_capacity: usize, codex_fixture: &str) -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "agent-manager-durable-integration-{}",
-            uuid::Uuid::new_v4()
-        ));
+        // Keep the Unix-socket path below macOS's short `sun_path` limit even
+        // when the runner provides a long temporary-directory prefix.
+        let directory =
+            std::env::temp_dir().join(format!("amdi-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir(&directory).expect("create durable test directory");
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
             .expect("protect durable test directory");
-        let socket = directory.join("broker.sock");
+        let socket = directory.join("s");
         let registry = directory.join("registry.json");
         let codex = fixture_command(codex_fixture);
         let claude = fixture_command("fake_m1_claude_worker.py");
