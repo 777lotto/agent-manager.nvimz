@@ -1,6 +1,6 @@
 # External CLI session discovery
 
-Agent Manager displays active Codex and Claude sessions even when their
+Agent Manager displays active and saved Codex and Claude sessions even when their
 provider process was started from a standalone terminal rather than Neovim.
 The public `provider/session/list` request therefore supports an unscoped,
 `active_only` query in addition to the existing cwd-scoped resumable history
@@ -33,12 +33,14 @@ shape.
 External records are held separately from broker-owned agents and
 de-duplicated by provider plus session ID. They are presentation-only while
 active: the Agent Manager UI does not attach, resume, steer, interrupt,
-archive, or otherwise seize the provider writer from the original CLI. The
-existing project-scoped Attach flow offers provider history only after activity
-can be checked and the external session is no longer active.
+archive, or otherwise seize the provider writer from the original CLI. Saved
+records can be continued directly from the Agents pane after activity has been
+checked. The broker claims their existing lifecycle workspace, or creates a
+named worktree when the history came from a registered canonical checkout,
+before resuming the exact provider session ID.
 
 The Agents pane renders both collections in a working-directory hierarchy and
-labels external rows `cli-running`. Opening the pane and pressing `r` perform
+uses explicit `ACTIVE`, `RESUME`, and fail-closed `CHECK` labels. Opening the pane and pressing `r` perform
 metadata-only refreshes and do not start a paid model turn. Provider prompt
 previews, transcript messages, arbitrary CLI JSON fields, and tool payloads are
 discarded before they reach the public broker protocol.

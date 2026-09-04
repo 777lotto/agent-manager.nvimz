@@ -76,6 +76,22 @@ INVALID_CASES: dict[str, tuple[dict[str, Any], ...]] = {
                 },
             },
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "agent/resume",
+            "params": {
+                "provider": "codex",
+                "provider_session_id": "thread-mixed-input",
+                "cwd": "/workspace/project",
+                "workspace_strategy": "worktree",
+                "managed_workspace": {
+                    "repository": "agent-manager",
+                    "task_id": "mixed-input",
+                    "resume": True,
+                },
+            },
+        },
     ),
     "worker.schema.json": (
         {"jsonrpc": "2.0", "id": True, "method": "session/list", "params": {}},

@@ -934,6 +934,45 @@ async fn managed_workspace_start_uses_lifecycle_inventory_claim_and_handoff() {
 }
 
 #[tokio::test]
+async fn managed_workspace_resume_claims_the_saved_task_before_provider_resume() {
+    completes_within(async {
+        let fixture = ManagedWorkspaceFixture::new();
+        let mut harness = start_managed_harness(&fixture).await;
+
+        harness
+            .send(request(
+                2,
+                "agent/resume",
+                json!({
+                    "provider": "codex",
+                    "provider_session_id": "thread-resumable",
+                    "managed_workspace": {
+                        "repository": "agent-manager",
+                        "task_id": "managed-task",
+                        "resume": true
+                    }
+                }),
+            ))
+            .await;
+        let resumed = harness.response(2).await;
+        let agent = &resumed["result"]["agent"];
+        assert_eq!(agent["provider_session_id"], "thread-resumable");
+        assert_eq!(agent["cwd"], fixture.worktree.to_string_lossy().as_ref());
+        assert_eq!(agent["workspace_strategy"], "worktree");
+        assert_eq!(agent["managed_workspace"]["repository"], "agent-manager");
+        assert_eq!(agent["managed_workspace"]["task_id"], "managed-task");
+        harness.state("idle").await;
+
+        let lifecycle_calls = fs::read_to_string(&fixture.marker).expect("read lifecycle calls");
+        assert!(lifecycle_calls.contains("claim agent-manager managed-task --owner-pid"));
+        assert!(lifecycle_calls.contains("--resume"));
+        harness.shutdown(3).await;
+    })
+    .await
+    .expect("managed workspace resume timed out");
+}
+
+#[tokio::test]
 async fn codex_embedded_flow_resumes_one_specific_provider_session() {
     completes_within(prove_specific_resume(Provider::Codex, "thread-resumable"))
         .await

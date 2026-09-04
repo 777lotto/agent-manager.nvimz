@@ -105,10 +105,18 @@ local function pure_model_test()
       title = "external fixture",
       active = true,
     },
+    {
+      provider_session_id = "saved-codex",
+      cwd = "/workspace/repos/alpha/api",
+      title = "saved fixture",
+      active = false,
+    },
   }, true))
-  assert_equal(#model:external_session_list(), 1, "managed provider sessions are de-duplicated")
-  assert_equal(model:external_session_list()[1].state, "cli-running", "external session state")
-  assert_equal(#model:session_list(), 2, "combined session projection")
+  assert_equal(#model:external_session_list(), 2, "managed provider sessions are de-duplicated")
+  assert_equal(model:list()[1].external_active, true, "duplicate active writer is retained on broker row")
+  assert_equal(model:external_session_list()[1].state, "running", "active external session state")
+  assert_equal(model:external_session_list()[2].state, "resumable", "saved external session state")
+  assert_equal(#model:session_list(), 3, "combined session projection")
   assert(model:apply_workspace_inventory({
     {
       slug = "agent-manager",
@@ -234,16 +242,30 @@ local function workspace_view_navigation_test()
     },
   })
   local start_context = nil
+  local resumed_session = nil
   local view = View.new(model, {
     start = function(context)
       start_context = context
     end,
+    resume = function(session)
+      resumed_session = session
+    end,
   }, {})
+  model:apply_external_sessions("codex", {
+    {
+      provider_session_id = "codex-saved-view",
+      cwd = "/workspace/agent-manager",
+      title = "saved codex fixture",
+      active = false,
+    },
+  }, true)
   assert(view:open())
   view:render()
   local status = view:status()
   assert(buffer_contains(status.buffers.agents, "● CODEX"), "Codex badge")
   assert(buffer_contains(status.buffers.agents, "◆ CLAUDE"), "Claude badge")
+  assert(buffer_contains(status.buffers.agents, "● ACTIVE"), "active session badge")
+  assert(buffer_contains(status.buffers.agents, "○ RESUME"), "saved session badge")
 
   for index, pane in ipairs({ "agents", "conversation", "activity" }) do
     vim.api.nvim_feedkeys(tostring(index), "x", false)
@@ -259,6 +281,10 @@ local function workspace_view_navigation_test()
   vim.api.nvim_feedkeys("n", "x", false)
   assert_equal(start_context.repository, "agent-manager", "directory start repository")
   assert_equal(start_context.cwd, "/workspace/agent-manager", "directory start cwd")
+  local saved_row = assert(buffer_line_number(status.buffers.agents, "saved codex fixture"))
+  vim.api.nvim_win_set_cursor(0, { saved_row, 0 })
+  vim.api.nvim_feedkeys(vim.keycode("<CR>"), "x", false)
+  assert_equal(resumed_session.provider_session_id, "codex-saved-view", "saved row resume action")
   view:teardown()
 end
 
@@ -330,6 +356,14 @@ local function public_input_validation_test()
   })
   assert_equal(result, nil, "invalid resume cwd result")
   assert_equal(err.kind, "input", "invalid resume cwd error")
+
+  result, err = manager.resume({
+    provider = "claude",
+    provider_session_id = "session",
+    managed_workspace = { repository = "agent-manager", task_id = "Bad Name" },
+  })
+  assert_equal(result, nil, "invalid managed resume result")
+  assert_equal(err.kind, "input", "invalid managed resume error")
 end
 
 local function real_broker_handshake_test()
@@ -473,7 +507,7 @@ local function integration_test()
     return manager.status().client.state == "connected"
   end)
   await("external CLI session discovery", function()
-    return #(manager.status().model.external_sessions or {}) == 2
+    return #(manager.status().model.external_sessions or {}) == 4
   end)
   local external_status = manager.status()
   assert_equal(manager.list(), {}, "external CLI sessions are not broker-owned agents")
@@ -481,15 +515,16 @@ local function integration_test()
   assert(buffer_contains(external_status.view.buffers.agents, "api"), "Codex session directory")
   assert(buffer_contains(external_status.view.buffers.agents, "web"), "Claude session directory")
   assert(buffer_contains(external_status.view.buffers.agents, "[cwd]"), "opening project directory hint")
-  assert(buffer_has_line(external_status.view.buffers.agents, " └─ workspace"), "tree root child")
-  assert(buffer_has_line(external_status.view.buffers.agents, "    └─ repos"), "tree nested repo root")
-  assert(buffer_has_line(external_status.view.buffers.agents, "       └─ alpha"), "tree repository")
+  assert(buffer_contains(external_status.view.buffers.agents, "workspace"), "tree root child")
+  assert(buffer_contains(external_status.view.buffers.agents, "repos"), "tree nested repo root")
+  assert(buffer_contains(external_status.view.buffers.agents, "alpha"), "tree repository")
   assert(buffer_has_line(external_status.view.buffers.agents, "          ├─ api"), "tree sibling branch")
   assert(buffer_has_line(external_status.view.buffers.agents, "          └─ web"), "tree final branch")
-  assert(buffer_contains(external_status.view.buffers.agents, "cli-running"), "external state label")
+  assert(buffer_contains(external_status.view.buffers.agents, "● ACTIVE"), "active external label")
+  assert(buffer_contains(external_status.view.buffers.agents, "○ RESUME"), "resumable external label")
   assert(
-    buffer_contains(external_status.view.buffers.agents, "CLI sessions are read-only"),
-    "external ownership note"
+    buffer_contains(external_status.view.buffers.agents, "open ACTIVE or continue RESUME"),
+    "session action note"
   )
 
   local sessions = nil
@@ -753,8 +788,9 @@ local function managed_workspace_ui_test()
   vim.ui.input = original_input
 
   local agent = manager.list()[1]
-  assert_equal(select_count, 2, "contextual start picker depth")
+  assert_equal(select_count, 1, "new session only asks for a provider")
   assert(input_prompt:find("agent-manager", 1, true), "contextual task prompt")
+  assert(input_prompt:find("New Codex session", 1, true), "new-session prompt wording")
   assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
   assert_equal(agent.managed_workspace.task_id, "new-managed-task", "managed task ID")
@@ -837,33 +873,37 @@ local function resume_test()
   await("resume broker handshake", function()
     return manager.status().client.state == "connected"
   end)
-  local sessions = nil
-  assert(manager.sessions({ provider = "claude", cwd = "/tmp" }, function(result, err)
-    assert_equal(err, nil, "Claude session discovery error")
-    sessions = result
-  end))
-  await("Claude session discovery", function()
-    return sessions ~= nil
+  await("all provider sessions", function()
+    return #(manager.status().model.external_sessions or {}) == 4
   end)
-  local session = sessions.sessions[1]
-  local resumed = nil
-  assert(manager.resume({
-    provider = "claude",
-    provider_session_id = session.provider_session_id,
-    cwd = "/tmp",
-    workspace_strategy = "shared",
-  }, function(result, err)
-    assert_equal(err, nil, "resume error")
-    resumed = result
-  end))
+  local session = nil
+  for _, candidate in ipairs(manager.status().model.external_sessions) do
+    if candidate.provider_session_id == "claude-resumable-lua" then
+      session = candidate
+      break
+    end
+  end
+  assert(session, "resumable Claude session must be listed")
+  local original_input = vim.ui.input
+  local resume_prompt = nil
+  vim.ui.input = function(opts, callback)
+    resume_prompt = opts.prompt
+    callback("continued-session")
+  end
+  manager.resume_session_ui(session)
   await("specific resume", function()
+    local agent = manager.list()[1]
     local conversations = manager.status().model.conversations
-    local id = resumed and resumed.agent and resumed.agent.id
-    return id and conversations[id] and conversations[id][2]
+    return agent and conversations[agent.id] and conversations[agent.id][2]
   end)
-  assert_equal(resumed.agent.provider_session_id, "claude-resumable-lua", "specific resume id")
+  vim.ui.input = original_input
+  local resumed = manager.list()[1]
+  assert(resume_prompt:find("Continue Claude Code session", 1, true), "continue-session prompt wording")
+  assert_equal(resumed.provider_session_id, "claude-resumable-lua", "specific resume id")
+  assert_equal(resumed.workspace_strategy, "worktree", "resumed session workspace strategy")
+  assert_equal(resumed.managed_workspace.task_id, "continued-session", "resumed session workspace")
   assert_equal(
-    manager.status().model.conversations[resumed.agent.id][2].text,
+    manager.status().model.conversations[resumed.id][2].text,
     "historic answer",
     "resumed history"
   )

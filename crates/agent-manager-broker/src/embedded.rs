@@ -580,7 +580,7 @@ impl Broker {
                     .await;
             }
             "agent/interrupt" => self.interrupt_agent(request_id, params).await,
-            "agent/resume" => self.resume_agent(request_id, params),
+            "agent/resume" => self.resume_agent(request_id, params).await,
             "agent/fork" => self.fork_agent(request_id, params).await,
             "agent/archive" => self.archive_agent(request_id, params).await,
             "agent/approval/respond" => self.respond_approval(request_id, params).await,
@@ -945,7 +945,7 @@ impl Broker {
         let (Some(raw_cwd), Some(strategy)) = (raw_cwd, strategy) else {
             self.send(invalid_params(
                 request_id.clone(),
-                "explicit starts require cwd and workspace_strategy",
+                "explicit launches require cwd and workspace_strategy",
             ));
             return None;
         };
@@ -1127,7 +1127,7 @@ impl Broker {
         }
     }
 
-    fn resume_agent(&mut self, request_id: RequestId, params: Value) {
+    async fn resume_agent(&mut self, request_id: RequestId, params: Value) {
         let Ok(parsed) = serde_json::from_value::<ResumeParams>(params) else {
             self.send(invalid_params(request_id, "invalid resume parameters"));
             return;
@@ -1150,35 +1150,23 @@ impl Broker {
             ));
             return;
         }
-        let cwd = match canonical_directory(&parsed.cwd) {
-            Ok(cwd) => cwd,
-            Err(message) => {
-                self.send(invalid_params(request_id, message));
-                return;
-            }
-        };
-        let worktree_path = match validate_workspace(
-            parsed.workspace_strategy,
-            parsed.worktree_path.as_deref(),
-            &cwd,
-            self.mode,
-        ) {
-            Ok(path) => path,
-            Err(message) => {
-                self.send(invalid_params(request_id, message));
-                return;
-            }
+        let Some(workspace) = self
+            .resolve_launch_workspace(
+                &request_id,
+                parsed.cwd.as_deref(),
+                parsed.workspace_strategy,
+                parsed.worktree_path.as_deref(),
+                parsed.managed_workspace.as_ref(),
+            )
+            .await
+        else {
+            return;
         };
         let session_id = parsed.provider_session_id;
         let _ = self.launch_agent(
             request_id,
             parsed.provider,
-            ResolvedWorkspace {
-                cwd,
-                strategy: parsed.workspace_strategy,
-                worktree_path,
-                managed: None,
-            },
+            workspace,
             SessionLaunch::Resume(session_id),
         );
     }
@@ -1626,6 +1614,30 @@ impl Broker {
                 provider_session_id,
                 runtime,
             } => {
+                let provider = self
+                    .agents
+                    .get(&agent_id)
+                    .map(|agent| agent.summary.provider);
+                let stale_ids = self
+                    .agents
+                    .iter()
+                    .filter(|(candidate_id, candidate)| {
+                        *candidate_id != &agent_id
+                            && candidate.task.is_none()
+                            && candidate.summary.state == AgentState::Disconnected
+                            && Some(candidate.summary.provider) == provider
+                            && candidate.summary.provider_session_id.as_deref()
+                                == Some(provider_session_id.as_str())
+                    })
+                    .map(|(candidate_id, _)| candidate_id.clone())
+                    .collect::<Vec<_>>();
+                for stale_id in &stale_ids {
+                    self.agents.remove(stale_id);
+                }
+                if !stale_ids.is_empty() {
+                    self.agent_order
+                        .retain(|candidate_id| !stale_ids.contains(candidate_id));
+                }
                 let summary = {
                     let Some(agent) = self.agents.get_mut(&agent_id) else {
                         return;
@@ -2006,10 +2018,14 @@ struct ProviderSessionListParams {
 struct ResumeParams {
     provider: Provider,
     provider_session_id: String,
-    cwd: String,
-    workspace_strategy: WorkspaceStrategy,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    workspace_strategy: Option<WorkspaceStrategy>,
     #[serde(default)]
     worktree_path: Option<String>,
+    #[serde(default)]
+    managed_workspace: Option<ManagedWorkspaceParams>,
     #[serde(default)]
     provider_options: Option<serde_json::Map<String, Value>>,
 }

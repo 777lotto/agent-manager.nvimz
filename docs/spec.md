@@ -599,11 +599,12 @@ maintaining a competing set.
 
 - **Agents:** provider, title, cwd/worktree, precise status, unread marker, and
   pending-approval count. Registered repositories, broker-owned agents, and
-  external CLI sessions are grouped in a directory tree. The opening project
+  all active and saved external CLI sessions are grouped in a directory tree. The opening project
   and a focused directory supply repository context to the start flow. Provider
   badges use distinct labels and shapes in addition to semantic blue/orange
-  styling; external sessions are marked read-only and de-duplicated by provider
-  session ID.
+  styling; green `ACTIVE`, dark `RESUME`, and fail-closed `CHECK` badges expose
+  session ownership without relying on color alone. Records are de-duplicated
+  by provider session ID.
 - **Conversation:** user and assistant messages with incremental updates,
   compaction boundaries, and provider notices.
 - **Activity:** ordered tool, command, file, and usage events with expandable
@@ -622,19 +623,19 @@ logical selection by stable item ID rather than cursor row.
 
 Final command names follow the selected package name. The working surface is:
 
-| Command                         | Purpose                                              |
-| ------------------------------- | ---------------------------------------------------- |
-| `:AgentManager`                 | Open or focus the full-tab workspace.                |
-| `:AgentManagerSplit`            | Open the compact split.                              |
-| `:AgentManagerStart [provider]` | Start or resume with the current project as a hint.  |
-| `:AgentManagerSend`             | Open prompt input for the selected agent.            |
-| `:AgentManagerSteer`            | Add input to the selected active turn.               |
-| `:AgentManagerAttach`           | Select a broker-owned or resumable provider session. |
-| `:AgentManagerInterrupt`        | Confirm and interrupt active work.                   |
-| `:AgentManagerFork`             | Fork the selected resumable provider session.        |
-| `:AgentManagerContext`          | Queue explicit editor context for the next input.    |
-| `:AgentManagerDiff`             | Show a diff or resolve a dirty-buffer conflict.      |
-| `:AgentManagerHealth`           | Show component and integration health.               |
+| Command                         | Purpose                                                 |
+| ------------------------------- | ------------------------------------------------------- |
+| `:AgentManager`                 | Open or focus the full-tab workspace.                   |
+| `:AgentManagerSplit`            | Open the compact split.                                 |
+| `:AgentManagerStart [provider]` | Start a new session with the current project as a hint. |
+| `:AgentManagerSend`             | Open prompt input for the selected agent.               |
+| `:AgentManagerSteer`            | Add input to the selected active turn.                  |
+| `:AgentManagerAttach`           | Open an active session or continue a saved session.     |
+| `:AgentManagerInterrupt`        | Confirm and interrupt active work.                      |
+| `:AgentManagerFork`             | Fork the selected resumable provider session.           |
+| `:AgentManagerContext`          | Queue explicit editor context for the next input.       |
+| `:AgentManagerDiff`             | Show a diff or resolve a dirty-buffer conflict.         |
+| `:AgentManagerHealth`           | Show component and integration health.                  |
 
 Commands accept structured Lua options through the public API; command-line
 arguments remain deliberately small.
@@ -649,7 +650,7 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | `1` / `2` / `3`     | Focus Agents, Conversation, or Activity directly.         |
 | `<Tab>` / `<S-Tab>` | Cycle visible panes.                                      |
 | `<CR>`              | Open, expand, or act on the stable item under the cursor. |
-| `n`                 | Start an agent, using the focused repository when set.    |
+| `n`                 | Always start a new session in the focused repository.     |
 | `p`                 | Compose a prompt for the selected agent.                  |
 | `s`                 | Steer an active turn when supported.                      |
 | `x`                 | Confirm and interrupt active work.                        |

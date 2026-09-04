@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "agent/resume",
+  "params": {
+    "provider": "codex",
+    "provider_session_id": "01990000-0000-7000-8000-000000000015",
+    "managed_workspace": {
+      "repository": "agent-manager",
+      "task_id": "resume-session",
+      "resume": true
+    }
+  }
+}

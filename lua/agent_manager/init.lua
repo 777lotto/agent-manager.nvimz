@@ -211,8 +211,11 @@ function M.setup(opts)
     interrupt = function()
       M.confirm_interrupt()
     end,
-    attach = function()
-      M.attach_ui()
+    attach = function(session)
+      M.attach_ui(session)
+    end,
+    resume = function(session)
+      M.resume_session_ui(session)
     end,
     fork = function()
       M.fork()
@@ -656,48 +659,79 @@ function M.resume(opts, callback)
     finish(callback, nil, err)
     return nil, err
   end
-  local cwd = opts.cwd or project_root()
-  if type(cwd) ~= "string" then
-    local err = structured_error("input", "cwd must be a directory path")
-    finish(callback, nil, err)
-    return nil, err
-  end
-  cwd = vim.uv.fs_realpath(vim.fs.normalize(cwd))
-  if not cwd then
-    local err = structured_error("input", "cwd does not identify an existing directory")
-    finish(callback, nil, err)
-    return nil, err
-  end
-  local strategy = opts.workspace_strategy or "shared"
-  if strategy ~= "shared" and strategy ~= "worktree" then
-    local err = structured_error("input", "workspace_strategy must be 'shared' or 'worktree'")
-    finish(callback, nil, err)
-    return nil, err
-  end
-  local worktree_path = nil
-  if strategy == "worktree" then
-    if type(opts.worktree_path) ~= "string" then
-      local err = structured_error("input", "worktree strategy requires worktree_path")
+  local params = {
+    provider = provider,
+    provider_session_id = session_id,
+  }
+  if opts.managed_workspace ~= nil then
+    local workspace = opts.managed_workspace
+    if type(workspace) ~= "table" then
+      local err = structured_error("input", "managed_workspace must be a table")
       finish(callback, nil, err)
       return nil, err
     end
-    worktree_path = vim.uv.fs_realpath(vim.fs.normalize(opts.worktree_path))
-    if worktree_path ~= cwd then
-      local err = structured_error("input", "worktree_path must identify the agent cwd")
+    if
+      not valid_managed_identifier(workspace.repository, true)
+      or not valid_managed_identifier(workspace.task_id, false)
+    then
+      local err = structured_error(
+        "input",
+        "managed repository and session names must use normalized lowercase names"
+      )
       finish(callback, nil, err)
       return nil, err
     end
+    if workspace.resume ~= nil and type(workspace.resume) ~= "boolean" then
+      local err = structured_error("input", "managed_workspace.resume must be a boolean")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    params.managed_workspace = {
+      repository = workspace.repository,
+      task_id = workspace.task_id,
+      resume = workspace.resume == true,
+    }
+  else
+    local cwd = opts.cwd or project_root()
+    if type(cwd) ~= "string" then
+      local err = structured_error("input", "cwd must be a directory path")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    cwd = vim.uv.fs_realpath(vim.fs.normalize(cwd))
+    if not cwd then
+      local err = structured_error("input", "cwd does not identify an existing directory")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    local strategy = opts.workspace_strategy or "shared"
+    if strategy ~= "shared" and strategy ~= "worktree" then
+      local err = structured_error("input", "workspace_strategy must be 'shared' or 'worktree'")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    local worktree_path = nil
+    if strategy == "worktree" then
+      if type(opts.worktree_path) ~= "string" then
+        local err = structured_error("input", "worktree strategy requires worktree_path")
+        finish(callback, nil, err)
+        return nil, err
+      end
+      worktree_path = vim.uv.fs_realpath(vim.fs.normalize(opts.worktree_path))
+      if worktree_path ~= cwd then
+        local err = structured_error("input", "worktree_path must identify the agent cwd")
+        finish(callback, nil, err)
+        return nil, err
+      end
+    end
+    params.cwd = cwd
+    params.workspace_strategy = strategy
+    params.worktree_path = worktree_path
   end
   return with_client(function()
     local _, request_err = runtime.client:request(
       "agent/resume",
-      {
-        provider = provider,
-        provider_session_id = session_id,
-        cwd = cwd,
-        workspace_strategy = strategy,
-        worktree_path = worktree_path,
-      },
+      params,
       function(result, rpc_err)
         if rpc_err then
           report(rpc_err)
@@ -1021,7 +1055,7 @@ local function refresh_external_sessions(callback)
         provider = current_provider,
         cursor = vim.NIL,
         limit = runtime.config.ui.external_session_limit,
-        active_only = true,
+        active_only = false,
       },
       function(result, rpc_err)
         settle(current_provider, result, rpc_err)
@@ -1030,6 +1064,18 @@ local function refresh_external_sessions(callback)
     if request_err then
       settle(current_provider, nil, request_err)
     end
+  end
+end
+
+local function refresh_workspace_inventory(callback)
+  local _, request_err = runtime.client:request("workspace/list", {}, function(result, rpc_err)
+    if result and result.repositories then
+      runtime.model:apply_workspace_inventory(result.repositories)
+    end
+    callback(result, rpc_err)
+  end)
+  if request_err then
+    callback(nil, request_err)
   end
 end
 
@@ -1051,12 +1097,24 @@ function M.refresh(callback)
         finish(callback, nil, rpc_err)
         return
       end
+      local remaining = 2
+      local function settled()
+        remaining = remaining - 1
+        if remaining == 0 then
+          runtime.view:schedule_render()
+          finish(callback, result, nil)
+        end
+      end
+      result = result or {}
       refresh_external_sessions(function(external)
-        result = result or {}
         result.external_sessions = external.sessions
         result.external_activity = external.activity
-        runtime.view:schedule_render()
-        finish(callback, result, nil)
+        settled()
+      end)
+      refresh_workspace_inventory(function(workspaces, workspace_err)
+        result.repositories = workspaces and workspaces.repositories or {}
+        result.workspace_error = workspace_err
+        settled()
       end)
     end)
     if request_err then
@@ -1076,23 +1134,19 @@ local function repository_label(repository)
   )
 end
 
-local function task_label(task)
-  local lease = #(task.lease_identity or {}) > 0 and table.concat(task.lease_identity, ",")
-    or "unleased"
-  return string.format("%s/%s · %s", task.repository, task.task_id, lease)
-end
-
 local function load_workspace_inventory(callback)
   M.workspaces(function(result, err)
     if err then
+      callback(nil, err)
       return
     end
     local repositories = result and result.repositories or {}
     if #repositories == 0 then
       vim.notify("Agent Manager: no registered repositories are available", vim.log.levels.WARN)
+      callback({}, nil)
       return
     end
-    callback(repositories)
+    callback(repositories, nil)
   end)
 end
 
@@ -1148,43 +1202,80 @@ local function contextual_repository(repositories, context)
   return selected
 end
 
+local function provider_name(provider)
+  return provider == "claude" and "Claude Code" or "Codex"
+end
+
 local function started_notice(provider, result)
   local agent = result and result.agent
   if not agent then
     return
   end
   vim.notify(
-    string.format("Agent Manager: %s is ready in %s — press p to prompt", provider, agent.cwd)
+    string.format(
+      "Agent Manager: %s is ready in %s — press p to prompt",
+      provider_name(provider),
+      agent.cwd
+    )
   )
 end
 
-local function start_new_managed_task(provider, context)
-  local function choose_task_id(repository)
+local function start_new_session(provider, context)
+  if not runtime.config.worktrees.lifecycle and runtime.config.worktrees.allow_shared then
+    local cwd = context.cwd or project_root()
+    vim.notify(string.format(
+      "Agent Manager: starting a new %s session in %s…",
+      provider_name(provider),
+      cwd
+    ))
+    local ok, start_err = M.start({
+      provider = provider,
+      cwd = cwd,
+      workspace_strategy = "shared",
+    }, function(result, err)
+      if not err then
+        started_notice(provider, result)
+      end
+    end)
+    if not ok and start_err then
+      report(start_err)
+    end
+    return
+  end
+
+  local function choose_session_name(repository)
     schedule_ui(function()
       vim.ui.input({
-        prompt = string.format("New %s task in %s · stable task ID: ", provider, repository.slug),
-      }, function(task_id)
-        if not task_id or task_id == "" then
+        prompt = string.format(
+          "New %s session in %s · name (lowercase-with-hyphens): ",
+          provider_name(provider),
+          repository.slug
+        ),
+      }, function(session_name)
+        if not session_name or session_name == "" then
           return
         end
-        if not valid_managed_identifier(task_id, false) then
-          vim.notify("Agent Manager: task ID must use lowercase kebab-case", vim.log.levels.ERROR)
+        if not valid_managed_identifier(session_name, false) then
+          vim.notify(
+            "Agent Manager: session name must use lowercase letters, numbers, and single hyphens",
+            vim.log.levels.ERROR
+          )
           return
         end
         schedule_ui(function()
           vim.notify(
             string.format(
-              "Agent Manager: starting %s in isolated task %s/%s…",
-              provider,
+              "Agent Manager: starting a new %s session in %s/%s…",
+              provider_name(provider),
               repository.slug,
-              task_id
+              session_name
             )
           )
           local ok, start_err = M.start({
             provider = provider,
             managed_workspace = {
               repository = repository.slug,
-              task_id = task_id,
+              task_id = session_name,
               resume = false,
             },
           }, function(result, err)
@@ -1206,73 +1297,26 @@ local function start_new_managed_task(provider, context)
     known = { slug = context.repository }
   end
   if known then
-    choose_task_id(known)
+    choose_session_name(known)
     return
   end
 
-  vim.notify("Agent Manager: loading registered repositories for " .. provider .. "…")
+  vim.notify("Agent Manager: loading registered repositories for " .. provider_name(provider) .. "…")
   load_workspace_inventory(function(repositories)
+    if not repositories then
+      return
+    end
     local repository = contextual_repository(repositories, context)
     if repository then
-      choose_task_id(repository)
+      choose_session_name(repository)
       return
     end
     vim.ui.select(repositories, {
-      prompt = "New " .. provider .. " task · choose repository",
+      prompt = "New " .. provider_name(provider) .. " session · choose directory",
       format_item = repository_label,
     }, function(selected)
       if selected then
-        choose_task_id(selected)
-      end
-    end)
-  end)
-end
-
-local function resume_managed_task(provider)
-  vim.notify("Agent Manager: loading managed tasks for " .. provider .. "…")
-  load_workspace_inventory(function(repositories)
-    local tasks = {}
-    for _, repository in ipairs(repositories) do
-      for _, task in ipairs(repository.tasks or {}) do
-        local item = vim.deepcopy(task)
-        item.repository = repository.slug
-        table.insert(tasks, item)
-      end
-    end
-    if #tasks == 0 then
-      vim.notify("Agent Manager: no managed tasks are available to resume", vim.log.levels.WARN)
-      return
-    end
-    vim.ui.select(tasks, {
-      prompt = "Resume " .. provider .. " · choose managed task",
-      format_item = task_label,
-    }, function(task)
-      if task then
-        schedule_ui(function()
-          vim.notify(
-            string.format(
-              "Agent Manager: resuming %s in isolated task %s/%s…",
-              provider,
-              task.repository,
-              task.task_id
-            )
-          )
-          local ok, start_err = M.start({
-            provider = provider,
-            managed_workspace = {
-              repository = task.repository,
-              task_id = task.task_id,
-              resume = true,
-            },
-          }, function(result, err)
-            if not err then
-              started_notice(provider, result)
-            end
-          end)
-          if not ok and start_err then
-            report(start_err)
-          end
-        end)
+        choose_session_name(selected)
       end
     end)
   end)
@@ -1287,132 +1331,220 @@ function M.start_ui(context)
     vim.notify("Agent Manager embedded mode supports one live agent", vim.log.levels.WARN)
     return
   end
-  local function choose_workspace(provider)
-    local actions = { "New isolated task", "Resume isolated task" }
-    if runtime.config.worktrees.allow_shared then
-      table.insert(actions, "Shared checkout (admin-enabled)")
-    end
-    vim.ui.select(actions, { prompt = "Start " .. provider .. " · choose workspace" }, function(action)
-      if action == "New isolated task" then
-        schedule_ui(function()
-          start_new_managed_task(provider, context)
-        end)
-      elseif action == "Resume isolated task" then
-        schedule_ui(function()
-          resume_managed_task(provider)
-        end)
-      elseif action == "Shared checkout (admin-enabled)" then
-        local cwd = context.cwd or project_root()
-        vim.notify(string.format("Agent Manager: starting %s in shared checkout %s…", provider, cwd))
-        local ok, start_err = M.start({ provider = provider, cwd = cwd, workspace_strategy = "shared" }, function(
-          result,
-          err
-        )
-          if not err then
-            started_notice(provider, result)
-          end
-        end)
-        if not ok and start_err then
-          report(start_err)
-        end
-      end
-    end)
-  end
-
   if context.provider == "codex" or context.provider == "claude" then
-    choose_workspace(context.provider)
+    start_new_session(context.provider, context)
     return
   end
-  vim.ui.select({ "codex", "claude" }, { prompt = "Start agent · choose provider" }, function(provider)
+  vim.ui.select({ "codex", "claude" }, {
+    prompt = "Start a new session · choose provider",
+    format_item = provider_name,
+  }, function(provider)
     if provider then
       schedule_ui(function()
-        choose_workspace(provider)
+        start_new_session(provider, context)
       end)
     end
   end)
+end
+
+local function active_session(session)
+  if session.external_active == true then
+    return true
+  end
+  if session.external then
+    return session.active == true
+  end
+  return session.state ~= "disconnected" and session.state ~= "failed"
 end
 
 local function session_label(session)
   local updated = session.updated_at and session.updated_at ~= vim.NIL
       and (" · " .. tostring(session.updated_at))
     or ""
+  local status = active_session(session) and "ACTIVE"
+    or session.activity_known == false and "CHECK"
+    or "RESUME"
   return string.format(
-    "%s · %s%s",
+    "%s · %s · %s · %s%s",
+    provider_name(session.provider),
+    status,
     session.title or session.provider_session_id,
     session.cwd ~= "" and session.cwd or "unknown cwd",
     updated
   )
 end
 
-local function choose_provider_session(provider)
-  M.sessions({ provider = provider, cwd = project_root() }, function(result, err)
-    if err then
-      return
+local function resume_notice(session, result)
+  local agent = result and result.agent
+  if agent then
+    vim.notify(string.format(
+      "Agent Manager: continued %s in %s — press p to prompt",
+      provider_name(session.provider),
+      agent.cwd
+    ))
+  end
+end
+
+local function resume_with_workspace(session, managed_workspace)
+  vim.notify("Agent Manager: continuing " .. provider_name(session.provider) .. " session…")
+  local ok, resume_err = M.resume({
+    provider = session.provider,
+    provider_session_id = session.provider_session_id,
+    managed_workspace = managed_workspace,
+  }, function(result, err)
+    if not err then
+      resume_notice(session, result)
     end
-    if not result or result.activity_available ~= true then
-      vim.notify(
-        "Agent Manager: cannot verify whether " .. provider .. " sessions are still active",
-        vim.log.levels.WARN
-      )
-      return
-    end
-    local sessions = {}
-    for _, session in ipairs(result and result.sessions or {}) do
-      if session.active ~= true then
-        table.insert(sessions, session)
+  end)
+  if not ok and resume_err then
+    report(resume_err)
+  end
+end
+
+local function task_for_directory(repositories, cwd)
+  local selected_repository = nil
+  local selected_task = nil
+  local selected_length = -1
+  for _, repository in ipairs(repositories) do
+    for _, task in ipairs(repository.tasks or {}) do
+      if type(task.path) == "string" and path_within(cwd, task.path) and #task.path > selected_length then
+        selected_repository = repository
+        selected_task = task
+        selected_length = #task.path
       end
     end
-    if #sessions == 0 then
-      vim.notify("Agent Manager: no resumable " .. provider .. " sessions found for this project")
-      return
-    end
-    vim.ui.select(sessions, {
-      prompt = "Resume " .. provider .. " session",
-      format_item = session_label,
-    }, function(session)
-      if session then
-        M.resume({
-          provider = provider,
-          provider_session_id = session.provider_session_id,
-          cwd = session.cwd ~= "" and session.cwd or project_root(),
-          workspace_strategy = "shared",
+  end
+  return selected_repository, selected_task
+end
+
+local function prompt_resume_workspace(session, repository)
+  schedule_ui(function()
+    vim.ui.input({
+      prompt = string.format(
+        "Continue %s session in %s · workspace name (lowercase-with-hyphens): ",
+        provider_name(session.provider),
+        repository.slug
+      ),
+    }, function(session_name)
+      if not session_name or session_name == "" then
+        return
+      end
+      if not valid_managed_identifier(session_name, false) then
+        vim.notify(
+          "Agent Manager: workspace name must use lowercase letters, numbers, and single hyphens",
+          vim.log.levels.ERROR
+        )
+        return
+      end
+      schedule_ui(function()
+        resume_with_workspace(session, {
+          repository = repository.slug,
+          task_id = session_name,
+          resume = false,
         })
-      end
+      end)
     end)
   end)
 end
 
-function M.attach_ui()
+function M.resume_session_ui(session)
+  if not ensure_setup() or type(session) ~= "table" then
+    return
+  end
+  if active_session(session) then
+    if session.external or session.external_active == true then
+      vim.notify(
+        "Agent Manager: this session is active in another terminal; switch to that terminal to avoid two writers",
+        vim.log.levels.WARN
+      )
+    elseif session.id then
+      M.attach(session.id)
+    end
+    return
+  end
+  if type(session.provider_session_id) ~= "string" or session.provider_session_id == "" then
+    vim.notify("Agent Manager: this entry has no saved provider session to continue", vim.log.levels.WARN)
+    return
+  end
+  if session.activity_known == false then
+    vim.notify(
+      "Agent Manager: provider activity could not be checked, so this session cannot be continued safely",
+      vim.log.levels.WARN
+    )
+    return
+  end
+  if runtime.config.broker.mode == "embedded" and has_live_agent() then
+    vim.notify("Agent Manager embedded mode supports one live agent", vim.log.levels.WARN)
+    return
+  end
+  local managed = session.managed_workspace
+  if managed and managed ~= vim.NIL then
+    resume_with_workspace(session, {
+      repository = managed.repository,
+      task_id = managed.task_id,
+      resume = true,
+    })
+    return
+  end
+
+  vim.notify("Agent Manager: finding a safe workspace for the saved session…")
+  load_workspace_inventory(function(repositories)
+    if not repositories then
+      return
+    end
+    local repository, task = task_for_directory(repositories, session.cwd)
+    if repository and task then
+      resume_with_workspace(session, {
+        repository = repository.slug,
+        task_id = task.task_id,
+        resume = true,
+      })
+      return
+    end
+    repository = contextual_repository(repositories, { cwd = session.cwd })
+    if repository then
+      prompt_resume_workspace(session, repository)
+      return
+    end
+    if runtime.config.worktrees.allow_shared then
+      M.resume({
+        provider = session.provider,
+        provider_session_id = session.provider_session_id,
+        cwd = session.cwd,
+        workspace_strategy = "shared",
+      }, function(result, err)
+        if not err then
+          resume_notice(session, result)
+        end
+      end)
+      return
+    end
+    vim.notify(
+      "Agent Manager: the saved session directory is not a registered repository: " .. tostring(session.cwd),
+      vim.log.levels.ERROR
+    )
+  end)
+end
+
+function M.attach_ui(focused_session)
   if not ensure_setup() then
     return
   end
-  local choices = {}
-  for _, agent in ipairs(runtime.model:list()) do
-    if agent.state ~= "disconnected" then
-      table.insert(choices, { kind = "agent", agent = agent })
-    end
+  if type(focused_session) == "table" then
+    M.resume_session_ui(focused_session)
+    return
   end
-  if not has_live_agent() then
-    table.insert(choices, { kind = "provider", provider = "codex" })
-    table.insert(choices, { kind = "provider", provider = "claude" })
+  local choices = runtime.model:session_list()
+  if #choices == 0 then
+    vim.notify("Agent Manager: no sessions are available")
+    return
   end
   vim.ui.select(choices, {
-    prompt = "Attach or resume session",
-    format_item = function(choice)
-      if choice.kind == "agent" then
-        local agent = choice.agent
-        return string.format("%s · %s · %s", agent.provider, agent.title, agent.state)
-      end
-      return "Resume a " .. choice.provider .. " provider session"
-    end,
-  }, function(choice)
-    if not choice then
-      return
-    end
-    if choice.kind == "agent" then
-      M.attach(choice.agent.id)
-    else
-      choose_provider_session(choice.provider)
+    prompt = "Open or continue session",
+    format_item = session_label,
+  }, function(session)
+    if session then
+      M.resume_session_ui(session)
     end
   end)
 end
@@ -1429,10 +1561,19 @@ function M.prompt_ui(initial)
   if not ensure_setup() then
     return
   end
-  if not selected_agent() then
+  local agent = selected_agent()
+  if not agent then
     local err = structured_error(
       "input",
       "no agent is selected — press 1, place the cursor on a [repo] or [cwd] directory, then press n"
+    )
+    report(err)
+    return nil, err
+  end
+  if agent.state == "disconnected" or agent.state == "failed" then
+    local err = structured_error(
+      "input",
+      "the selected session is not active — press 1, focus its RESUME row, then press Enter"
     )
     report(err)
     return nil, err
