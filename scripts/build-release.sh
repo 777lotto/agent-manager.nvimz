@@ -9,12 +9,28 @@ metadata="$repo_root/scripts/release_metadata.py"
 python_dir="$repo_root/python"
 python_bin="$python_dir/.venv/bin/python"
 python_version=3.13
+build_stage="initialization"
 
 fail() {
   printf 'release build: %s\n' "$1" >&2
+  if test "${GITHUB_ACTIONS:-}" = true; then
+    printf '::error title=Release build failed::%s: %s\n' "$build_stage" "$1"
+  fi
   exit 1
 }
 
+report_failure() {
+  status="$?"
+  trap - ERR
+  if test "${GITHUB_ACTIONS:-}" = true; then
+    printf '::error title=Release build failed::%s (exit %s)\n' \
+      "$build_stage" "$status"
+  fi
+  exit "$status"
+}
+trap report_failure ERR
+
+build_stage="pinned toolchain and metadata preflight"
 test -f "$compatibility" || fail "compatibility metadata is missing"
 test -x "$python_bin" || fail "run mise run setup before building a release"
 test "$($python_bin --version)" = "Python 3.13.15" || fail "release Python must be 3.13.15"
@@ -22,11 +38,15 @@ case "$(rustc --version)" in
   "rustc 1.98.0 "*) ;;
   *) fail "release Rust must be 1.98.0" ;;
 esac
-test "$(uv --version)" = "uv 0.12.7 (x86_64-unknown-linux-musl)" \
-  || fail "release uv must be 0.12.7 for x86_64 Linux"
+case "$(uv --version)" in
+  "uv 0.12.7 (x86_64-unknown-linux-gnu)" | \
+    "uv 0.12.7 (x86_64-unknown-linux-musl)") ;;
+  *) fail "release uv must be 0.12.7 for x86_64 Linux" ;;
+esac
 test "$(uname -s)" = Linux || fail "the release target is Linux"
 test "$(uname -m)" = x86_64 || fail "the release target is x86_64"
 
+build_stage="source revision validation"
 source_revision="${RELEASE_SOURCE_REVISION:-$(git -C "$repo_root" rev-parse HEAD)}"
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" show -s --format=%ct "$source_revision")}"
 source_dirty=0
@@ -46,6 +66,7 @@ checksums="$output_dir/SHA256SUMS"
 test ! -e "$archive" || fail "refusing to overwrite $archive"
 test ! -e "$checksums" || fail "refusing to overwrite $checksums"
 
+build_stage="temporary release tree setup"
 temporary="$(mktemp -d)"
 cleanup() {
   if test -d "$temporary"; then
@@ -65,6 +86,7 @@ export RUSTFLAGS="--remap-path-prefix=$repo_root=/usr/src/agent-manager -C link-
 export UV_LINK_MODE=copy
 export UV_PYTHON_DOWNLOADS=never
 
+build_stage="Rust broker build"
 cargo_target="$temporary/cargo-target"
 CARGO_TARGET_DIR="$cargo_target" cargo build \
   --locked \
@@ -78,6 +100,7 @@ install -m 0755 \
 # Ship the exact interpreter with the worker. Neovim and the installer never
 # need to create a venv or resolve Python dependencies on the destination
 # machine; Python discovers this relocatable prefix from python/bin/python.
+build_stage="relocatable Python runtime assembly"
 python_base="$($python_bin -I -c 'import sys; print(sys.base_prefix)')"
 test "${python_base:0:1}" = / || fail "Python base prefix must be absolute"
 test -x "$python_base/bin/python3.13" || fail "Python base interpreter is missing"
@@ -88,6 +111,7 @@ find "$stage/python/lib/python${python_version}/site-packages" -mindepth 1 -dept
 find "$stage/python/lib/python${python_version}" -depth \
   \( -type d -name __pycache__ -o -type f -name '*.pyc' \) -delete
 
+build_stage="Claude worker wheel build"
 wheel_dir="$temporary/wheels"
 mkdir -p "$wheel_dir"
 uv build \
@@ -101,6 +125,7 @@ worker_wheel="$(find "$wheel_dir" -maxdepth 1 -type f -name 'agent_manager_claud
 test -n "$worker_wheel" || fail "the worker wheel was not produced"
 install -m 0644 "$worker_wheel" "$stage/python/wheels/$(basename "$worker_wheel")"
 
+build_stage="locked worker dependency installation"
 uv export \
   --quiet \
   --directory "$python_dir" \
@@ -120,9 +145,11 @@ uv pip install \
   --requirements "$stage/python/requirements.lock"
 rm -f -- "$runtime_site_packages/.lock"
 "$python_bin" -m zipfile -e "$worker_wheel" "$runtime_site_packages"
+build_stage="self-contained worker import check"
 "$stage/python/bin/python" -B -I -c \
   'import agent_manager_claude_worker, claude_agent_sdk'
 
+build_stage="release manifest and archive generation"
 install -m 0644 "$compatibility" "$stage/compatibility-v1.json"
 install -m 0644 "$repo_root/LICENSE" "$stage/LICENSE"
 "$python_bin" "$metadata" checksums --root "$stage"

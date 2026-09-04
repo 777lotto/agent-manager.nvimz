@@ -2,6 +2,17 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
+ux_stage="initialization"
+report_failure() {
+  status="$?"
+  trap - ERR
+  if test "${GITHUB_ACTIONS:-}" = true; then
+    printf '::error title=UX integration tests failed::%s (exit %s)\n' \
+      "$ux_stage" "$status"
+  fi
+  exit "$status"
+}
+trap report_failure ERR
 
 # The repository root is resolved dynamically.
 # shellcheck disable=SC1091
@@ -25,6 +36,7 @@ resolve_checkout() {
   return 1
 }
 
+ux_stage="pinned UX checkout discovery"
 foundation_root="$(resolve_checkout "${UX_FOUNDATION_ROOT:-}" \
   "$repo_root/UX-foundation.nvim" \
   "$(dirname "$repo_root")/UX-foundation.nvim" \
@@ -62,6 +74,7 @@ require_pin "$foundation_root" "$UX_FOUNDATION_PIN" "UX Foundation"
 require_pin "$styling_root" "$UX_STYLING_PIN" "UX Styling"
 require_pin "$chrome_root" "$UX_CHROME_PIN" "UX Chrome"
 
+ux_stage="Foundation manifest validation"
 nvim --headless --clean \
   -l "$foundation_root/scripts/validate-manifest.lua" \
   "$repo_root/lua/agent_manager/presentation.lua"
@@ -73,9 +86,12 @@ common_env=(
   "UX_CHROME_ROOT=$chrome_root"
 )
 
+ux_stage="Foundation integration"
 env "${common_env[@]}" nvim --headless -u NONE -i NONE \
   -l "$repo_root/tests/lua/m3_foundation.lua"
+ux_stage="Styling integration"
 env "${common_env[@]}" nvim --headless -u NONE -i NONE \
   -l "$repo_root/tests/lua/m3_styling.lua"
+ux_stage="Chrome integration"
 env "${common_env[@]}" nvim --headless -u NONE -i NONE \
   -l "$repo_root/tests/lua/m3_chrome.lua"

@@ -200,6 +200,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_turn_stream_steer_and_interrupt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            canonical_directory = await asyncio.to_thread(Path(directory).resolve)
             adapter = FakeAdapter()
             writer = RecordingWriter()
             worker = Worker(adapter, writer)
@@ -222,7 +223,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             assert initial_session is not None
             self.assertEqual(
                 adapter.opens,
-                [("agent-1", Path(directory), None, False, "sonnet", "low")],
+                [("agent-1", canonical_directory, None, False, "sonnet", "low")],
             )
 
             await send_and_wait(
@@ -281,12 +282,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(initial_session.closed, True)
             self.assertEqual(
                 adapter.opens[-1],
-                ("agent-1", Path(directory), "new-session", False, "opus", "high"),
+                ("agent-1", canonical_directory, "new-session", False, "opus", "high"),
             )
             await worker.close()
 
     async def test_discovery_history_specific_resume_and_fork(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            canonical_directory = await asyncio.to_thread(Path(directory).resolve)
             adapter = FakeAdapter()
             writer = RecordingWriter()
             worker = Worker(adapter, writer)
@@ -367,14 +369,29 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 adapter.opens,
                 [
-                    ("resumed-agent", Path(directory), "source-session", False, None, None),
-                    ("forked-agent", Path(directory), "source-session", True, None, None),
+                    (
+                        "resumed-agent",
+                        canonical_directory,
+                        "source-session",
+                        False,
+                        None,
+                        None,
+                    ),
+                    (
+                        "forked-agent",
+                        canonical_directory,
+                        "source-session",
+                        True,
+                        None,
+                        None,
+                    ),
                 ],
             )
             await worker.close()
 
     async def test_delete_session_requires_inactive_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            canonical_directory = str(await asyncio.to_thread(Path(directory).resolve))
             adapter = FakeAdapter()
             writer = RecordingWriter()
             worker = Worker(adapter, writer)
@@ -390,7 +407,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.assertIs(cast(JsonObject, deleted["result"])["deleted"], True)
-            self.assertEqual(adapter.deleted, [("saved-session", directory)])
+            self.assertEqual(adapter.deleted, [("saved-session", canonical_directory)])
 
             active = await send_and_wait(
                 worker,
@@ -402,7 +419,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.assertEqual(cast(JsonObject, active["error"])["code"], -32047)
-            self.assertEqual(adapter.deleted, [("saved-session", directory)])
+            self.assertEqual(adapter.deleted, [("saved-session", canonical_directory)])
 
             adapter.activity_available = False
             unknown_activity = await send_and_wait(
@@ -415,7 +432,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.assertEqual(cast(JsonObject, unknown_activity["error"])["code"], -32047)
-            self.assertEqual(adapter.deleted, [("saved-session", directory)])
+            self.assertEqual(adapter.deleted, [("saved-session", canonical_directory)])
             await worker.close()
 
     async def test_callback_rendezvous_uses_reader_for_response(self) -> None:

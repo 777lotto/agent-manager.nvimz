@@ -308,14 +308,14 @@ mod tests {
 
     #[tokio::test]
     async fn owner_only_socket_survives_client_reconnect() {
-        let directory = std::env::temp_dir().join(format!(
-            "agent-manager-durable-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        // Keep the Unix-socket path below macOS's short `sun_path` limit even
+        // when the runner provides a long temporary-directory prefix.
+        let directory =
+            std::env::temp_dir().join(format!("amdt-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir(&directory).expect("create test directory");
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
             .expect("protect test directory");
-        let socket = directory.join("broker.sock");
+        let socket = directory.join("s");
         let registry = directory.join("registry.json");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let broker = tokio::spawn(serve_until(

@@ -27,7 +27,16 @@ done
 )
 
 unit_check="$(mktemp --suffix=.service)"
-trap 'rm -- "$unit_check"' EXIT
+user_runtime_check="$(mktemp -d)"
+chmod 0700 "$user_runtime_check"
+cleanup() {
+  rm -- "$unit_check"
+  find "$user_runtime_check" -depth -delete
+}
+trap cleanup EXIT
 sed 's#^ExecStart=.*#ExecStart=/bin/true#' \
   "$m4_dir/agent-manager-broker.service" >"$unit_check"
-systemd-analyze --user verify "$unit_check"
+(
+  unset DBUS_SESSION_BUS_ADDRESS
+  XDG_RUNTIME_DIR="$user_runtime_check" systemd-analyze --user verify "$unit_check"
+)

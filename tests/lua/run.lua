@@ -237,6 +237,8 @@ local function workspace_view_navigation_test()
   local Model = require("agent_manager.model")
   local View = require("agent_manager.view")
   local home = vim.fn.tempname() .. "-agent-manager-home"
+  assert_equal(vim.fn.mkdir(home, "p"), 1, "test home creation")
+  home = assert(vim.uv.fs_realpath(home), "canonical test home")
   local repository = home .. "/projects/agent-manager"
   assert_equal(vim.fn.mkdir(repository, "p"), 1, "test home repository creation")
   assert_equal(vim.fn.mkdir(home .. "/notes", "p"), 1, "unrelated home directory creation")
@@ -639,10 +641,12 @@ end
 local function durable_reconnect_test()
   local manager = require("agent_manager")
   local broker_path = root .. "/target/debug/agent-manager-broker"
-  local directory = vim.fn.tempname() .. "-agent-manager-m4"
+  -- Keep the Unix-socket path short enough for macOS's `sun_path` limit.
+  local directory = vim.fn.tempname()
   assert_equal(vim.fn.mkdir(directory, "p"), 1, "durable test directory creation")
   assert(vim.uv.fs_chmod(directory, 448), "durable test directory permissions")
-  local socket = directory .. "/broker.sock"
+  directory = assert(vim.uv.fs_realpath(directory), "canonical durable test directory")
+  local socket = directory .. "/s"
   local registry = directory .. "/registry.json"
 
   local function start_broker()
@@ -733,7 +737,11 @@ local function integration_test()
     assert_equal(vim.fn.exists(":" .. command), 2, command .. " command")
   end
 
-  local test_file = vim.fn.tempname() .. "-agent-manager-m2.txt"
+  local workspace = assert(vim.uv.fs_realpath("/tmp"), "canonical integration workspace")
+  local test_file = vim.fs.joinpath(
+    workspace,
+    vim.fs.basename(vim.fn.tempname()) .. "-agent-manager-m2.txt"
+  )
   vim.fn.writefile({ "disk original" }, test_file)
   vim.env.AGENT_MANAGER_TEST_FILE = test_file
   vim.cmd("edit " .. vim.fn.fnameescape(test_file))
@@ -817,7 +825,7 @@ local function integration_test()
   end)
   assert(external_diff.diff:find("+new", 1, true), "external workspace diff result")
 
-  assert(manager.start({ provider = "codex", cwd = "/tmp", workspace_strategy = "shared" }))
+  assert(manager.start({ provider = "codex", cwd = workspace, workspace_strategy = "shared" }))
   await("agent startup", function()
     local agents = manager.list()
     return agents[1] and agents[1].state == "idle"
@@ -863,7 +871,10 @@ local function integration_test()
   )
   assert_equal(manager.pending_approval_count(), 1, "pending approval count")
   assert(buffer_contains(approval_status.view.buffers.decision, "Provider:  codex"), "approval provider")
-  assert(buffer_contains(approval_status.view.buffers.decision, "Workspace: /tmp"), "approval cwd")
+  assert(
+    buffer_contains(approval_status.view.buffers.decision, "Workspace: " .. workspace),
+    "approval cwd"
+  )
   assert(buffer_contains(approval_status.view.buffers.decision, "fixture --write-file"), "approval action")
   assert(buffer_contains(approval_status.view.buffers.decision, test_file), "approval affected path")
 
