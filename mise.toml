@@ -33,7 +33,7 @@ run = [
 description = "Run Rust, Python, Lua, and cross-language contract tests"
 depends = ["setup"]
 run = [
-  "cargo test --workspace --all-features",
+  "scripts/test-rust.sh",
   "cd python && uv run python -m unittest discover -s tests -v",
   "cd python && uv run python ../scripts/validate_protocol.py",
   "scripts/test-lua.sh",
