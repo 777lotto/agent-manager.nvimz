@@ -237,6 +237,8 @@ local function workspace_view_navigation_test()
   local Model = require("agent_manager.model")
   local View = require("agent_manager.view")
   local home = vim.fn.tempname() .. "-agent-manager-home"
+  assert_equal(vim.fn.mkdir(home, "p"), 1, "test home creation")
+  home = assert(vim.uv.fs_realpath(home), "canonical test home")
   local repository = home .. "/projects/agent-manager"
   assert_equal(vim.fn.mkdir(repository, "p"), 1, "test home repository creation")
   assert_equal(vim.fn.mkdir(home .. "/notes", "p"), 1, "unrelated home directory creation")
@@ -639,10 +641,12 @@ end
 local function durable_reconnect_test()
   local manager = require("agent_manager")
   local broker_path = root .. "/target/debug/agent-manager-broker"
-  local directory = vim.fn.tempname() .. "-agent-manager-m4"
+  -- Keep the Unix-socket path short enough for macOS's `sun_path` limit.
+  local directory = vim.fn.tempname()
   assert_equal(vim.fn.mkdir(directory, "p"), 1, "durable test directory creation")
   assert(vim.uv.fs_chmod(directory, 448), "durable test directory permissions")
-  local socket = directory .. "/broker.sock"
+  directory = assert(vim.uv.fs_realpath(directory), "canonical durable test directory")
+  local socket = directory .. "/s"
   local registry = directory .. "/registry.json"
 
   local function start_broker()
