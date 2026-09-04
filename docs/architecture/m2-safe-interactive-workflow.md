@@ -38,6 +38,13 @@ the source is idle, completed, or interrupted and has no pending human request.
 Embedded mode retires the source runtime, preserves its summary as
 `disconnected`, and opens the provider fork as the one live runtime.
 
+`provider/session/delete` performs a confirmed hard delete through the
+provider's supported mutation (`thread/delete` for Codex and the pinned SDK
+session deletion API for Claude). Cross-process activity must be observable and
+inactive; broker-owned work and pending human requests are also rejected. An
+idle owned runtime is retired and any managed lease is handed off first. This
+operation never deletes the worktree, branch, or project files.
+
 The session picker can focus an existing broker-owned live agent or discover a
 resumable Codex or Claude session. Capability rows advertise history, resume,
 fork, approvals, questions, usage, file changes, diff, and the M1 controls.
@@ -74,7 +81,7 @@ response also remains pending unless provider state proves resolution.
 The model gives pending requests stable IDs. A new request focuses a dedicated
 decision buffer containing provider, session, workspace strategy, action, and
 affected paths. Ordinary streaming renders update other scratch buffers and do
-not replace that focused decision. `a` allows only a focused approval, `d`
+not replace that focused decision. `y` allows only a focused approval, `n`
 denies only a focused request, and `<CR>` answers only a focused question.
 
 ## Explicit editor context
@@ -96,7 +103,7 @@ Queued context is prepended to the next prompt or steer as a delimited JSON
 snapshot and then cleared. It is not silently reused on later turns. Direct
 input attachments pass through the same validation and size limits.
 
-`agent/diff` runs Git as an argv child without a shell or external
+`agent/diff` and `workspace/diff` run Git as an argv child without a shell or external
 diff/text-conversion commands, with a five-second timeout and a two-MiB output
 cap. Neovim renders repository and buffer/disk diffs as untrusted
 scratch-buffer text.
@@ -126,6 +133,12 @@ appear with each selected agent; the latest provider-native usage object is
 flattened deterministically in the activity pane. Rendering never evaluates
 provider text as Lua, Ex, mappings, options, or modelines.
 
+The Agents pane now starts at the full home path and lazily reads the filesystem;
+session and repository rows are overlays rather than the source of the directory
+shape. Buffer-local `s`, `t`, `d`, and `g` command families are advertised to
+which-key when it is available, without configuring the plugin or changing its
+normal `<leader>` menu.
+
 M3 now owns the implemented Foundation, Styling, native Panels fallback, and
 Chrome integration. M4 owns the Unix socket, persistent registry,
 reconnect/replay recovery, multiple live agents, and enforced
@@ -135,16 +148,18 @@ writable-worktree isolation.
 
 The default gate remains deterministic and offline:
 
-- Rust pipe tests exercise Codex and Claude session discovery, start, specific
-  resume, fork, history, explicit context, approval, question, usage, file
-  events, follow-up, steer, interrupt, replay, and shutdown.
+- Rust pipe tests exercise Codex and Claude session discovery and deletion,
+  start, specific resume, fork, history, explicit context, approval, question,
+  usage, file events, follow-up, steer, interrupt, replay, directory diff, and
+  shutdown.
 - Separate timeout and interrupt tests hold both provider callbacks unanswered
   and prove the provider receives denial while the public request resolves
   fail-closed.
-- Headless Neovim tests exercise the session facade, capability and usage
-  rendering, focused approval/question controls, unsupported-defer behavior,
-  explicit unsaved context, dirty-buffer preservation, conflict resolution,
-  history, diff, fork, and specific resume.
+- Headless Neovim tests exercise the full-home filesystem tree, buffer-local
+  which-key groups, session facade, capability and usage rendering, focused
+  approval/question controls, unsupported-defer behavior, explicit unsaved
+  context, dirty-buffer preservation, conflict resolution, history, diff,
+  deletion, fork, and specific resume.
 - Protocol fixtures cover session discovery and M2 response/context request
   shapes, while rejection cases exclude fabricated approval choices and
   invalid question decisions.

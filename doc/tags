@@ -3,6 +3,7 @@
 :AgentManagerAttach	agent-manager.txt	/*:AgentManagerAttach*
 :AgentManagerClose	agent-manager.txt	/*:AgentManagerClose*
 :AgentManagerContext	agent-manager.txt	/*:AgentManagerContext*
+:AgentManagerDelete	agent-manager.txt	/*:AgentManagerDelete*
 :AgentManagerDiff	agent-manager.txt	/*:AgentManagerDiff*
 :AgentManagerFork	agent-manager.txt	/*:AgentManagerFork*
 :AgentManagerHealth	agent-manager.txt	/*:AgentManagerHealth*

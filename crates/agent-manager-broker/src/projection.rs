@@ -1,6 +1,7 @@
 //! Provider metadata/history projection and explicit editor-context rendering.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -12,6 +13,7 @@ pub(crate) fn provider_sessions(
     active_session_ids: &HashSet<String>,
     activity_available: bool,
     active_only: bool,
+    fallback_cwd: Option<&Path>,
 ) -> Value {
     let records = match provider {
         Provider::Codex => result.get("data"),
@@ -22,7 +24,7 @@ pub(crate) fn provider_sessions(
     .unwrap_or_default();
     let sessions = records
         .iter()
-        .filter_map(|record| session_record(provider, record, active_session_ids))
+        .filter_map(|record| session_record(provider, record, active_session_ids, fallback_cwd))
         .filter(|record| !active_only || record["active"] == true)
         .collect::<Vec<_>>();
     let observed_active = sessions.iter().any(|record| record["active"] == true);
@@ -63,12 +65,16 @@ fn session_record(
     provider: Provider,
     record: &Value,
     active_session_ids: &HashSet<String>,
+    fallback_cwd: Option<&Path>,
 ) -> Option<Value> {
     let provider_session_id = first_string(
         record,
         &["id", "session_id", "sessionId", "provider_session_id"],
     )?;
-    let cwd = first_string(record, &["cwd", "directory", "project_path"]).unwrap_or("");
+    let cwd = first_string(record, &["cwd", "directory", "project_path"])
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_owned)
+        .or_else(|| fallback_cwd.map(|path| path.to_string_lossy().into_owned()))?;
     let explicit_title = first_string(record, &["name", "title", "summary"]);
     let short_id = provider_session_id
         .char_indices()
@@ -243,6 +249,7 @@ mod tests {
             &HashSet::new(),
             true,
             false,
+            None,
         );
         assert_eq!(
             projected["sessions"][0]["provider_session_id"],
@@ -267,12 +274,29 @@ mod tests {
             &HashSet::from([active_id]),
             true,
             true,
+            None,
         );
 
         assert_eq!(projected["sessions"].as_array().map(Vec::len), Some(1));
         assert_eq!(projected["sessions"][0]["cwd"], "/workspace/live");
         assert_eq!(projected["sessions"][0]["state"], "running");
         assert_eq!(projected["activity_available"], true);
+    }
+
+    #[test]
+    fn missing_provider_cwd_uses_the_requested_or_home_directory() {
+        let projected = provider_sessions(
+            Provider::Claude,
+            &json!({
+                "sessions": [{ "session_id": "session-without-directory" }]
+            }),
+            &HashSet::new(),
+            true,
+            false,
+            Some(std::path::Path::new("/home/ai")),
+        );
+
+        assert_eq!(projected["sessions"][0]["cwd"], "/home/ai");
     }
 
     #[test]

@@ -120,6 +120,7 @@ class Broker:
         self.prompt_number = 0
         self.queued_context: list[dict[str, Any]] = []
         self.test_file = os.environ.get("AGENT_MANAGER_TEST_FILE")
+        self.deleted_sessions: set[tuple[str, str]] = set()
 
     def publish_state(self) -> None:
         send(
@@ -312,6 +313,11 @@ class Broker:
             sessions = [active_sessions[provider]] if params.get("active_only") else [resumable]
             if "cwd" not in params and not params.get("active_only"):
                 sessions.insert(0, active_sessions[provider])
+            sessions = [
+                session
+                for session in sessions
+                if (provider, session["provider_session_id"]) not in self.deleted_sessions
+            ]
             respond(
                 request,
                 {
@@ -320,6 +326,33 @@ class Broker:
                     "activity_available": True,
                 },
             )
+        elif method == "provider/session/delete":
+            provider = params["provider"]
+            session_id = params["provider_session_id"]
+            if session_id.endswith("running"):
+                reject(request, "active sessions cannot be deleted")
+            else:
+                self.deleted_sessions.add((provider, session_id))
+                self.records = [
+                    record
+                    for record in self.records
+                    if not (
+                        record["provider"] == provider
+                        and record["session_id"] == session_id
+                    )
+                ]
+                self.current = self.records[-1] if self.records else {}
+                respond(
+                    request,
+                    {
+                        "deleted": True,
+                        "provider": provider,
+                        "provider_session_id": session_id,
+                        "workspace_handed_off": False,
+                        "worktree_preserved": True,
+                    },
+                )
+                self.publish_state()
         elif method == "agent/start":
             managed = params.get("managed_workspace")
             if managed:
@@ -462,6 +495,15 @@ class Broker:
                     "truncated": False,
                 },
             )
+        elif method == "workspace/diff":
+            respond(
+                request,
+                {
+                    "cwd": params["cwd"],
+                    "diff": "diff --git a/fixture b/fixture\n-old\n+new\n",
+                    "truncated": False,
+                },
+            )
         elif method == "agent/fork":
             source = self.current
             source["state"] = "disconnected"
@@ -513,6 +555,7 @@ def main() -> None:
                 "authority": "external_lifecycle",
                 "destructive_controls": False,
             },
+            "provider_sessions": {"delete": True, "worktree_preserved": True},
             "replay": {"capacity": 2000},
         },
     )

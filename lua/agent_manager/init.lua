@@ -75,6 +75,23 @@ local function project_root()
   return vim.fs.root(0, { ".git" }) or vim.uv.cwd()
 end
 
+local function session_directory(path)
+  if type(path) ~= "string" then
+    return nil
+  end
+  local home = vim.uv.os_homedir() or vim.env.HOME
+  if path == "" or path == "." or path == "~" then
+    return home
+  end
+  if path:sub(1, 2) == "~/" and home then
+    return (home == "/" and "" or home) .. path:sub(2)
+  end
+  if path:sub(1, 1) ~= "/" and home then
+    return (home == "/" and "" or home) .. "/" .. path
+  end
+  return path
+end
+
 local function ensure_setup()
   if runtime then
     return true
@@ -217,11 +234,19 @@ function M.setup(opts)
     resume = function(session)
       M.resume_session_ui(session)
     end,
-    fork = function()
-      M.fork()
+    fork = function(session)
+      if not session or not session.id then
+        vim.notify(
+          "Agent Manager: only a broker-owned session can be forked",
+          vim.log.levels.WARN
+        )
+        return
+      end
+      runtime.model:select(session.id)
+      M.fork(session.id)
     end,
-    archive = function()
-      M.confirm_archive()
+    archive = function(session)
+      M.confirm_archive(session)
     end,
     allow = function(action)
       M.respond_approval(action.agent_id, action.id, "allow")
@@ -239,8 +264,11 @@ function M.setup(opts)
     context = function()
       M.context_ui()
     end,
-    diff = function()
-      M.diff_ui()
+    diff = function(target)
+      M.diff_ui(target)
+    end,
+    delete_session = function(session)
+      M.confirm_delete_session(session)
     end,
     refresh = function()
       M.refresh()
@@ -1023,6 +1051,91 @@ function M.diff(agent_id, callback)
   end, callback)
 end
 
+function M.workspace_diff(cwd, callback)
+  if type(cwd) ~= "string" then
+    local err = structured_error("input", "workspace diff requires a directory path")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  cwd = vim.uv.fs_realpath(vim.fs.normalize(cwd))
+  if not cwd then
+    local err = structured_error("input", "workspace diff directory does not exist")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  return with_client(function()
+    local _, request_err = runtime.client:request(
+      "workspace/diff",
+      { cwd = cwd },
+      function(result, rpc_err)
+        if rpc_err then
+          report(rpc_err)
+        end
+        finish(callback, result, rpc_err)
+      end
+    )
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
+function M.delete_session(session, callback)
+  if type(session) ~= "table" then
+    local err = structured_error("input", "session deletion requires a focused session")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  local provider = session.provider
+  local provider_session_id = session.provider_session_id
+  if
+    (provider ~= "codex" and provider ~= "claude")
+    or type(provider_session_id) ~= "string"
+    or provider_session_id == ""
+  then
+    local err = structured_error("input", "session deletion requires a provider session identity")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  if type(session.cwd) ~= "string" then
+    local err = structured_error("input", "session deletion requires a directory path")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  local raw_cwd = session_directory(session.cwd)
+  local cwd = raw_cwd and vim.uv.fs_realpath(vim.fs.normalize(raw_cwd)) or nil
+  if not cwd then
+    local err = structured_error("input", "session directory does not exist")
+    finish(callback, nil, err)
+    return nil, err
+  end
+  return with_client(function()
+    local _, request_err = runtime.client:request(
+      "provider/session/delete",
+      {
+        provider = provider,
+        provider_session_id = provider_session_id,
+        cwd = cwd,
+      },
+      function(result, rpc_err)
+        if rpc_err then
+          report(rpc_err)
+          finish(callback, nil, rpc_err)
+          return
+        end
+        M.refresh(function(_, refresh_err)
+          finish(callback, result, refresh_err)
+        end)
+      end
+    )
+    if request_err then
+      report(request_err)
+      finish(callback, nil, request_err)
+    end
+  end, callback)
+end
+
 local function refresh_external_sessions(callback)
   if not runtime.config.ui.external_sessions then
     runtime.model:clear_external_sessions()
@@ -1213,7 +1326,7 @@ local function started_notice(provider, result)
   end
   vim.notify(
     string.format(
-      "Agent Manager: %s is ready in %s — press p to prompt",
+      "Agent Manager: %s is ready in %s — press tp to prompt",
       provider_name(provider),
       agent.cwd
     )
@@ -1364,12 +1477,13 @@ local function session_label(session)
   local status = active_session(session) and "ACTIVE"
     or session.activity_known == false and "CHECK"
     or "RESUME"
+  local cwd = session_directory(session.cwd) or "unknown cwd"
   return string.format(
     "%s · %s · %s · %s%s",
     provider_name(session.provider),
     status,
     session.title or session.provider_session_id,
-    session.cwd ~= "" and session.cwd or "unknown cwd",
+    cwd,
     updated
   )
 end
@@ -1378,7 +1492,7 @@ local function resume_notice(session, result)
   local agent = result and result.agent
   if agent then
     vim.notify(string.format(
-      "Agent Manager: continued %s in %s — press p to prompt",
+      "Agent Manager: continued %s in %s — press tp to prompt",
       provider_name(session.provider),
       agent.cwd
     ))
@@ -1451,6 +1565,8 @@ function M.resume_session_ui(session)
   if not ensure_setup() or type(session) ~= "table" then
     return
   end
+  session = vim.deepcopy(session)
+  session.cwd = session_directory(session.cwd) or session.cwd
   if active_session(session) then
     if session.external or session.external_active == true then
       vim.notify(
@@ -1565,7 +1681,7 @@ function M.prompt_ui(initial)
   if not agent then
     local err = structured_error(
       "input",
-      "no agent is selected — press 1, place the cursor on a [repo] or [cwd] directory, then press n"
+      "no agent is selected — press 1, focus a directory, then press sn"
     )
     report(err)
     return nil, err
@@ -1615,7 +1731,17 @@ function M.confirm_interrupt()
   end)
 end
 
-function M.confirm_archive()
+function M.confirm_archive(session)
+  if type(session) == "table" then
+    if not session.id then
+      vim.notify(
+        "Agent Manager: only a broker-owned session can be archived; use ds to delete saved provider history",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    runtime.model:select(session.id)
+  end
   local agent = selected_agent()
   if not agent then
     report(structured_error("input", "no agent is selected"))
@@ -1627,6 +1753,60 @@ function M.confirm_archive()
     if choice == "Archive" then
       M.archive(agent.id)
     end
+  end)
+end
+
+function M.confirm_delete_session(session)
+  if not ensure_setup() then
+    return
+  end
+  if type(session) ~= "table" and runtime.view then
+    session = runtime.view:_focused_session()
+  end
+  session = type(session) == "table" and session or selected_agent()
+  if type(session) ~= "table" then
+    vim.notify("Agent Manager: focus a session before pressing ds", vim.log.levels.WARN)
+    return
+  end
+  if type(session.provider_session_id) ~= "string" or session.provider_session_id == "" then
+    vim.notify("Agent Manager: this entry has no saved provider history to delete", vim.log.levels.WARN)
+    return
+  end
+  if session.external_active == true or (session.external and session.active == true) then
+    vim.notify(
+      "Agent Manager: this session is active in another terminal and cannot be deleted",
+      vim.log.levels.WARN
+    )
+    return
+  end
+  if
+    session.state == "starting"
+    or session.state == "running"
+    or session.state == "waiting_input"
+    or session.state == "waiting_approval"
+  then
+    vim.notify("Agent Manager: active work must finish or be interrupted before deletion", vim.log.levels.WARN)
+    return
+  end
+  local label = session.title or session.provider_session_id or "session"
+  vim.ui.select({ "Cancel", "Delete session permanently" }, {
+    prompt = string.format(
+      "Delete %s provider history for %s? The worktree and project files will be kept.",
+      provider_name(session.provider),
+      label
+    ),
+  }, function(choice)
+    if choice ~= "Delete session permanently" then
+      return
+    end
+    M.delete_session(session, function(result, err)
+      if err then
+        return
+      end
+      local suffix = result and result.workspace_handed_off and " and released its workspace lease"
+        or ""
+      vim.notify("Agent Manager: deleted provider session" .. suffix .. "; files were preserved")
+    end)
   end)
 end
 
@@ -1807,13 +1987,30 @@ local function conflict_ui(conflict)
   end)
 end
 
-function M.diff_ui()
+function M.diff_ui(target)
   if not ensure_setup() then
     return
   end
+  if type(target) == "table" and target.id then
+    runtime.model:select(target.id)
+  end
   local agent = selected_agent()
-  if not agent then
-    report(structured_error("input", "no agent is selected"))
+  local target_is_agent = type(target) ~= "table" or (target.id and agent and agent.id == target.id)
+  if type(target) == "table" and not target.id then
+    local cwd = target.cwd
+    M.workspace_diff(cwd, function(result, err)
+      if not err then
+        local title = "WORKSPACE DIFF · " .. (result.cwd or cwd)
+        if result.truncated then
+          title = title .. " · TRUNCATED"
+        end
+        runtime.view:show_diff(result.diff or "", title)
+      end
+    end)
+    return
+  end
+  if not agent or not target_is_agent then
+    report(structured_error("input", "focus a session or directory before opening its diff"))
     return
   end
   local conflicts = runtime.model:file_conflict_list(agent.id)

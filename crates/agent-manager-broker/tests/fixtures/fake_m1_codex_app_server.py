@@ -178,22 +178,46 @@ def main() -> None:
 
     opening = read()
     if opening.get("method") == "thread/list":
+        requested_cwd = opening.get("params", {}).get("cwd", "/tmp")
+        sessions = [
+            {
+                "id": "thread-resumable",
+                "cwd": requested_cwd,
+                "name": "Resumable Codex session",
+                "preview": "must not leave the broker",
+                "updatedAt": 1,
+                "status": {"type": "active"},
+            }
+        ]
+        if requested_cwd.endswith("/managed-task"):
+            sessions.append(
+                {
+                    "id": "thread-m1",
+                    "cwd": requested_cwd,
+                    "name": "Managed Codex session",
+                    "updatedAt": 2,
+                    "status": {"type": "idle"},
+                }
+            )
         respond(
             opening,
             {
-                "data": [
-                    {
-                        "id": "thread-resumable",
-                        "cwd": opening.get("params", {}).get("cwd", "/tmp"),
-                        "name": "Resumable Codex session",
-                        "preview": "must not leave the broker",
-                        "updatedAt": 1,
-                        "status": {"type": "active"},
-                    }
-                ],
+                "data": sessions,
                 "nextCursor": None,
             },
         )
+        try:
+            deletion = read()
+        except EOFError:
+            return
+        if deletion.get("method") != "thread/delete":
+            raise AssertionError(f"unexpected discovery follow-up {deletion.get('method')}")
+        if deletion.get("params", {}).get("threadId") not in {
+            "thread-resumable",
+            "thread-m1",
+        }:
+            raise AssertionError("broker deleted the wrong Codex thread")
+        respond(deletion, {})
         return
     method = opening.get("method")
     if method == "thread/start":

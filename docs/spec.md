@@ -302,6 +302,8 @@ The initialization response includes:
 | `agent/list`             | List known agents and live status.                          |
 | `workspace/list`         | List registered repositories and managed task mappings.     |
 | `workspace/handoff`      | Release a managed task lease without deleting its checkout. |
+| `workspace/diff`         | Return the Git diff for a focused directory or saved session. |
+| `provider/session/delete` | Permanently delete inactive provider history, preserving files. |
 | `agent/start`            | Start in a managed task or explicit working directory.      |
 | `agent/attach`           | Subscribe to an agent owned by the broker.                  |
 | `agent/history`          | Fetch provider-backed projected history.                    |
@@ -318,14 +320,19 @@ The initialization response includes:
 | `agent/replay`           | Replay events after the supplied sequence number.           |
 | `broker/shutdown`        | Embedded-only and subject to shutdown policy.               |
 
-Deleting provider transcripts or terminating the durable broker is not an
-ordinary workspace action in the first release.
+`provider/session/delete` is deliberately narrower than workspace cleanup. It
+requires an exact provider session ID and canonical cwd, refuses sessions with
+an active writer or pending human request, and retires an idle broker-owned
+runtime before deletion. A managed lease is handed off, but the worktree,
+branch, and project files are never removed. Terminating the durable broker is
+not an ordinary workspace action.
 
 Managed worktree creation and resume are broker-mediated calls to the installed
 lifecycle authority, keyed only by registered repository and normalized stable
 task ID. The administrator may configure the lifecycle executable and whether
-shared-checkout starts are allowed. Reset, delete, forced cleanup, branch-name
-overrides, and arbitrary worktree paths are not administrative plugin controls.
+shared-checkout starts are allowed. Reset, checkout deletion, forced cleanup,
+branch-name overrides, and arbitrary worktree paths are not administrative
+plugin controls.
 
 `provider/session/list` accepts an optional canonical `cwd`, pagination, and
 an `active_only` flag. Omitting `cwd` queries all provider-visible projects.
@@ -333,6 +340,8 @@ Each projected record contains only provider identity, opaque session ID,
 working directory, optional provider-supplied title, update timestamp, and normalized
 active/state fields. The response also reports whether cross-process activity
 observation was available. Prompt previews and transcript content are excluded.
+`provider/session/delete` uses the same activity authority and fails closed if
+writer ownership cannot be verified.
 
 ### Agent summary
 
@@ -598,9 +607,12 @@ maintaining a competing set.
 ### Views
 
 - **Agents:** provider, title, cwd/worktree, precise status, unread marker, and
-  pending-approval count. Registered repositories, broker-owned agents, and
-  all active and saved external CLI sessions are grouped in a directory tree. The opening project
-  and a focused directory supply repository context to the start flow. Provider
+  pending-approval count. A lazy filesystem tree begins at the user's full home
+  path and shows files and directories independently of session state.
+  Registered repositories, broker-owned agents, and all active and saved
+  external CLI sessions are overlaid below their actual directories. The
+  opening project and a focused directory supply repository context to the
+  start flow. Provider
   badges use distinct labels and shapes in addition to semantic blue/orange
   styling; green `ACTIVE`, dark `RESUME`, and fail-closed `CHECK` badges expose
   session ownership without relying on color alone. Records are de-duplicated
@@ -635,6 +647,7 @@ Final command names follow the selected package name. The working surface is:
 | `:AgentManagerFork`             | Fork the selected resumable provider session.           |
 | `:AgentManagerContext`          | Queue explicit editor context for the next input.       |
 | `:AgentManagerDiff`             | Show a diff or resolve a dirty-buffer conflict.         |
+| `:AgentManagerDelete`           | Confirm deletion of inactive provider session history.  |
 | `:AgentManagerHealth`           | Show component and integration health.                  |
 
 Commands accept structured Lua options through the public API; command-line
@@ -650,21 +663,26 @@ Mappings are buffer-local and configurable. Initial defaults are:
 | `1` / `2` / `3`     | Focus Agents, Conversation, or Activity directly.         |
 | `<Tab>` / `<S-Tab>` | Cycle visible panes.                                      |
 | `<CR>`              | Open, expand, or act on the stable item under the cursor. |
-| `n`                 | Always start a new session in the focused repository.     |
-| `p`                 | Compose a prompt for the selected agent.                  |
-| `s`                 | Steer an active turn when supported.                      |
-| `x`                 | Confirm and interrupt active work.                        |
-| `a` / `d`           | Allow or deny only while an approval is focused.          |
-| `f`                 | Fork the selected completed/resumable session.            |
-| `c`                 | Queue an explicit editor-context snapshot.                |
-| `D`                 | Open the current diff.                                    |
-| `r`                 | Refresh/resynchronize projection state.                   |
+| `sn` / `so`         | Start a session / open or continue a focused session.     |
+| `sf` / `sa`         | Fork / archive a focused session.                         |
+| `tp` / `ts`         | Prompt / steer the selected agent.                        |
+| `ti` / `tc`         | Confirm interrupt / queue explicit editor context.        |
+| `df` / `ds`         | Show the focused diff / delete focused provider history.  |
+| `ga` / `gc` / `gt`  | Focus Agents / Conversation / Activity.                   |
+| `gr`                 | Refresh the filesystem and provider sessions.             |
+| `y` / `n`           | Yes/allow or no/deny only for a focused human request.    |
+| `h` / `l`           | Collapse / expand a directory row.                        |
 | `?` / `g?`          | Open visible help.                                        |
 | `q`                 | Close the workspace view, not the durable agent.          |
 
 Potentially destructive actions require a second confirmation or a dedicated
 approval view. Closing the workspace never means "approve," "interrupt," or
 "delete."
+
+When which-key.nvim is available, `d`, `g`, `s`, and `t` are registered as
+buffer-local prefix groups without `<leader>`. Agent Manager does not configure
+which-key or mutate global/leader mappings; the sequences remain usable without
+which-key.
 
 ## Editor context and filesystem behavior
 
@@ -983,6 +1001,7 @@ agents.workspaces()
 agents.handoff_workspace("repo", "task")
 agents.attach(agent_id)
 agents.sessions({ provider = "codex", cwd = "..." })
+agents.delete_session(session)
 agents.prompt(agent_id, input)
 agents.steer(agent_id, input)
 agents.interrupt(agent_id)
@@ -993,6 +1012,7 @@ agents.respond_approval(agent_id, approval_id, decision, opts)
 agents.respond_question(agent_id, question_id, decision, answers, opts)
 agents.add_context(agent_id, context)
 agents.diff(agent_id)
+agents.workspace_diff(cwd)
 agents.list()
 agents.status()
 agents.running_count()

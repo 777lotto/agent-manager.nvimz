@@ -52,6 +52,10 @@ vim.api.nvim_create_user_command("AgentManagerArchive", function()
   manager().confirm_archive()
 end, { desc = "Confirm and archive the selected inactive agent" })
 
+vim.api.nvim_create_user_command("AgentManagerDelete", function()
+  manager().confirm_delete_session()
+end, { desc = "Confirm and permanently delete the selected provider session" })
+
 vim.api.nvim_create_user_command("AgentManagerContext", function()
   manager().context_ui()
 end, { desc = "Queue explicit editor context for the selected agent" })

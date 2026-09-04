@@ -119,6 +119,7 @@ Then open Neovim and use:
 :AgentManagerDiff
 :AgentManagerFork
 :AgentManagerArchive
+:AgentManagerDelete
 :AgentManagerHealth
 ```
 
@@ -127,11 +128,11 @@ To start a session from the workspace:
 1. Press `1` to focus Agents and place the cursor on the desired directory.
    The project where Agent Manager was opened is marked `[cwd]`; registered or
    already managed repositories are marked `[repo]`.
-2. Press `n` and choose Codex or Claude. `n` always means “start a new
+2. Press `sn` and choose Codex or Claude. `sn` always means “start a new
    session”; continuing old work is not mixed into this flow.
 3. Enter a stable lowercase session name. Agent Manager creates the safe
    worktree for that repository and reports when the agent is ready.
-4. Press `2`, then `p`, to compose the first prompt.
+4. Press `2`, then `tp`, to compose the first prompt.
 
 Starting from another pane still works; Agent Manager asks which registered
 repository to use. `:AgentManagerStart [codex|claude]` uses the current project
@@ -140,23 +141,32 @@ without a selected agent now explains how to start one instead of accepting
 input that cannot be sent.
 
 The workspace maps `1`, `2`, and `3` directly to Agents, Conversation, and
-Activity. `<Tab>` and `<S-Tab>` still cycle panes. It also maps `n` to start,
-`h` to open or continue the focused session, `p` to prompt, `s` to steer, `x` to confirm an
-interrupt, `a`/`d` to decide only a focused human request, `<CR>` to answer a
-focused question, `c` to queue explicit context, `f` to fork, `A` to archive an
-inactive agent, `D` to inspect diffs/conflicts, and `q` to close only the view.
-Wide displays show agents, conversation, and activity together; medium and
-narrow displays switch the same buffers without losing model state.
+Activity. `<Tab>` and `<S-Tab>` still cycle panes. Commands are grouped under
+buffer-local prefixes: `s` for sessions (`sn`, `so`, `sf`, `sa`), `t` for the
+current turn (`tp`, `ts`, `ti`, `tc`), `d` for diff/delete (`df`, `ds`), and
+`g` for navigation/refresh (`ga`, `gc`, `gt`, `gr`, `g?`). `y` means yes/allow
+and `n` means no/deny only for the focused human request. `<CR>` toggles a
+directory, opens a file or session, or answers a question; `h` and `l` collapse
+and expand tree rows. `q` closes only the view.
 
-The Agents pane groups registered repositories and every discovered
-Codex/Claude session—live or saved—in a directory tree. Codex rows use
+When `which-key.nvim` is available, those four prefixes appear as buffer-local
+which-key groups without requiring `<leader>`. Agent Manager does not call
+which-key setup or replace global mappings, so the normal `<leader>` menu keeps
+the user's existing options. The key sequences still work when which-key is
+absent. Wide displays show agents, conversation, and activity together; medium
+and narrow displays switch the same buffers without losing model state.
+
+The Agents pane is a lazy filesystem tree rooted at the full home path (for
+example, `/home/ai/`). It includes ordinary files and directories whether or
+not a session exists there; registered repositories and every discovered
+Codex/Claude session—live or saved—are overlaid beneath their directory. Codex rows use
 a blue `● CODEX` badge; Claude rows use an orange `◆ CLAUDE` badge, so provider
 identity remains clear even when a theme does not preserve the intended color.
 Green `● ACTIVE` labels identify live writers. Dark `○ RESUME` labels identify
-saved sessions with no live writer; focus one and press `<CR>` or `h` to
+saved sessions with no live writer; focus one and press `<CR>` or `so` to
 continue it. A `? CHECK` label means activity could not be verified, so Agent
 Manager will not risk opening a second writer. Sessions are discovered across
-the AI container when the workspace opens and whenever `r` refreshes the view. Set
+the AI container when the workspace opens and whenever `gr` refreshes the view. Set
 `ui.external_sessions = false` to disable discovery, or lower
 `ui.external_session_limit` from its default of 1000 to cap each provider
 query.
@@ -182,6 +192,12 @@ continue under the lifecycle manager. Reconnect replays the retained event
 suffix or reloads summaries and provider history when the cursor is too old.
 Prompt input is never replayed. A fork retires its source runtime before opening
 the provider fork so writer ownership remains unambiguous.
+
+`ds` and `:AgentManagerDelete` permanently delete the focused provider's saved
+session history after a second confirmation. The broker refuses deletion while
+the session is active or a human request is pending. For a manager-owned idle
+session it first retires the provider runtime and hands off any managed lease;
+the Git worktree, branch, and project files are always preserved.
 
 Opening the workspace and running the default test suite are non-spending. The
 diagnostic `codex-probe` performs only initialization and thread discovery;
@@ -249,7 +265,7 @@ The promoted schema-v1 integrations are:
 
 ### Managed worktrees and administrator policy
 
-The normal `n` flow only starts a new session. Repository choices and existing
+The normal `sn` flow only starts a new session. Repository choices and existing
 workspace mappings come from the installed `zemrip-agent-workspace audit
 --json` interface. A new session asks for one stable lowercase kebab-case name;
 the broker atomically claims the resulting `agent/<name>` branch, lease, and
@@ -260,8 +276,9 @@ provider into that worktree. No raw worktree path is requested.
 
 The lifecycle command remains the authority for Git fetches, branches, leases,
 handoff, and cleanup. Agent Manager exposes inventory, claim/resume, and
-non-destructive lease handoff only. It deliberately has no reset, delete,
-force-clean, or garbage-collection API. Set `worktrees.lifecycle = false` to
+non-destructive lease handoff only. It deliberately has no worktree reset,
+checkout deletion, force-clean, or garbage-collection API. Provider-history
+deletion is a separate operation and never removes Git state. Set `worktrees.lifecycle = false` to
 disable managed starts. Set `worktrees.allow_shared = true` only when the
 administrator intends to permit writable agents in coordination checkouts; the
 embedded broker enforces the setting, and durable deployments enforce it with

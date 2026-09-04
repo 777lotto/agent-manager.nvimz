@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "session/delete",
+  "params": {
+    "session_id": "7cb4cc07-6b1e-49c4-90c7-92583343fd91",
+    "directory": "/workspace/agent-manager"
+  }
+}

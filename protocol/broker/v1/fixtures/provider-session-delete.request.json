@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "provider/session/delete",
+  "params": {
+    "provider": "codex",
+    "provider_session_id": "01a06af9-1c61-7d42-8a4a-ef3f64888e4a",
+    "cwd": "/workspace/agent-manager"
+  }
+}

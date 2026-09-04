@@ -75,6 +75,8 @@ class FakeAdapter:
         self.callback: HumanCallback | None = None
         self.session: FakeSession | None = None
         self.opens: list[tuple[str, Path, str | None, bool]] = []
+        self.deleted: list[tuple[str, str]] = []
+        self.activity_available = True
 
     async def diagnostics(self) -> JsonObject:
         return {
@@ -100,12 +102,15 @@ class FakeAdapter:
                 "cwd": directory or "/workspace/external",
                 "active": True,
             }
-        ], True
+        ], self.activity_available
 
     async def history(
         self, session_id: str, directory: str | None, limit: int | None, offset: int
     ) -> list[JsonValue]:
         return [{"session_id": session_id, "type": "assistant", "directory": directory}]
+
+    async def delete_session(self, session_id: str, directory: str) -> None:
+        self.deleted.append((session_id, directory))
 
     async def open_session(
         self,
@@ -321,6 +326,51 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                     ("forked-agent", Path(directory), "source-session", True),
                 ],
             )
+            await worker.close()
+
+    async def test_delete_session_requires_inactive_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = FakeAdapter()
+            writer = RecordingWriter()
+            worker = Worker(adapter, writer)
+            await initialize(worker, writer)
+
+            deleted = await send_and_wait(
+                worker,
+                writer,
+                request(
+                    2,
+                    "session/delete",
+                    {"session_id": "saved-session", "directory": directory},
+                ),
+            )
+            self.assertIs(cast(JsonObject, deleted["result"])["deleted"], True)
+            self.assertEqual(adapter.deleted, [("saved-session", directory)])
+
+            active = await send_and_wait(
+                worker,
+                writer,
+                request(
+                    3,
+                    "session/delete",
+                    {"session_id": "active-session", "directory": directory},
+                ),
+            )
+            self.assertEqual(cast(JsonObject, active["error"])["code"], -32047)
+            self.assertEqual(adapter.deleted, [("saved-session", directory)])
+
+            adapter.activity_available = False
+            unknown_activity = await send_and_wait(
+                worker,
+                writer,
+                request(
+                    4,
+                    "session/delete",
+                    {"session_id": "another-saved-session", "directory": directory},
+                ),
+            )
+            self.assertEqual(cast(JsonObject, unknown_activity["error"])["code"], -32047)
+            self.assertEqual(adapter.deleted, [("saved-session", directory)])
             await worker.close()
 
     async def test_callback_rendezvous_uses_reader_for_response(self) -> None:

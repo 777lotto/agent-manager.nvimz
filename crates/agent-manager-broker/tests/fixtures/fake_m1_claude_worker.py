@@ -100,6 +100,14 @@ def main() -> None:
         if shutdown.get("method") == "worker/shutdown":
             respond(shutdown, {"shutdown": True})
         return
+    if opening.get("method") == "session/delete":
+        if opening.get("params", {}).get("session_id") != "session-resumable":
+            raise AssertionError("broker deleted the wrong Claude session")
+        respond(opening, {"deleted": True, "provider_session_id": "session-resumable"})
+        shutdown = read()
+        if shutdown.get("method") == "worker/shutdown":
+            respond(shutdown, {"shutdown": True})
+        return
     if opening.get("method") not in {"session/start", "session/resume", "session/fork"}:
         raise AssertionError("expected session open")
     agent_id = opening["params"]["agent_id"]

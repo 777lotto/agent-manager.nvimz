@@ -37,6 +37,11 @@ generated bundle is a review baseline, not a required installed CLI version.
 - The additive `provider/session/list` `active_only` flag and optional `cwd`
   support metadata-only cross-project CLI discovery; omitting the flag retains
   resumable-session behavior.
+- Additive `provider/session/delete` and private `session/delete` requests
+  hard-delete only an exact inactive provider history record. They fail closed
+  when writer activity cannot be verified and do not delete workspace files.
+- Additive `workspace/diff` applies the existing bounded, no-external-driver Git
+  diff behavior to a focused directory that has no broker agent.
 - Additive managed-workspace fields preserve the explicit path-based v1 calls.
   `workspace/list`, managed `agent/start`, managed `agent/resume`, and
   `workspace/handoff` delegate to the external lifecycle authority and expose

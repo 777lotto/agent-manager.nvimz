@@ -62,6 +62,15 @@
         "offset": { "type": "integer", "minimum": 0, "default": 0 }
       }
     },
+    "sessionDeleteParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "directory"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "directory": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
     "startParams": {
       "type": "object",
       "additionalProperties": false,
@@ -110,6 +119,7 @@
             "worker/initialize",
             "session/list",
             "session/history",
+            "session/delete",
             "session/start",
             "session/resume",
             "session/fork",
@@ -126,6 +136,7 @@
         { "if": { "properties": { "method": { "const": "worker/initialize" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/initializeParams" } } } },
         { "if": { "properties": { "method": { "const": "session/list" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/pageParams" } } } },
         { "if": { "properties": { "method": { "const": "session/history" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/historyParams" } } } },
+        { "if": { "properties": { "method": { "const": "session/delete" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/sessionDeleteParams" } } } },
         { "if": { "properties": { "method": { "const": "session/start" } } }, "then": { "properties": { "params": { "$ref": "#/$defs/startParams" } } } },
         { "if": { "properties": { "method": { "enum": ["session/resume", "session/fork"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/resumeParams" } } } },
         { "if": { "properties": { "method": { "enum": ["turn/prompt", "turn/steer"] } } }, "then": { "properties": { "params": { "$ref": "#/$defs/turnParams" } } } },

@@ -163,7 +163,7 @@ class Worker:
             fault = ProtocolFault(-32603, "internal worker error")
             await self._writer.send(error_response(request_id, fault))
 
-    async def _handle(self, method: str, params: JsonObject) -> JsonValue:  # noqa: PLR0911
+    async def _handle(self, method: str, params: JsonObject) -> JsonValue:  # noqa: PLR0911, PLR0912
         match method:
             case "worker/initialize":
                 return await self._initialize(params)
@@ -171,6 +171,8 @@ class Worker:
                 return await self._list_sessions(params)
             case "session/history":
                 return await self._history(params)
+            case "session/delete":
+                return await self._delete_session(params)
             case "session/start":
                 return await self._open_session(params, resume=False, fork=False)
             case "session/resume":
@@ -214,7 +216,7 @@ class Worker:
             "nonce": nonce,
             "diagnostics": diagnostics,
             "capabilities": {
-                "sessions": ["list", "history", "start", "resume", "fork", "close"],
+                "sessions": ["list", "history", "start", "resume", "fork", "close", "delete"],
                 "turns": ["prompt", "steer", "interrupt"],
                 "callbacks": ["approval", "question"],
                 "messages": [
@@ -267,6 +269,24 @@ class Worker:
         offset = _offset(params.get("offset"))
         messages = await self._adapter.history(session_id, directory, limit, offset)
         return {"messages": messages}
+
+    async def _delete_session(self, params: JsonObject) -> JsonObject:
+        session_id = require_string(params.get("session_id"), "session_id")
+        directory = _canonical_directory(require_string(params.get("directory"), "directory"))
+        async with self._lifecycle_lock:
+            if any(
+                session.provider_session_id == session_id for session in self._sessions.values()
+            ):
+                raise ProtocolFault(-32047, "An active Claude session cannot be deleted")
+            active, activity_available = await self._adapter.list_active_sessions(str(directory))
+            if not activity_available:
+                raise ProtocolFault(-32047, "Claude session activity could not be verified")
+            if any(
+                isinstance(record, dict) and _session_id(record) == session_id for record in active
+            ):
+                raise ProtocolFault(-32047, "An active Claude session cannot be deleted")
+            await self._adapter.delete_session(session_id, str(directory))
+        return {"deleted": True, "provider_session_id": session_id}
 
     async def _open_session(self, params: JsonObject, *, resume: bool, fork: bool) -> JsonObject:
         agent_id = require_string(params.get("agent_id"), "agent_id")

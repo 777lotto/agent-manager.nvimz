@@ -41,6 +41,8 @@ class Adapter(Protocol):
         self, session_id: str, directory: str | None, limit: int | None, offset: int
     ) -> list[JsonValue]: ...
 
+    async def delete_session(self, session_id: str, directory: str) -> None: ...
+
     async def open_session(
         self,
         *,

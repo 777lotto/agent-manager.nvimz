@@ -39,8 +39,15 @@ checked. The broker claims their existing lifecycle workspace, or creates a
 named worktree when the history came from a registered canonical checkout,
 before resuming the exact provider session ID.
 
-The Agents pane renders both collections in a working-directory hierarchy and
-uses explicit `ACTIVE`, `RESUME`, and fail-closed `CHECK` labels. Opening the pane and pressing `r` perform
-metadata-only refreshes and do not start a paid model turn. Provider prompt
-previews, transcript messages, arbitrary CLI JSON fields, and tool payloads are
-discarded before they reach the public broker protocol.
+Saved records may also be permanently deleted with `provider/session/delete`.
+The same activity observations are re-checked at mutation time and failure is
+closed when ownership is unknown. Codex delegates to App Server
+`thread/delete`; Claude delegates to the pinned Agent SDK deletion API. Neither
+path removes the worktree, branch, or project files.
+
+The Agents pane overlays both collections on a filesystem hierarchy rooted at
+the user's full home path and uses explicit `ACTIVE`, `RESUME`, and fail-closed
+`CHECK` labels. Opening the pane and pressing `gr` perform metadata-only
+refreshes and do not start a paid model turn. Provider prompt previews,
+transcript messages, arbitrary CLI JSON fields, and tool payloads are discarded
+before they reach the public broker protocol.
