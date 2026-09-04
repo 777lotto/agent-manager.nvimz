@@ -737,8 +737,9 @@ local function integration_test()
     assert_equal(vim.fn.exists(":" .. command), 2, command .. " command")
   end
 
+  local workspace = assert(vim.uv.fs_realpath("/tmp"), "canonical integration workspace")
   local test_file = vim.fs.joinpath(
-    "/tmp",
+    workspace,
     vim.fs.basename(vim.fn.tempname()) .. "-agent-manager-m2.txt"
   )
   vim.fn.writefile({ "disk original" }, test_file)
@@ -824,7 +825,7 @@ local function integration_test()
   end)
   assert(external_diff.diff:find("+new", 1, true), "external workspace diff result")
 
-  assert(manager.start({ provider = "codex", cwd = "/tmp", workspace_strategy = "shared" }))
+  assert(manager.start({ provider = "codex", cwd = workspace, workspace_strategy = "shared" }))
   await("agent startup", function()
     local agents = manager.list()
     return agents[1] and agents[1].state == "idle"
@@ -870,7 +871,10 @@ local function integration_test()
   )
   assert_equal(manager.pending_approval_count(), 1, "pending approval count")
   assert(buffer_contains(approval_status.view.buffers.decision, "Provider:  codex"), "approval provider")
-  assert(buffer_contains(approval_status.view.buffers.decision, "Workspace: /tmp"), "approval cwd")
+  assert(
+    buffer_contains(approval_status.view.buffers.decision, "Workspace: " .. workspace),
+    "approval cwd"
+  )
   assert(buffer_contains(approval_status.view.buffers.decision, "fixture --write-file"), "approval action")
   assert(buffer_contains(approval_status.view.buffers.decision, test_file), "approval affected path")
 
