@@ -33,7 +33,7 @@ connection, or provider callback. It returns defensive values for:
 - deterministic wide, medium, and narrow fixture data;
 - the side-effect-free availability probe used in the implementation table;
   and
-- native Neovim fallback links.
+- native Neovim fallback highlights.
 
 Both `agent_manager.ux` and
 `lua/ux_styling_adapter/agent_manager.lua` build from this module. Foundation's
@@ -48,7 +48,9 @@ At setup, the runtime probes Foundation contract version 1. A compatible
 Foundation receives the manifest and implementation and becomes the sole
 writer of the managed semantic groups, including ColorScheme/profile replay.
 An absent, incompatible, or rejecting Foundation leaves Agent Manager in native
-mode, where prefixed groups link to standard Neovim groups. Native baselines are
+mode, where prefixed groups normally link to standard Neovim groups. Transcript
+user text and model labels use explicit purple and blue defaults, respectively,
+without bold, while respecting existing user overrides. Native baselines are
 captured and restored on teardown.
 
 Foundation colors use its semantic palette tokens with concrete RGB fallbacks.
@@ -114,3 +116,18 @@ future renderer. M3 does not invent or vendor a competing Panels contract.
 
 M4 still owns durable sockets, reconnect/replay across Neovim restarts,
 multiple live agents, and writer isolation.
+
+### Transcript speaker presentation
+
+Assistant headings display the model name rather than a generic role name. New
+assistant messages capture the current model when projected so later model
+selection changes do not relabel earlier responses. Where a historical message
+lacks model metadata, the view falls back to the selected session's model; an
+unknown provider default is labeled as such rather than guessed. User messages,
+including steering, omit speaker headings and color every message line purple.
+The existing stable `message_assistant` presentation role now describes the blue
+model label; assistant body text remains neutral.
+
+Neovim's native text grid has no per-label font size. Labels are unbolded at the
+normal grid size. The text received from providers is preserved, including any
+Markdown delimiters; Markdown rendering is not part of this change.

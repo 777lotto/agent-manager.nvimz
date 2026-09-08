@@ -65,6 +65,10 @@ h.finish(function()
   h.equal(inspected.resolved, { kind = "rgb", value = "#8AADF4" }, "semantic token resolution")
   h.equal(h.raw_highlight("AgentManagerStatusRunning").fg, 0x8AADF4, "managed status group")
 
+  h.equal(h.raw_highlight("AgentManagerMessageUser").fg, 0xC6A0F6, "managed purple user text")
+  h.equal(h.raw_highlight("AgentManagerMessageAssistant").fg, 0x8AADF4, "managed blue model label")
+  h.equal(h.raw_highlight("AgentManagerMessageAssistant").bold == true, false, "model label is unbolded")
+
   local transaction = h.truthy(foundation.begin_transaction())
   h.truthy(transaction:stage(property_id, { kind = "rgb", value = "#123456" }))
   h.truthy(transaction:commit())

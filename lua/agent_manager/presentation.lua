@@ -62,6 +62,7 @@ local palette = {
   text = token("ux.foundation.palette.text", "#CAD3F5"),
   overlay0 = token("ux.foundation.palette.overlay0", "#6E738D"),
   blue = token("ux.foundation.palette.blue", "#8AADF4"),
+  mauve = token("ux.foundation.palette.mauve", "#C6A0F6"),
   lavender = token("ux.foundation.palette.lavender", "#B7BDF8"),
   sky = token("ux.foundation.palette.sky", "#91D7E3"),
   teal = token("ux.foundation.palette.teal", "#8BD5CA"),
@@ -90,6 +91,7 @@ local function role(id, label, group, native_link, foreground, opts)
     label = label,
     group = group,
     native_link = native_link,
+    native_attributes = opts.native_attributes,
     properties = properties,
   }
 end
@@ -129,10 +131,14 @@ local COMPONENTS = {
     id = "conversation",
     label = "Conversation",
     roles = {
-      role("message_user", "User Message", "AgentManagerMessageUser", "Special", palette.lavender, {
-        bold = true,
+      role("message_user", "User Message", "AgentManagerMessageUser", "Special", palette.mauve, {
+        bold = false,
+        native_attributes = { fg = "#C6A0F6", bold = false },
       }),
-      role("message_assistant", "Assistant Message", "AgentManagerMessageAssistant", "Normal", palette.text),
+      role("message_assistant", "Model Label", "AgentManagerMessageAssistant", "DiagnosticInfo", palette.blue, {
+        bold = false,
+        native_attributes = { fg = "#8AADF4", bold = false },
+      }),
       role("message_system", "System Message", "AgentManagerMessageSystem", "Comment", palette.overlay0, {
         italic = true,
       }),
@@ -325,6 +331,7 @@ function M.native_links()
       result[#result + 1] = {
         group = item.group,
         target = item.native_link,
+        attributes = copy(item.native_attributes),
       }
     end
   end

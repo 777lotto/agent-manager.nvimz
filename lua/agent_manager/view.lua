@@ -1616,22 +1616,24 @@ function View:_render_conversation()
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
   end
   for _, message in ipairs(messages) do
-    local label = message.role == "user" and " YOU" or " ASSISTANT"
-    if message.role == "system" then
-      label = " SYSTEM"
+    if message.role ~= "user" then
+      local active_options = agent and agent.provider_options or {}
+      local label = message.model or active_options.model or (provider or "Agent") .. " (default model)"
+      if message.role == "system" then
+        label = "SYSTEM"
+      end
+      table.insert(lines, " " .. inline(label))
+      table.insert(highlights, {
+        line = #lines,
+        group = message.role == "system" and "AgentManagerMessageSystem"
+          or "AgentManagerMessageAssistant",
+      })
     end
-    if message.kind == "steer" then
-      label = " YOU · STEER"
-    end
-    table.insert(lines, label)
-    table.insert(highlights, {
-      line = #lines,
-      group = message.role == "user" and "AgentManagerMessageUser"
-        or message.role == "system" and "AgentManagerMessageSystem"
-        or "AgentManagerMessageAssistant",
-    })
     for _, line in ipairs(text_lines(message.text)) do
       table.insert(lines, " " .. line)
+      if message.role == "user" then
+        table.insert(highlights, { line = #lines, group = "AgentManagerMessageUser" })
+      end
     end
     if message.streaming then
       table.insert(lines, " …")

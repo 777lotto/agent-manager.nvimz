@@ -204,6 +204,11 @@ restart. Explicit steering (`ts`) still sends input to the current turn.
 Token totals remain visible, but `usage.updated` events are omitted from the
 Activity log.
 
+Conversation shows the responding model in a blue, unbolded label. User messages
+have no speaker heading and their text is purple. Neovim's text grid cannot use
+a smaller font for individual labels. Provider text, including Markdown markers,
+is preserved; the transcript does not currently render Markdown formatting.
+
 Activity displays provider-supplied file patches with diff highlighting. `df`
 shows a workspace diff in Activity, including when the provider does not supply
 patch events. The inspected diff is a snapshot; press `df` again to refresh it.

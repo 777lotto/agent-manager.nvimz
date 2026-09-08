@@ -376,6 +376,10 @@ end
 
 function Model:_project_conversation(event)
   local conversation = self.conversations[event.agent_id]
+  local agent = self.agents[event.agent_id]
+  local payload = event.payload or {}
+  local response_model = type(payload.model) == "string" and payload.model
+    or (agent and agent.provider_options and agent.provider_options.model)
   local event_type = event.type or ""
   if event_type == "message.delta" then
     local text = text_from(event.payload) or ""
@@ -387,6 +391,7 @@ function Model:_project_conversation(event)
         text = "",
         streaming = true,
         provider = event.provider,
+        model = response_model,
       }
       table.insert(conversation, current)
     end
@@ -406,6 +411,7 @@ function Model:_project_conversation(event)
         text = text,
         streaming = false,
         provider = event.provider,
+        model = response_model,
       })
     end
   elseif event_type == "turn.completed" or event_type == "turn.failed" then
@@ -451,6 +457,7 @@ function Model:apply_history(agent_id, messages)
         text = message.text,
         streaming = false,
         history = true,
+        model = type(message.model) == "string" and message.model or nil,
       })
     end
   end

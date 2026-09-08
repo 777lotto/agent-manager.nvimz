@@ -640,6 +640,56 @@ local function which_key_prefix_test()
   vim.fn.delete(home, "rf")
 end
 
+local function transcript_presentation_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local model = Model.new({ max_events = 8 })
+  model:apply_state({ {
+    id = "transcript-agent", provider = "codex", cwd = "/tmp", title = "transcript",
+    state = "running", provider_options = { model = "gpt-6-astra" },
+  } })
+  model:record_user_input("transcript-agent", "my first line\nmy second line", "prompt")
+  model:apply_event({
+    agent_id = "transcript-agent", sequence = 1, provider = "codex",
+    type = "message.completed", payload = { text = "Reply with **Markdown** intact." },
+  })
+  -- A pending model choice must not relabel the currently running response.
+  local view = View.new(model, { provider_options = function() return { model = "next-model" } end }, {
+    home = vim.fn.tempname(),
+  })
+  assert(view:open())
+  local buffer = view.buffers.conversation
+  assert(buffer_has_line(buffer, " gpt-6-astra"), "assistant label names the active model")
+  assert(not buffer_has_line(buffer, " YOU"), "user messages have no speaker heading")
+  assert(not buffer_has_line(buffer, " ASSISTANT"), "generic assistant heading is removed")
+  local function highlighted(line, group)
+    local row = buffer_line_number(buffer, line) - 1
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buffer, view.namespace, { row, 0 }, { row, -1 }, { details = true })) do
+      if mark[4].hl_group == group then
+        return true
+      end
+    end
+    return false
+  end
+  assert(highlighted("my first line", "AgentManagerMessageUser"), "first user line is purple")
+  assert(highlighted("my second line", "AgentManagerMessageUser"), "all user lines are purple")
+  assert(highlighted(" gpt-6-astra", "AgentManagerMessageAssistant"), "model label is blue")
+  assert(not highlighted("Reply with", "AgentManagerMessageAssistant"), "assistant body stays neutral")
+  assert(buffer_contains(buffer, "**Markdown**"), "source formatting is preserved")
+  model.agents["transcript-agent"].provider_options.model = "another-model"
+  model:record_user_input("transcript-agent", "steering text", "steer")
+  model:apply_event({
+    agent_id = "transcript-agent", sequence = 2, provider = "codex",
+    type = "message.delta", payload = { delta = "Another reply" },
+  })
+  view:render()
+  assert(buffer_has_line(buffer, " gpt-6-astra"), "completed responses retain their model")
+  assert(buffer_has_line(buffer, " another-model"), "new response uses the new model")
+  assert(not buffer_contains(buffer, "YOU · STEER"), "steering has no YOU heading")
+  assert(highlighted("steering text", "AgentManagerMessageUser"), "steering text is purple")
+  view:teardown()
+end
+
 local function native_presentation_test()
   local manager = require("agent_manager")
   local presentation = require("agent_manager.presentation")
@@ -667,11 +717,13 @@ local function native_presentation_test()
   assert_equal(ux.foundation.registered, false, "native mode Foundation registration")
   assert_equal(ux.native_fallback, true, "native fallback mode")
   for _, link in ipairs(presentation.native_links()) do
-    assert_equal(
-      vim.api.nvim_get_hl(0, { name = link.group, link = true, create = false }).link,
-      link.target,
-      "native highlight link: " .. link.group
-    )
+    local highlight = vim.api.nvim_get_hl(0, { name = link.group, link = true, create = false })
+    if link.attributes then
+      assert_equal(highlight.fg, tonumber(link.attributes.fg:sub(2), 16), "native transcript color")
+      assert(not highlight.bold, "transcript labels and user text are not bold")
+    else
+      assert_equal(highlight.link, link.target, "native highlight link: " .. link.group)
+    end
   end
   vim.api.nvim_exec_autocmds("ColorScheme", {
     pattern = "agent-manager-native-replay",
@@ -1495,6 +1547,7 @@ local function run()
   conversation_prompt_test()
   expanded_panes_test()
   which_key_prefix_test()
+  transcript_presentation_test()
   native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()
