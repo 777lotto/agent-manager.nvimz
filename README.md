@@ -356,7 +356,10 @@ The normal `sn` flow only prepares a new session. A focused canonical clone or
 managed worktree identifies the candidate repository through the required
 workspace layout; nonstandard paths fall back to the installed
 `zemrip-agent-workspace audit --json` inventory. After model selection, the
-first prompt generates a collision-resistant lowercase task ID. The broker
+first prompt generates a collision-resistant lowercase task ID. Its final
+segment starts with a letter so the lifecycle does not mistake independent
+sessions for numbered retries of one task. Multiple sessions for the same
+repository receive separate branches, leases, and worktrees. The broker
 then asks the lifecycle authority to atomically claim the resulting
 `agent/<task-id>` branch, lease, and `~/worktrees/<repo>/<task-id>` checkout
 before it starts a provider. Continuing a
