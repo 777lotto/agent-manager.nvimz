@@ -458,7 +458,7 @@ function View:_create_autocmds()
       vim.schedule(function()
         if valid_tab(self.tab) and vim.api.nvim_get_current_tabpage() == self.tab then
           local next_mode = View.layout_for(vim.o.columns).mode
-          if next_mode ~= self.mode then
+          if not self.expanded and next_mode ~= self.mode then
             local active_pane = self.active_pane
             self:_build_layout(active_pane)
             self:render()
@@ -505,7 +505,25 @@ function View:_buffer(name)
   return buffer
 end
 
+function View:_map_windows(buffer)
+  local opts = { buffer = buffer, silent = true, nowait = true }
+  vim.keymap.set("n", "we", function()
+    self:toggle_expanded()
+  end, vim.tbl_extend("force", opts, { desc = "Agent Manager: toggle expanded pane" }))
+  for index, pane in ipairs(pane_names) do
+    local target = pane
+    vim.keymap.set("n", "w" .. index, function()
+      self:focus(target)
+    end, vim.tbl_extend("force", opts, { desc = "Agent Manager: focus " .. target }))
+  end
+end
+
 function View:_map_prompt_buffer(buffer)
+  self:_map_windows(buffer)
+  for key, motion in pairs({ ["<Up>"] = "gk", ["<Down>"] = "gj" }) do
+    vim.keymap.set("n", key, motion, { buffer = buffer, silent = true })
+    vim.keymap.set("i", key, "<C-o>" .. motion, { buffer = buffer, silent = true })
+  end
   local opts = function(description)
     return {
       buffer = buffer,
@@ -538,6 +556,7 @@ function View:_map_prompt_buffer(buffer)
 end
 
 function View:_map_buffer(buffer)
+  self:_map_windows(buffer)
   local map_opts = function(description)
     return { buffer = buffer, silent = true, nowait = true, desc = description }
   end
@@ -721,10 +740,20 @@ function View:_build_layout(initial_pane)
       pcall(vim.api.nvim_win_close, tab_windows[index], true)
     end
   end
+  vim.wo[main].winfixwidth = false
+  vim.wo[main].winfixheight = false
   self.windows = { conversation = main }
   vim.api.nvim_win_set_buf(main, self:_buffer("conversation"))
   set_window_options(main, true, "conversation")
-  local layout = View.layout_for(vim.o.columns)
+  local layout = self.expanded and { mode = "expanded" } or View.layout_for(vim.o.columns)
+  if self.expanded and initial_pane ~= "conversation" then
+    self.windows = { [initial_pane] = main }
+    vim.api.nvim_win_set_buf(main, self:_buffer(initial_pane))
+    set_window_options(main, initial_pane ~= "agents", initial_pane)
+    self.mode = "expanded"
+    self:focus(initial_pane)
+    return
+  end
   self.mode = layout.mode
 
   if layout.mode == "wide" or layout.mode == "medium" then
@@ -764,6 +793,53 @@ function View:_build_layout(initial_pane)
   end
 end
 
+function View:toggle_expanded()
+  if not valid_tab(self.tab) or vim.api.nvim_get_current_tabpage() ~= self.tab then
+    return false
+  end
+  local pane = pane_names[self.pane_index]
+  local metadata = vim.b[vim.api.nvim_get_current_buf()].agent_manager
+  if metadata then
+    local name = metadata.pane
+    if vim.tbl_contains(pane_names, name) then
+      pane = name
+    elseif name == "prompt" or name == "decision" then
+      pane = "conversation"
+    end
+  end
+  if self.expanded then
+    local saved = self.expanded
+    self.expanded = nil
+    self:_build_layout(pane)
+    vim.cmd("stopinsert")
+    self:render()
+    for _, name in ipairs({ "agents", "activity", "conversation", "prompt" }) do
+      local state, window = saved[name], self.windows[name]
+      if state and valid_window(window) then
+        pcall(vim.api.nvim_win_set_width, window, state.width)
+        pcall(vim.api.nvim_win_set_height, window, state.height)
+        vim.api.nvim_win_call(window, function()
+          vim.fn.winrestview(state.view)
+        end)
+      end
+    end
+  else
+    self.expanded = {}
+    for name, window in pairs(self.windows) do
+      if valid_window(window) then
+        self.expanded[name] = {
+          width = vim.api.nvim_win_get_width(window),
+          height = vim.api.nvim_win_get_height(window),
+          view = vim.api.nvim_win_call(window, vim.fn.winsaveview),
+        }
+      end
+    end
+    self:_build_layout(pane)
+    self:render()
+  end
+  return true
+end
+
 function View:cycle(direction)
   if not valid_tab(self.tab) then
     return false
@@ -786,6 +862,13 @@ function View:focus(pane)
     return false
   end
   pane = pane_names[index]
+  if not pane then
+    return false
+  end
+  if self.expanded and not valid_window(self.windows[pane]) then
+    self:_build_layout(pane)
+    return true
+  end
   self.pane_index = index
   self.active_pane = pane
   if pane == "conversation" then
@@ -821,6 +904,9 @@ function View:focus_prompt()
   if not valid_tab(self.tab) then
     return false
   end
+  if self.expanded and not valid_window(self.windows.prompt) then
+    return self:focus("conversation")
+  end
   local prompt = self.windows.prompt
   if not valid_window(prompt) then
     return false
@@ -838,7 +924,9 @@ function View:focus_prompt()
   vim.api.nvim_win_set_cursor(prompt, { last_line, last_column })
   self.active_pane = "conversation"
   self.pane_index = 2
-  vim.cmd("startinsert")
+  if not self.expanded then
+    vim.cmd("startinsert")
+  end
   return true
 end
 
@@ -1567,6 +1655,18 @@ function View:_render_activity()
     vim.list_extend(lines, projected)
     table.insert(lines, "")
   end
+  if self.inspected_diff then
+    if self.inspected_diff.agent_id ~= self.model.selected_agent_id then
+      self.inspected_diff = nil
+    else
+      local offset = #lines
+      vim.list_extend(lines, self.inspected_diff.lines)
+      for _, highlight in ipairs(self.inspected_diff.highlights) do
+        table.insert(highlights, { line = offset + highlight.line, group = highlight.group })
+      end
+      table.insert(lines, "")
+    end
+  end
   if #activity == 0 then
     table.insert(lines, " Tool and provider activity appears here.")
     table.insert(highlights, { line = #lines, group = "AgentManagerMuted" })
@@ -1577,6 +1677,36 @@ function View:_render_activity()
     if entry.detail and entry.detail ~= "" then
       for _, line in ipairs(text_lines(entry.detail)) do
         table.insert(lines, "       " .. line)
+      end
+    end
+    local payload = entry.payload or {}
+    if entry.type:match("^file%.") or entry.type:match("^diff%.") then
+      local function append_diff(diff)
+        if type(diff) ~= "string" then
+          return
+        end
+        for _, line in ipairs(text_lines(diff)) do
+          table.insert(lines, line)
+          local group = line:sub(1, 1) == "+" and line:sub(1, 3) ~= "+++" and "AgentManagerDiffAdd"
+            or line:sub(1, 1) == "-" and line:sub(1, 3) ~= "---" and "AgentManagerDiffDelete"
+            or line:sub(1, 2) == "@@" and "AgentManagerDiffChange"
+          if group then
+            table.insert(highlights, { line = #lines, group = group })
+          end
+        end
+      end
+      append_diff(payload.diff)
+      local item = type(payload.item) == "table" and payload.item or {}
+      local changes = payload.changes or item.changes
+      if type(changes) == "table" then
+        for _, change in ipairs(changes) do
+          if type(change) == "table" then
+            table.insert(lines, "       " .. inline(change.path))
+            append_diff(change.diff)
+          end
+        end
+      elseif payload.path then
+        table.insert(lines, "       " .. inline(payload.path))
       end
     end
   end
@@ -1690,12 +1820,15 @@ function View:_render_decision(action)
 end
 
 function View:_sync_decision(action)
+  if action and action.id ~= self.last_action_id and self.expanded then
+    self:focus("conversation")
+  end
   local content = self.windows.conversation
   if not valid_window(content) then
     return
   end
   local current = vim.api.nvim_win_get_buf(content)
-  if action and action.id ~= self.last_action_id then
+  if action and (action.id ~= self.last_action_id or self.active_pane == "conversation") then
     vim.api.nvim_win_set_buf(content, self:_buffer("decision"))
     set_window_options(content, true, "decision")
     self.active_pane = "decision"
@@ -1735,16 +1868,13 @@ function View:show_diff(diff, title)
       end
     end
   end
-  self:_set_lines("diff", lines, highlights)
-  local content = self.windows.conversation
-  if valid_window(content) then
-    vim.api.nvim_win_set_buf(content, self:_buffer("diff"))
-    set_window_options(content, false, "diff")
-    self.active_pane = "diff"
-    if vim.api.nvim_get_current_tabpage() == self.tab then
-      vim.api.nvim_set_current_win(content)
-    end
-  end
+  self.inspected_diff = {
+    lines = lines,
+    highlights = highlights,
+    agent_id = self.model.selected_agent_id,
+  }
+  self:_render_activity()
+  self:focus("activity")
 end
 
 function View:show_help()
@@ -1778,6 +1908,8 @@ function View:show_help()
     " y / n   yes / allow or no / deny focused request",
     " 1 / 2 / 3 focus agents / conversation / activity",
     " <Tab>   cycle panes",
+    " we      toggle expanded pane",
+    " w1/w2/w3 focus Agents / Conversation / Activity (also while expanded)",
     " prompt: <CR> send · <C-j> newline",
     " <CR>    expand directory, open file/session, or answer question",
     " h / l   collapse / expand directory",
@@ -1794,11 +1926,14 @@ end
 function View:close()
   if not valid_tab(self.tab) then
     self.tab = nil
+    self.expanded = nil
+    self.windows = {}
     return true
   end
   local number = vim.api.nvim_tabpage_get_number(self.tab)
   pcall(vim.cmd, "tabclose " .. number)
   self.tab = nil
+  self.expanded = nil
   self.windows = {}
   return true
 end
@@ -1821,6 +1956,7 @@ function View:status()
   return {
     open = valid_tab(self.tab),
     mode = self.mode,
+    expanded = self.expanded ~= nil,
     active_pane = self.active_pane,
     home = self.home,
     buffers = vim.deepcopy(self.buffers),

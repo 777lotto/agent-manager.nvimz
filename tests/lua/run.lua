@@ -438,6 +438,18 @@ local function conversation_prompt_test()
   view:_resize_prompt()
   assert(vim.api.nvim_win_get_height(status.windows.prompt) > 3, "long prompt expands input")
   assert(vim.api.nvim_win_get_height(status.windows.prompt) <= 12, "prompt expansion is capped")
+  vim.api.nvim_win_set_cursor(status.windows.prompt, { 1, 0 })
+  vim.cmd("redraw")
+  local first_row = vim.fn.winline()
+  vim.api.nvim_feedkeys(vim.keycode("<Down>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row + 1, "down moves one wrapped screen line")
+  vim.api.nvim_feedkeys(vim.keycode("<Up>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row, "up moves one wrapped screen line")
+  vim.api.nvim_win_set_cursor(status.windows.prompt, { 1, 8 })
+  vim.api.nvim_feedkeys(vim.keycode("i<Down><Esc>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row + 1, "insert down moves one wrapped screen line")
+  vim.api.nvim_feedkeys(vim.keycode("i<Up><Esc>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row, "insert up moves one wrapped screen line")
   assert(view:_submit_prompt())
   assert_equal(submitted, long_prompt, "prompt box submits its text")
   assert_equal(
@@ -464,6 +476,119 @@ local function conversation_prompt_test()
   )
   view:teardown()
   vim.fn.delete(home, "rf")
+end
+
+local function expanded_panes_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local columns = vim.o.columns
+  vim.o.columns = 180
+  local model = Model.new({ max_events = 8 })
+  local view = View.new(model, {}, { home = vim.fn.tempname() })
+  assert(view:open())
+  vim.api.nvim_win_set_width(view.windows.agents, 33)
+  vim.api.nvim_win_set_width(view.windows.activity, 44)
+  local original = {}
+  for name, window in pairs(view.windows) do
+    original[name] = { vim.api.nvim_win_get_width(window), vim.api.nvim_win_get_height(window) }
+  end
+  local function keys(value)
+    vim.cmd("stopinsert")
+    vim.api.nvim_feedkeys(vim.keycode(value), "xt", false)
+    vim.cmd("stopinsert")
+  end
+  -- Mouse/window navigation must expand the actual current window too.
+  vim.api.nvim_set_current_win(view.windows.activity)
+  keys("we")
+  assert(view:status().expanded)
+  assert_equal(view:status().active_pane, "activity", "expand actual active pane")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 1, "activity occupies workspace")
+  keys("w2")
+  assert_equal(view:status().active_pane, "conversation", "expanded conversation switch")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 2, "expanded conversation retains input")
+  vim.api.nvim_buf_set_lines(view.buffers.prompt, 0, -1, false, { "draft survives switches" })
+  keys("w1")
+  assert_equal(view:status().active_pane, "agents", "expanded agents switch")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 1, "agents occupies workspace")
+  keys("w3")
+  keys("we")
+  assert(not view:status().expanded)
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 4, "three panes and input restored")
+  for name, size in pairs(original) do
+    local window = view.windows[name]
+    assert_equal(
+      { vim.api.nvim_win_get_width(window), vim.api.nvim_win_get_height(window) },
+      size,
+      "restored " .. name .. " dimensions"
+    )
+  end
+  assert(buffer_contains(view.buffers.prompt, "draft survives switches"))
+  model.selected_agent_id = "fixture"
+  for sequence, payload in ipairs({
+    { diff = "@@ -1 +1 @@\n-old\n+new" },
+    { changes = { { path = "first.lua", diff = "+first change" } } },
+    { item = { changes = { { path = "second.lua", diff = "-second change" } } } },
+  }) do
+    model:apply_event({
+      agent_id = "fixture",
+      sequence = sequence,
+      type = sequence == 1 and "diff.changed" or "file.changed",
+      payload = payload,
+    })
+  end
+  view:render()
+  for _, expected in ipairs({
+    "+new", "-old", "first.lua", "+first change", "second.lua", "-second change",
+  }) do
+    assert(buffer_contains(view.buffers.activity, expected), "Activity displays " .. expected)
+  end
+  view:show_diff("+workspace change", "WORKSPACE DIFF")
+  view:render()
+  assert_equal(view:status().active_pane, "activity", "manual diff focuses Activity")
+  assert(buffer_contains(view.buffers.activity, "+workspace change"), "manual diff survives render")
+  keys("we")
+  keys("w2")
+  keys("w3")
+  assert(
+    buffer_contains(vim.api.nvim_get_current_buf(), "+workspace change"),
+    "diff survives expanded navigation"
+  )
+  model.focused_action = function()
+    return {
+      id = "approval-fixture",
+      kind = "approval",
+      agent_id = "fixture",
+      payload = { tool_name = "edit" },
+    }
+  end
+  view:render()
+  assert_equal(view:status().active_pane, "decision", "new approval interrupts expanded Activity")
+  assert_equal(vim.api.nvim_get_current_buf(), view.buffers.decision, "approval remains accessible")
+  keys("we")
+  assert_equal(vim.api.nvim_get_current_buf(), view.buffers.decision, "approval survives layout restoration")
+  model.focused_action = function()
+    return nil
+  end
+  view:render()
+  -- A terminal resize must retain expanded mode and permit a usable restore.
+  keys("w3")
+  keys("we")
+  vim.o.columns = 100
+  vim.api.nvim_exec_autocmds("VimResized", {})
+  vim.wait(20, function() return false end)
+  assert(view:status().expanded, "terminal resize preserves expanded mode")
+  keys("we")
+  assert_equal(view:status().mode, "medium", "restore adapts to smaller terminal")
+  view:close()
+  assert(view:open())
+  assert(not view:status().expanded, "reopening clears expansion")
+  vim.o.columns = 80
+  view:_build_layout("agents")
+  keys("we")
+  assert_equal(view:status().active_pane, "agents", "narrow shared window expands displayed pane")
+  keys("we")
+  view:teardown()
+  vim.o.columns = columns
 end
 
 local function which_key_prefix_test()
@@ -950,7 +1075,7 @@ local function integration_test()
   manager.diff_ui()
   await("workspace diff", function()
     local status = manager.status()
-    return status.view.active_pane == "diff" and buffer_contains(status.view.buffers.diff, "+new")
+    return status.view.active_pane == "activity" and buffer_contains(status.view.buffers.activity, "+new")
   end)
 
   local history = nil
@@ -1354,6 +1479,7 @@ local function run()
   layout_test()
   workspace_view_navigation_test()
   conversation_prompt_test()
+  expanded_panes_test()
   which_key_prefix_test()
   native_presentation_test()
   public_input_validation_test()

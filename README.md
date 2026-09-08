@@ -187,7 +187,17 @@ input that cannot be sent.
 
 The workspace initially focuses Agents and maps `1`, `2`, and `3` directly to
 Agents, the Conversation prompt box, and Activity. `<Tab>` and `<S-Tab>` still
-cycle panes. Commands are grouped under
+cycle panes. In Normal mode, `we` toggles the current pane between expanded
+view and the previous split sizes. `w1`, `w2`, and `w3` switch panes while
+keeping expanded view active; expanded Conversation includes its prompt box.
+Press `<Esc>` first when typing in the prompt; use `i` to type in expanded
+Conversation. The prompt's Up/Down arrows move
+one visible wrapped line at a time in both Normal and Insert modes.
+
+Activity displays provider-supplied file patches with diff highlighting. `df`
+shows a workspace diff in Activity, including when the provider does not supply
+patch events. The inspected diff is a snapshot; press `df` again to refresh it.
+Commands are grouped under
 buffer-local prefixes: `a` for agent settings (`am`, `ae`), `s` for sessions
 (`sn`, `so`, `sf`, `sa`), `t` for the current turn (`tp`, `ts`, `ti`, `tc`),
 `d` for diff/delete (`df`, `ds`), and `g` for navigation/refresh (`ga`, `gc`,

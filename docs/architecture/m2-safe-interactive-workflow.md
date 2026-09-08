@@ -180,3 +180,16 @@ The default gate remains deterministic and offline:
 
 No live provider turn, credential, authentication state, or provider quota is
 used by `mise run verify`.
+
+### Expanded panes and Activity diffs
+
+The native workspace maps Normal-mode `we` in every pane (including the prompt)
+to expand the current pane or restore its saved split sizes. `w1`, `w2`, and `w3`
+focus Agents, Conversation, and Activity without leaving expanded mode.
+Conversation retains its editable prompt while expanded. Prompt Up/Down navigate
+visible wrapped lines in Normal and Insert modes.
+
+Activity renders provider-supplied diff and file-change patches with addition,
+deletion, and hunk highlighting. Explicit `df` inspection displays a workspace
+diff snapshot in Activity; repeating `df` refreshes that snapshot. Providers that
+only report changed paths still require explicit workspace diff inspection.
