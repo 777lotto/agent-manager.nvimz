@@ -1104,6 +1104,42 @@ async fn deleting_an_owned_session_hands_off_but_preserves_its_worktree() {
 }
 
 #[tokio::test]
+async fn managed_workspace_refusal_reports_safe_reason_and_drains_stderr() {
+    completes_within(async {
+        let fixture = ManagedWorkspaceFixture::new();
+        fs::write(
+            &fixture.lifecycle,
+            "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('REFUSE dirty_canonical: private payload\\n' + 'private payload' * 100000)\nsys.exit(1)\n",
+        )
+        .expect("write refusing lifecycle fixture");
+        let mut harness = start_managed_harness(&fixture).await;
+        harness
+            .send(request(
+                2,
+                "agent/start",
+                json!({
+                    "provider": "codex",
+                    "managed_workspace": {
+                        "repository": "agent-manager",
+                        "task_id": "managed-task",
+                        "resume": false
+                    }
+                }),
+            ))
+            .await;
+        let response = harness.response(2).await;
+        let message = response["error"]["message"].as_str().expect("refusal message");
+        assert!(message.contains("canonical checkout has uncommitted changes"));
+        assert!(!response.to_string().contains("private payload"));
+        harness.send(request(3, "agent/list", json!({}))).await;
+        assert_eq!(harness.response(3).await["result"]["agents"], json!([]));
+        harness.shutdown(4).await;
+    })
+    .await
+    .expect("workspace refusal flow timed out");
+}
+
+#[tokio::test]
 async fn managed_workspace_start_uses_validated_lifecycle_claim_and_handoff() {
     completes_within(async {
         let fixture = ManagedWorkspaceFixture::new();

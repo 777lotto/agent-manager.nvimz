@@ -369,6 +369,12 @@ workspace name during resume. Unreadable or conflicting associations stop resume
 for recovery; an unavailable mapped worktree is reported by the lifecycle
 authority without creating a replacement.
 
+Known lifecycle refusals include a safe explanation in the session-start error
+(for example, a dirty canonical checkout, a busy lease, or missing Mise trust).
+Unknown refusals retain the generic message. Raw lifecycle diagnostics are never
+forwarded into the UI or protocol because dependency errors can contain private
+information.
+
 The lifecycle command remains the authority for Git fetches, branches, leases,
 handoff, and cleanup. Agent Manager exposes inventory, claim/resume, and
 non-destructive lease handoff only. It deliberately has no worktree reset,
