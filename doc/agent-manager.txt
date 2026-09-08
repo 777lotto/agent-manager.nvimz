@@ -141,6 +141,24 @@ view disconnects Neovim only; it never shuts down the supervised broker.
 The native workspace opens with focus in Agents and uses agents, conversation,
 prompt, and activity buffers. Their headings are numbered: 1 focuses Agents, 2
 focuses the prompt box at the bottom of Conversation, and 3 focuses Activity.
+Normal-mode we expands the current pane; pressing we again restores the previous
+split sizes. Expanded Conversation keeps its prompt box. Press <Esc> to leave
+Insert mode before using we or w1/w2/w3. Prompt Up/Down move by visible wrapped
+lines in both Normal and Insert modes.
+
+Prompts submitted while running are queued per session and run in order after
+successful completion. Interrupt/failure cancels queued follow-ups with an
+Activity notice. Up to 32 prompts can wait in broker memory; they do not survive
+a broker restart. ts still steers the current turn. Token totals remain visible,
+but usage.updated events do not appear in the Activity log.
+
+Conversation labels assistant replies with the model name in blue. User messages
+have no YOU heading and use purple text. Per-label font sizes are unavailable in
+the native Neovim text grid. Markdown remains source text in this transcript.
+
+Activity shows file patches supplied by the provider with diff highlighting.
+The df command opens a workspace diff snapshot in Activity; repeat df to refresh.
+
 Wide displays show all three panes. Medium and narrow displays may also use
 <Tab> and <S-Tab> to cycle panes.
 
@@ -191,6 +209,8 @@ sessions; `ui.external_session_limit` caps each provider query from 1 to 1000.
     <CR>    send in the prompt box; otherwise toggle/open/answer the focused row
     <C-j>   insert a newline in the prompt box
     h / l   collapse / expand a directory
+    we      toggle expanded pane and restore previous split sizes
+    w1/w2/w3 focus Agents / Conversation / Activity, preserving expanded mode
     <Tab>   cycle panes
     ? / g?  show mapping help
     q       close the workspace view

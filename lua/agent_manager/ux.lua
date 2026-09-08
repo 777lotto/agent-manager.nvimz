@@ -108,6 +108,7 @@ function UX.new()
     foundation_error = nil,
     foundation_contract = nil,
     native_baselines = {},
+    native_fallbacks = {},
     native_active = false,
   }, UX)
   self:_register_foundation()
@@ -150,14 +151,17 @@ end
 function UX:_apply_native(refresh_baseline)
   for _, link in ipairs(Presentation.native_links()) do
     local current = raw_highlight(link.group)
-    local is_our_fallback = current.link == link.target
+    local is_our_fallback = link.attributes and vim.deep_equal(current, self.native_fallbacks[link.group])
+      or not link.attributes and current.link == link.target
     if self.native_baselines[link.group] == nil or (refresh_baseline and not is_our_fallback) then
       self.native_baselines[link.group] = current
     end
-    vim.api.nvim_set_hl(0, link.group, {
-      default = true,
-      link = link.target,
-    })
+    local attributes = copy(link.attributes or { link = link.target })
+    attributes.default = true
+    vim.api.nvim_set_hl(0, link.group, attributes)
+    if next(current) == nil or is_our_fallback then
+      self.native_fallbacks[link.group] = raw_highlight(link.group)
+    end
   end
   self.native_active = true
 end
@@ -225,6 +229,7 @@ function UX:teardown()
       vim.api.nvim_set_hl(0, link.group, copy(self.native_baselines[link.group] or {}))
     end
     self.native_baselines = {}
+    self.native_fallbacks = {}
     self.native_active = false
   end
   return ok, err

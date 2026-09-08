@@ -579,6 +579,7 @@ local function send_input(method, kind, agent_id, input, callback)
       return nil, options_err
     end
     params.provider_options = provider_options
+    params.queue = true
   end
   return with_client(function()
     local _, request_err = runtime.client:request(
@@ -589,6 +590,9 @@ local function send_input(method, kind, agent_id, input, callback)
           report(rpc_err)
           finish(callback, nil, rpc_err)
           return
+        end
+        if result and result.queued then
+          vim.notify("Agent Manager: prompt queued (" .. tostring(result.position) .. ")", vim.log.levels.INFO)
         end
         runtime.model:record_user_input(agent_id, normalized.text, kind)
         runtime.view:schedule_render()

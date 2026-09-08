@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "result": {
+    "accepted": true,
+    "queued": true,
+    "position": 1
+  }
+}

@@ -196,6 +196,9 @@ local function pure_model_test()
     payload = { input_tokens = 4, output_tokens = 2 },
   }))
   assert_equal(model:usage_for().input_tokens, 4, "usage projection")
+  for _, activity in ipairs(model:activity()) do
+    assert(activity.type ~= "usage.updated", "usage updates do not enter the Activity log")
+  end
   assert(model:apply_history("agent-1", {
     { id = "u", role = "user", text = "historic" },
     { id = "a", role = "assistant", text = "reply" },
@@ -438,6 +441,18 @@ local function conversation_prompt_test()
   view:_resize_prompt()
   assert(vim.api.nvim_win_get_height(status.windows.prompt) > 3, "long prompt expands input")
   assert(vim.api.nvim_win_get_height(status.windows.prompt) <= 12, "prompt expansion is capped")
+  vim.api.nvim_win_set_cursor(status.windows.prompt, { 1, 0 })
+  vim.cmd("redraw")
+  local first_row = vim.fn.winline()
+  vim.api.nvim_feedkeys(vim.keycode("<Down>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row + 1, "down moves one wrapped screen line")
+  vim.api.nvim_feedkeys(vim.keycode("<Up>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row, "up moves one wrapped screen line")
+  vim.api.nvim_win_set_cursor(status.windows.prompt, { 1, 8 })
+  vim.api.nvim_feedkeys(vim.keycode("i<Down><Esc>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row + 1, "insert down moves one wrapped screen line")
+  vim.api.nvim_feedkeys(vim.keycode("i<Up><Esc>"), "xt", false)
+  assert_equal(vim.fn.winline(), first_row, "insert up moves one wrapped screen line")
   assert(view:_submit_prompt())
   assert_equal(submitted, long_prompt, "prompt box submits its text")
   assert_equal(
@@ -464,6 +479,119 @@ local function conversation_prompt_test()
   )
   view:teardown()
   vim.fn.delete(home, "rf")
+end
+
+local function expanded_panes_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local columns = vim.o.columns
+  vim.o.columns = 180
+  local model = Model.new({ max_events = 8 })
+  local view = View.new(model, {}, { home = vim.fn.tempname() })
+  assert(view:open())
+  vim.api.nvim_win_set_width(view.windows.agents, 33)
+  vim.api.nvim_win_set_width(view.windows.activity, 44)
+  local original = {}
+  for name, window in pairs(view.windows) do
+    original[name] = { vim.api.nvim_win_get_width(window), vim.api.nvim_win_get_height(window) }
+  end
+  local function keys(value)
+    vim.cmd("stopinsert")
+    vim.api.nvim_feedkeys(vim.keycode(value), "xt", false)
+    vim.cmd("stopinsert")
+  end
+  -- Mouse/window navigation must expand the actual current window too.
+  vim.api.nvim_set_current_win(view.windows.activity)
+  keys("we")
+  assert(view:status().expanded)
+  assert_equal(view:status().active_pane, "activity", "expand actual active pane")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 1, "activity occupies workspace")
+  keys("w2")
+  assert_equal(view:status().active_pane, "conversation", "expanded conversation switch")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 2, "expanded conversation retains input")
+  vim.api.nvim_buf_set_lines(view.buffers.prompt, 0, -1, false, { "draft survives switches" })
+  keys("w1")
+  assert_equal(view:status().active_pane, "agents", "expanded agents switch")
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 1, "agents occupies workspace")
+  keys("w3")
+  keys("we")
+  assert(not view:status().expanded)
+  assert_equal(#vim.api.nvim_tabpage_list_wins(view.tab), 4, "three panes and input restored")
+  for name, size in pairs(original) do
+    local window = view.windows[name]
+    assert_equal(
+      { vim.api.nvim_win_get_width(window), vim.api.nvim_win_get_height(window) },
+      size,
+      "restored " .. name .. " dimensions"
+    )
+  end
+  assert(buffer_contains(view.buffers.prompt, "draft survives switches"))
+  model.selected_agent_id = "fixture"
+  for sequence, payload in ipairs({
+    { diff = "@@ -1 +1 @@\n-old\n+new" },
+    { changes = { { path = "first.lua", diff = "+first change" } } },
+    { item = { changes = { { path = "second.lua", diff = "-second change" } } } },
+  }) do
+    model:apply_event({
+      agent_id = "fixture",
+      sequence = sequence,
+      type = sequence == 1 and "diff.changed" or "file.changed",
+      payload = payload,
+    })
+  end
+  view:render()
+  for _, expected in ipairs({
+    "+new", "-old", "first.lua", "+first change", "second.lua", "-second change",
+  }) do
+    assert(buffer_contains(view.buffers.activity, expected), "Activity displays " .. expected)
+  end
+  view:show_diff("+workspace change", "WORKSPACE DIFF")
+  view:render()
+  assert_equal(view:status().active_pane, "activity", "manual diff focuses Activity")
+  assert(buffer_contains(view.buffers.activity, "+workspace change"), "manual diff survives render")
+  keys("we")
+  keys("w2")
+  keys("w3")
+  assert(
+    buffer_contains(vim.api.nvim_get_current_buf(), "+workspace change"),
+    "diff survives expanded navigation"
+  )
+  model.focused_action = function()
+    return {
+      id = "approval-fixture",
+      kind = "approval",
+      agent_id = "fixture",
+      payload = { tool_name = "edit" },
+    }
+  end
+  view:render()
+  assert_equal(view:status().active_pane, "decision", "new approval interrupts expanded Activity")
+  assert_equal(vim.api.nvim_get_current_buf(), view.buffers.decision, "approval remains accessible")
+  keys("we")
+  assert_equal(vim.api.nvim_get_current_buf(), view.buffers.decision, "approval survives layout restoration")
+  model.focused_action = function()
+    return nil
+  end
+  view:render()
+  -- A terminal resize must retain expanded mode and permit a usable restore.
+  keys("w3")
+  keys("we")
+  vim.o.columns = 100
+  vim.api.nvim_exec_autocmds("VimResized", {})
+  vim.wait(20, function() return false end)
+  assert(view:status().expanded, "terminal resize preserves expanded mode")
+  keys("we")
+  assert_equal(view:status().mode, "medium", "restore adapts to smaller terminal")
+  view:close()
+  assert(view:open())
+  assert(not view:status().expanded, "reopening clears expansion")
+  vim.o.columns = 80
+  view:_build_layout("agents")
+  keys("we")
+  assert_equal(view:status().active_pane, "agents", "narrow shared window expands displayed pane")
+  keys("we")
+  view:teardown()
+  vim.o.columns = columns
 end
 
 local function which_key_prefix_test()
@@ -512,6 +640,56 @@ local function which_key_prefix_test()
   vim.fn.delete(home, "rf")
 end
 
+local function transcript_presentation_test()
+  local Model = require("agent_manager.model")
+  local View = require("agent_manager.view")
+  local model = Model.new({ max_events = 8 })
+  model:apply_state({ {
+    id = "transcript-agent", provider = "codex", cwd = "/tmp", title = "transcript",
+    state = "running", provider_options = { model = "gpt-6-astra" },
+  } })
+  model:record_user_input("transcript-agent", "my first line\nmy second line", "prompt")
+  model:apply_event({
+    agent_id = "transcript-agent", sequence = 1, provider = "codex",
+    type = "message.completed", payload = { text = "Reply with **Markdown** intact." },
+  })
+  -- A pending model choice must not relabel the currently running response.
+  local view = View.new(model, { provider_options = function() return { model = "next-model" } end }, {
+    home = vim.fn.tempname(),
+  })
+  assert(view:open())
+  local buffer = view.buffers.conversation
+  assert(buffer_has_line(buffer, " gpt-6-astra"), "assistant label names the active model")
+  assert(not buffer_has_line(buffer, " YOU"), "user messages have no speaker heading")
+  assert(not buffer_has_line(buffer, " ASSISTANT"), "generic assistant heading is removed")
+  local function highlighted(line, group)
+    local row = buffer_line_number(buffer, line) - 1
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buffer, view.namespace, { row, 0 }, { row, -1 }, { details = true })) do
+      if mark[4].hl_group == group then
+        return true
+      end
+    end
+    return false
+  end
+  assert(highlighted("my first line", "AgentManagerMessageUser"), "first user line is purple")
+  assert(highlighted("my second line", "AgentManagerMessageUser"), "all user lines are purple")
+  assert(highlighted(" gpt-6-astra", "AgentManagerMessageAssistant"), "model label is blue")
+  assert(not highlighted("Reply with", "AgentManagerMessageAssistant"), "assistant body stays neutral")
+  assert(buffer_contains(buffer, "**Markdown**"), "source formatting is preserved")
+  model.agents["transcript-agent"].provider_options.model = "another-model"
+  model:record_user_input("transcript-agent", "steering text", "steer")
+  model:apply_event({
+    agent_id = "transcript-agent", sequence = 2, provider = "codex",
+    type = "message.delta", payload = { delta = "Another reply" },
+  })
+  view:render()
+  assert(buffer_has_line(buffer, " gpt-6-astra"), "completed responses retain their model")
+  assert(buffer_has_line(buffer, " another-model"), "new response uses the new model")
+  assert(not buffer_contains(buffer, "YOU · STEER"), "steering has no YOU heading")
+  assert(highlighted("steering text", "AgentManagerMessageUser"), "steering text is purple")
+  view:teardown()
+end
+
 local function native_presentation_test()
   local manager = require("agent_manager")
   local presentation = require("agent_manager.presentation")
@@ -539,11 +717,13 @@ local function native_presentation_test()
   assert_equal(ux.foundation.registered, false, "native mode Foundation registration")
   assert_equal(ux.native_fallback, true, "native fallback mode")
   for _, link in ipairs(presentation.native_links()) do
-    assert_equal(
-      vim.api.nvim_get_hl(0, { name = link.group, link = true, create = false }).link,
-      link.target,
-      "native highlight link: " .. link.group
-    )
+    local highlight = vim.api.nvim_get_hl(0, { name = link.group, link = true, create = false })
+    if link.attributes then
+      assert_equal(highlight.fg, tonumber(link.attributes.fg:sub(2), 16), "native transcript color")
+      assert(not highlight.bold, "transcript labels and user text are not bold")
+    else
+      assert_equal(highlight.link, link.target, "native highlight link: " .. link.group)
+    end
   end
   vim.api.nvim_exec_autocmds("ColorScheme", {
     pattern = "agent-manager-native-replay",
@@ -925,6 +1105,7 @@ local function integration_test()
   assert_equal(manager.pending_approval_count(), 0, "resolved approval count")
   assert(buffer_contains(completed.view.buffers.conversation, "interactive answer"), "conversation response")
   assert(buffer_contains(completed.view.buffers.activity, "input_tokens: 12"), "usage presentation")
+  assert(not buffer_contains(completed.view.buffers.activity, "usage.updated"), "usage event log is hidden")
   assert(buffer_contains(completed.view.buffers.agents, "dirty buffer conflict"), "conflict presentation")
 
   local conflict = manager.status().model.file_conflicts[agent_id][test_file]
@@ -950,7 +1131,7 @@ local function integration_test()
   manager.diff_ui()
   await("workspace diff", function()
     local status = manager.status()
-    return status.view.active_pane == "diff" and buffer_contains(status.view.buffers.diff, "+new")
+    return status.view.active_pane == "activity" and buffer_contains(status.view.buffers.activity, "+new")
   end)
 
   local history = nil
@@ -967,6 +1148,16 @@ local function integration_test()
   await("second active turn", function()
     return manager.list()[1].state == "running"
   end)
+  local queued_prompt = nil
+  assert(manager.prompt(agent_id, "queued follow-up", function(result, err)
+    assert_equal(err, nil, "active prompt queues without a state error")
+    queued_prompt = result
+  end))
+  await("queued prompt accepted", function()
+    return queued_prompt ~= nil
+  end)
+  assert_equal(queued_prompt.queued, true, "prompt client opts into broker queue")
+  assert_equal(queued_prompt.position, 1, "queued prompt position")
   assert(manager.steer(agent_id, "more detail"))
   await("steering delta", function()
     local conversation = manager.status().model.conversations[agent_id]
@@ -1354,7 +1545,9 @@ local function run()
   layout_test()
   workspace_view_navigation_test()
   conversation_prompt_test()
+  expanded_panes_test()
   which_key_prefix_test()
+  transcript_presentation_test()
   native_presentation_test()
   public_input_validation_test()
   real_broker_handshake_test()
