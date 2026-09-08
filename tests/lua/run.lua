@@ -1,5 +1,7 @@
 local root = assert(vim.env.AGENT_MANAGER_TEST_ROOT, "AGENT_MANAGER_TEST_ROOT is required")
 vim.opt.runtimepath:prepend(root)
+local test_state = vim.fn.tempname()
+vim.env.XDG_STATE_HOME = test_state
 vim.cmd("helptags " .. vim.fn.fnameescape(root .. "/doc"))
 
 local function assert_equal(actual, expected, message)
@@ -895,6 +897,7 @@ local function durable_reconnect_test()
 end
 
 local function configure_fake(manager)
+  vim.fn.delete(vim.fn.stdpath("state") .. "/agent-manager/session-workspaces", "rf")
   local ok, setup_err = manager.setup({
     broker = {
       command = { "python", root .. "/tests/fixtures/fake_public_broker.py" },
@@ -1523,10 +1526,13 @@ local function resume_test()
   end)
   vim.ui.input = original_input
   local resumed = manager.list()[1]
-  assert(resume_prompt:find("Continue Claude Code session", 1, true), "continue-session prompt wording")
+  assert_equal(resume_prompt, nil, "resume must not prompt for a workspace name")
   assert_equal(resumed.provider_session_id, "claude-resumable-lua", "specific resume id")
   assert_equal(resumed.workspace_strategy, "worktree", "resumed session workspace strategy")
-  assert_equal(resumed.managed_workspace.task_id, "continued-session", "resumed session workspace")
+  local mappings = require("agent_manager.session_workspace")
+  assert_equal(resumed.managed_workspace.task_id, mappings.task_id(session), "automatic session workspace")
+  local saved = assert(mappings.load(session))
+  assert_equal(saved.task_id, resumed.managed_workspace.task_id, "resume persists the association")
   assert_equal(
     manager.status().model.conversations[resumed.id][2].text,
     "historic answer",
@@ -1536,9 +1542,89 @@ local function resume_test()
   vim.wait(500, function()
     return false
   end, 25, false)
+
+  -- The provider still advertises its old canonical cwd after a fresh editor setup.
+  assert(manager.setup({
+    broker = { command = { "python", root .. "/tests/fixtures/fake_public_broker.py" } },
+    providers = { claude = { python = false } },
+  }))
+  local refused, refusal = manager.resume({
+    provider = session.provider,
+    provider_session_id = session.provider_session_id,
+    managed_workspace = { repository = saved.repository, task_id = "different-task" },
+  })
+  assert_equal(refused, nil, "public resume refuses workspace reassignment")
+  assert_equal(refusal.kind, "workspace", "workspace reassignment error")
+  local original_resume = manager.resume
+  local attempts = {}
+  manager.resume = function(opts)
+    attempts[#attempts + 1] = opts
+    return true
+  end
+  vim.ui.input = function()
+    error("resume must not ask for a workspace name")
+  end
+  manager.resume_session_ui(session)
+  assert_equal(#attempts, 1, "restart resumes once")
+  assert_equal(attempts[1].managed_workspace, {
+    repository = saved.repository, task_id = saved.task_id, resume = true,
+  }, "restart reclaims the saved mapping despite stale provider cwd")
+
+  local original_workspaces = manager.workspaces
+  local legacy = vim.deepcopy(session)
+  legacy.provider_session_id = "legacy-unmapped-session"
+  local legacy_task = mappings.task_id(legacy)
+  manager.workspaces = function(callback)
+    callback({ repositories = { {
+      slug = "agent-manager", canonical_path = legacy.cwd,
+      worktree_root = "/workspace/worktrees/agent-manager",
+      tasks = { { task_id = legacy_task, path = "/workspace/worktrees/agent-manager/" .. legacy_task } },
+    } } })
+  end
+  manager.resume_session_ui(legacy)
+  assert_equal(attempts[2].managed_workspace.resume, true, "existing automatic task is reclaimed")
+  assert_equal(attempts[2].managed_workspace.task_id, legacy_task, "stable automatic task identity")
+  attempts[2] = nil
+
+  local missing = vim.deepcopy(legacy)
+  missing.cwd = "/workspace/worktrees/agent-manager/missing-task"
+  manager.resume_session_ui(missing)
+  assert_equal(#attempts, 1, "missing task cannot become a new workspace")
+  manager.workspaces = original_workspaces
+
+  local conflicting = vim.deepcopy(session)
+  conflicting.managed_workspace = { repository = saved.repository, task_id = "different-task" }
+  manager.resume_session_ui(conflicting)
+  assert_equal(#attempts, 1, "conflicting metadata cannot launch a replacement")
+
+  local filename = vim.fn.stdpath("state") .. "/agent-manager/session-workspaces/"
+    .. vim.fn.sha256(session.provider .. "\n" .. session.provider_session_id) .. ".json"
+  vim.fn.writefile({ "invalid JSON" }, filename)
+  manager.resume_session_ui(session)
+  assert_equal(#attempts, 1, "corrupt mapping cannot launch a replacement")
+  manager.resume = original_resume
+  vim.ui.input = original_input
+  manager.teardown()
+end
+
+local function session_workspace_store_test()
+  local mappings = require("agent_manager.session_workspace")
+  local session = { provider = "codex", provider_session_id = "workspace-store-test" }
+  local workspace = { repository = "agent-manager", task_id = "original-task" }
+  assert_equal(mappings.load(session), nil, "unmapped session")
+  assert(mappings.save(session, workspace))
+  assert(mappings.save(session, workspace))
+  assert_equal(mappings.load(session), workspace, "saved mapping")
+  local ok, err = mappings.save(session, { repository = "agent-manager", task_id = "replacement" })
+  assert_equal(ok, nil, "mapping is immutable")
+  assert(err, "conflict explanation")
+  assert_equal(mappings.load(session), workspace, "original mapping survives conflict")
+  assert_equal(mappings.load({ provider = "claude", provider_session_id = session.provider_session_id }), nil,
+    "provider identities are separate")
 end
 
 local function run()
+  session_workspace_store_test()
   pure_client_resync_test()
   pure_client_revision_mismatch_test()
   pure_model_test()
@@ -1561,6 +1647,7 @@ local function run()
 end
 
 local ok, err = xpcall(run, debug.traceback)
+vim.fn.delete(test_state, "rf")
 if not ok then
   io.stderr:write(err .. "\n")
   vim.cmd("cquit 1")

@@ -2,6 +2,7 @@ local Config = require("agent_manager.config")
 local Client = require("agent_manager.client")
 local Editor = require("agent_manager.editor")
 local Model = require("agent_manager.model")
+local SessionWorkspace = require("agent_manager.session_workspace")
 local UX = require("agent_manager.ux")
 local View = require("agent_manager.view")
 
@@ -72,6 +73,15 @@ end
 local function finish(callback, result, err)
   if callback then
     pcall(callback, result, err)
+  end
+end
+
+local function remember_workspace(agent)
+  if agent and type(agent.provider_session_id) == "string" and type(agent.managed_workspace) == "table" then
+    local _, err = SessionWorkspace.save(agent, agent.managed_workspace)
+    if err then
+      vim.notify("Agent Manager: " .. err, vim.log.levels.ERROR)
+    end
   end
 end
 
@@ -221,6 +231,9 @@ function M.setup(opts)
     max_events = config.ui.max_events,
     on_change = function(reason)
       publish_state(model, reason)
+      for _, agent in ipairs(reason == "broker_state" and model and model:list() or {}) do
+        remember_workspace(agent)
+      end
     end,
   })
   client = Client.new({
@@ -416,6 +429,7 @@ local function request_agent_start(params, callback)
         return
       end
       if result and result.agent then
+        remember_workspace(result.agent)
         runtime.agent_options[result.agent.id] = vim.deepcopy(
           result.agent.provider_options or params.provider_options or {}
         )
@@ -667,6 +681,7 @@ function M.attach(agent_id, callback)
           return
         end
         if result and result.agent then
+          remember_workspace(result.agent)
           runtime.draft = nil
           runtime.view:set_draft(nil)
           runtime.agent_options[result.agent.id] = vim.deepcopy(result.agent.provider_options or {})
@@ -836,6 +851,26 @@ function M.resume(opts, callback)
     provider = provider,
     provider_session_id = session_id,
   }
+  local saved, mapping_err = SessionWorkspace.load(params)
+  if mapping_err then
+    local err = structured_error("workspace", mapping_err)
+    finish(callback, nil, err)
+    return nil, err
+  end
+  if saved then
+    local requested = opts.managed_workspace
+    local conflicts = requested ~= nil and (type(requested) ~= "table"
+      or requested.repository ~= saved.repository or requested.task_id ~= saved.task_id)
+    if conflicts or opts.cwd ~= nil or opts.worktree_path ~= nil or opts.workspace_strategy ~= nil
+    then
+      local err = structured_error("workspace", "Resume must reuse the saved session workspace")
+      finish(callback, nil, err)
+      return nil, err
+    end
+    opts = vim.tbl_extend("force", opts, {
+      managed_workspace = { repository = saved.repository, task_id = saved.task_id, resume = true },
+    })
+  end
   local provider_options, options_err = normalized_provider_options(provider, opts.provider_options)
   if not provider_options then
     finish(callback, nil, options_err)
@@ -918,6 +953,7 @@ function M.resume(opts, callback)
           return
         end
         if result and result.agent then
+          remember_workspace(result.agent)
           runtime.draft = nil
           runtime.view:set_draft(nil)
           runtime.agent_options[result.agent.id] = vim.deepcopy(
@@ -961,6 +997,7 @@ function M.fork(agent_id, callback)
           return
         end
         if result and result.agent then
+          remember_workspace(result.agent)
           runtime.draft = nil
           runtime.view:set_draft(nil)
           runtime.agent_options[result.agent.id] = vim.deepcopy(result.agent.provider_options or {})
@@ -1758,34 +1795,23 @@ local function task_for_directory(repositories, cwd)
   return selected_repository, selected_task
 end
 
-local function prompt_resume_workspace(session, repository)
-  schedule_ui(function()
-    vim.ui.input({
-      prompt = string.format(
-        "Continue %s session in %s · workspace name (lowercase-with-hyphens): ",
-        provider_name(session.provider),
-        repository.slug
-      ),
-    }, function(session_name)
-      if not session_name or session_name == "" then
-        return
+local function automatic_resume_workspace(session, repository, repositories)
+  local task_id = SessionWorkspace.task_id(session)
+  for _, candidate in ipairs(repositories) do
+    if candidate.slug == repository.slug then
+      for _, task in ipairs(candidate.tasks or {}) do
+        if task.task_id == task_id then
+          resume_with_workspace(session, {
+            repository = repository.slug,
+            task_id = task_id,
+            resume = true,
+          })
+          return
+        end
       end
-      if not valid_managed_identifier(session_name, false) then
-        vim.notify(
-          "Agent Manager: workspace name must use lowercase letters, numbers, and single hyphens",
-          vim.log.levels.ERROR
-        )
-        return
-      end
-      schedule_ui(function()
-        resume_with_workspace(session, {
-          repository = repository.slug,
-          task_id = session_name,
-          resume = false,
-        })
-      end)
-    end)
-  end)
+    end
+  end
+  resume_with_workspace(session, { repository = repository.slug, task_id = task_id, resume = false })
 end
 
 function M.resume_session_ui(session)
@@ -1820,7 +1846,22 @@ function M.resume_session_ui(session)
     vim.notify("Agent Manager embedded mode supports one live agent", vim.log.levels.WARN)
     return
   end
+  local saved, mapping_err = SessionWorkspace.load(session)
+  if mapping_err then
+    vim.notify("Agent Manager: " .. mapping_err, vim.log.levels.ERROR)
+    return
+  end
   local managed = session.managed_workspace
+  if managed and managed ~= vim.NIL and saved
+    and (managed.repository ~= saved.repository or managed.task_id ~= saved.task_id)
+  then
+    vim.notify(
+      "Agent Manager: conflicting session workspaces; restore the original mapping before resuming",
+      vim.log.levels.ERROR
+    )
+    return
+  end
+  managed = saved or managed
   if managed and managed ~= vim.NIL then
     resume_with_workspace(session, {
       repository = managed.repository,
@@ -1839,10 +1880,6 @@ function M.resume_session_ui(session)
     })
     return
   end
-  if layout then
-    prompt_resume_workspace(session, { slug = layout.repository })
-    return
-  end
 
   vim.notify("Agent Manager: finding a safe workspace for the saved session…")
   load_workspace_inventory(function(repositories)
@@ -1859,8 +1896,15 @@ function M.resume_session_ui(session)
       return
     end
     repository = contextual_repository(repositories, { cwd = session.cwd })
+    if repository and path_within(session.cwd, repository.canonical_path) then
+      automatic_resume_workspace(session, repository, repositories)
+      return
+    end
     if repository then
-      prompt_resume_workspace(session, repository)
+      vim.notify(
+        "Agent Manager: the saved task workspace is missing from the inventory; restore it before resuming",
+        vim.log.levels.ERROR
+      )
       return
     end
     if runtime.config.worktrees.allow_shared then
