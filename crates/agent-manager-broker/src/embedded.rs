@@ -1,6 +1,6 @@
 //! Public JSON-RPC broker core and embedded stdio transport.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -297,12 +297,19 @@ struct PendingRuntimeRequest {
     public_id: RequestId,
 }
 
+struct QueuedPrompt {
+    text: String,
+    attachments: Vec<Value>,
+    provider_options: ProviderOptions,
+}
+
 struct ManagedAgent {
     summary: AgentSummary,
     workspace_identity: PathBuf,
     commands: mpsc::Sender<AgentCommand>,
     task: Option<JoinHandle<()>>,
     pending_contexts: Vec<Value>,
+    queued_prompts: VecDeque<QueuedPrompt>,
     pending_questions: u64,
     has_prompted: bool,
     title_from_prompt: bool,
@@ -328,6 +335,7 @@ pub(crate) struct Broker {
     runtime: mpsc::UnboundedSender<RuntimeEvent>,
     next_runtime_request: u64,
     pending_runtime_requests: HashMap<RequestId, PendingRuntimeRequest>,
+    queued_runtime_requests: HashSet<RequestId>,
     registry: Option<RegistryStore>,
     status: Option<StatusStore>,
 }
@@ -359,6 +367,7 @@ impl Broker {
                     commands,
                     task: None,
                     pending_contexts: Vec::new(),
+                    queued_prompts: VecDeque::new(),
                     pending_questions: 0,
                     has_prompted: true,
                     title_from_prompt: false,
@@ -378,6 +387,7 @@ impl Broker {
             runtime,
             next_runtime_request: 1,
             pending_runtime_requests: HashMap::new(),
+            queued_runtime_requests: HashSet::new(),
             registry,
             status,
         }
@@ -1245,6 +1255,7 @@ impl Broker {
                 commands,
                 task: Some(task),
                 pending_contexts: Vec::new(),
+                queued_prompts: VecDeque::new(),
                 pending_questions: 0,
                 has_prompted,
                 title_from_prompt: false,
@@ -1486,11 +1497,20 @@ impl Broker {
             .agents
             .get_mut(&parsed.agent_id)
             .expect("validated agent must remain present");
-        let allowed = match kind {
-            InputKind::Prompt => matches!(
+        let queue_prompt = parsed.queue
+            && kind == InputKind::Prompt
+            && matches!(
                 agent.summary.state,
-                AgentState::Idle | AgentState::Completed | AgentState::Interrupted
-            ),
+                AgentState::Running | AgentState::WaitingInput | AgentState::WaitingApproval
+            );
+        let allowed = match kind {
+            InputKind::Prompt => {
+                queue_prompt
+                    || matches!(
+                        agent.summary.state,
+                        AgentState::Idle | AgentState::Completed | AgentState::Interrupted
+                    )
+            }
             InputKind::Steer => agent.summary.state == AgentState::Running,
         };
         if !allowed {
@@ -1498,6 +1518,15 @@ impl Broker {
                 Some(request_id),
                 -32_013,
                 "Agent state does not allow this input",
+                None,
+            ));
+            return;
+        }
+        if queue_prompt && agent.queued_prompts.len() >= 32 {
+            self.send(error_response(
+                Some(request_id),
+                -32_013,
+                "Prompt queue is full (32 pending)",
                 None,
             ));
             return;
@@ -1511,15 +1540,44 @@ impl Broker {
                     return;
                 }
             };
-        let commands = agent.commands.clone();
+        let input = QueuedPrompt {
+            text: parsed.input.text,
+            attachments,
+            provider_options,
+        };
         agent.pending_contexts.clear();
+        if queue_prompt {
+            agent.queued_prompts.push_back(input);
+            let position = agent.queued_prompts.len();
+            self.send(success_response(
+                request_id,
+                json!({ "accepted": true, "queued": true, "position": position }),
+            ));
+            return;
+        }
+        self.dispatch_agent_input(request_id, parsed.agent_id, input, kind)
+            .await;
+    }
+
+    async fn dispatch_agent_input(
+        &mut self,
+        request_id: RequestId,
+        agent_id: String,
+        input: QueuedPrompt,
+        kind: InputKind,
+    ) {
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .expect("validated agent must remain present");
+        let commands = agent.commands.clone();
         if kind == InputKind::Prompt {
             agent.summary.state = AgentState::Running;
-            agent.summary.provider_options = provider_options.clone();
+            agent.summary.provider_options = input.provider_options.clone();
             if !agent.has_prompted {
                 agent.has_prompted = true;
                 if agent.summary.managed_workspace.is_none() {
-                    agent.summary.title = prompt_title(&parsed.input.text);
+                    agent.summary.title = prompt_title(&input.text);
                     agent.title_from_prompt = true;
                 }
             }
@@ -1529,21 +1587,21 @@ impl Broker {
         let command = match kind {
             InputKind::Prompt => AgentCommand::Prompt {
                 request_id: runtime_request_id.clone(),
-                text: parsed.input.text,
-                attachments,
-                provider_options,
+                text: input.text,
+                attachments: input.attachments,
+                provider_options: input.provider_options,
             },
             InputKind::Steer => AgentCommand::Steer {
                 request_id: runtime_request_id.clone(),
-                text: parsed.input.text,
-                attachments,
+                text: input.text,
+                attachments: input.attachments,
             },
         };
         if commands.send(command).await.is_err() {
             self.pending_runtime_requests.remove(&runtime_request_id);
             let agent = self
                 .agents
-                .get_mut(&parsed.agent_id)
+                .get_mut(&agent_id)
                 .expect("validated agent must remain present");
             agent.summary.state = AgentState::Disconnected;
             agent.summary.updated_at = timestamp();
@@ -1566,6 +1624,7 @@ impl Broker {
             self.send(invalid_params(request_id, "invalid agent id parameters"));
             return;
         };
+        self.cancel_queued_prompts(&agent_id);
         let Some(agent) = self.agents.get(&agent_id) else {
             self.send(agent_not_found(request_id));
             return;
@@ -1867,6 +1926,7 @@ impl Broker {
                 self.notify_state();
             }
             RuntimeEvent::Response { request_id, result } => {
+                self.queued_runtime_requests.remove(&request_id);
                 self.send_runtime_response(&request_id, |public_id| {
                     success_response(public_id, result)
                 });
@@ -1878,6 +1938,16 @@ impl Broker {
                 message,
                 fail_agent,
             } => {
+                if self.queued_runtime_requests.remove(&request_id) {
+                    self.handle_provider_failure(
+                        agent_id,
+                        "Queued prompt could not start; queued follow-ups were cancelled",
+                    );
+                    return;
+                }
+                if fail_agent {
+                    self.cancel_queued_prompts(&agent_id);
+                }
                 if fail_agent && let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.summary.state = AgentState::Failed;
                     agent.summary.active_turn_id = None;
@@ -1896,6 +1966,7 @@ impl Broker {
                 self.handle_provider_failure(agent_id, message);
             }
             RuntimeEvent::Stopped { agent_id } => {
+                self.cancel_queued_prompts(&agent_id);
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.task.take();
                     agent.pending_contexts.clear();
@@ -1924,6 +1995,9 @@ impl Broker {
         let sequence = self.replay.push(event.clone());
         event.sequence = sequence;
         let state_changed = self.apply_event_state(&event);
+        let agent_id = event.agent_id.clone();
+        let completed = event.event_type == "turn.completed";
+        let failed = event.event_type == "turn.failed";
         if self.phase == ConnectionPhase::Ready {
             self.send(json!({
                 "jsonrpc": "2.0",
@@ -1931,12 +2005,77 @@ impl Broker {
                 "params": event,
             }));
         }
+        if completed {
+            if self.agents.get(&agent_id).is_some_and(|agent| {
+                agent.summary.state == AgentState::Completed
+                    && agent.summary.pending_approvals == 0
+                    && agent.pending_questions == 0
+            }) {
+                self.dispatch_queued_prompt(&agent_id);
+            } else {
+                self.cancel_queued_prompts(&agent_id);
+            }
+        } else if failed {
+            self.cancel_queued_prompts(&agent_id);
+        }
         if state_changed {
             self.notify_state();
         }
     }
 
+    fn dispatch_queued_prompt(&mut self, agent_id: &str) {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return;
+        };
+        let Some(prompt) = agent.queued_prompts.pop_front() else {
+            return;
+        };
+        let request_id = RequestId::String(format!("queued:{}", self.next_runtime_request));
+        self.next_runtime_request = self
+            .next_runtime_request
+            .checked_add(1)
+            .expect("runtime request sequence overflow");
+        let provider_options = prompt.provider_options.clone();
+        let command = AgentCommand::Prompt {
+            request_id: request_id.clone(),
+            text: prompt.text,
+            attachments: prompt.attachments,
+            provider_options: prompt.provider_options,
+        };
+        if agent.commands.try_send(command).is_err() {
+            self.handle_provider_failure(
+                agent_id.to_owned(),
+                "Queued prompt could not start; provider command channel unavailable",
+            );
+            return;
+        }
+        self.queued_runtime_requests.insert(request_id);
+        agent.summary.state = AgentState::Running;
+        agent.summary.provider_options = provider_options;
+        agent.summary.updated_at = timestamp();
+    }
+
+    fn cancel_queued_prompts(&mut self, agent_id: &str) {
+        let Some(agent) = self.agents.get_mut(agent_id) else {
+            return;
+        };
+        let count = agent.queued_prompts.len();
+        agent.queued_prompts.clear();
+        if count > 0 {
+            let event = EventEnvelope::new(
+                timestamp(),
+                agent_id.to_owned(),
+                agent.summary.provider,
+                "broker.notice".to_owned(),
+                json!({ "message": format!("Cancelled {count} queued prompt(s)") }),
+                json!({ "kind": "broker", "redacted": true }),
+            );
+            self.handle_provider_event(event);
+        }
+    }
+
     fn handle_provider_failure(&mut self, agent_id: String, message: &'static str) {
+        self.cancel_queued_prompts(&agent_id);
         let Some(agent) = self.agents.get_mut(&agent_id) else {
             return;
         };
@@ -2321,6 +2460,8 @@ struct HistoryParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TurnInputParams {
+    #[serde(default)]
+    queue: bool,
     agent_id: String,
     input: TurnInput,
     #[serde(default)]
@@ -2789,6 +2930,186 @@ mod tests {
         }))
         .expect("answer map");
         assert!(!valid_question_answers(&too_many));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn prompt_queue_is_fifo_bounded_and_cancels_on_failure() {
+        for provider in [Provider::Codex, Provider::Claude] {
+            let summary = serde_json::from_value(json!({
+                "id": "queue-agent", "provider": provider, "cwd": fixture_cwd(),
+                "workspace_strategy": "shared", "title": "queue fixture", "state": "running",
+                "pending_approvals": 0, "unread_events": 0, "capabilities": [],
+                "created_at": "2026-09-08T00:00:00Z", "updated_at": "2026-09-08T00:00:00Z",
+            }))
+            .expect("queue agent summary");
+            let (runtime, _) = mpsc::unbounded_channel();
+            let mut broker = Broker::new(
+                EmbeddedConfig::default(),
+                BrokerMode::Embedded,
+                runtime,
+                None,
+                vec![summary],
+                None,
+            );
+            let (commands, mut received) = mpsc::channel(4);
+            broker.agents.get_mut("queue-agent").unwrap().commands = commands;
+            let (output, mut responses) = mpsc::unbounded_channel();
+            broker.output = Some(output);
+            broker.phase = super::ConnectionPhase::Ready;
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../protocol/broker/v1/fixtures/queued-prompt.request.json"
+            ))
+            .expect("queued prompt request fixture");
+            let mut params = fixture["params"].clone();
+            params["queue"] = json!(false);
+            broker
+                .send_agent_input(
+                    super::RequestId::Integer(41),
+                    params,
+                    super::InputKind::Prompt,
+                )
+                .await;
+            assert_eq!(responses.recv().await.unwrap()["error"]["code"], -32_013);
+            let context = json!({ "kind": "buffer", "payload": { "path": fixture_cwd().join("Cargo.toml"), "text": "captured context" } });
+            broker
+                .agents
+                .get_mut("queue-agent")
+                .unwrap()
+                .pending_contexts
+                .push(context.clone());
+            let mut malformed = fixture["params"].clone();
+            malformed["queue"] = json!("yes");
+            broker
+                .send_agent_input(
+                    super::RequestId::Integer(43),
+                    malformed,
+                    super::InputKind::Prompt,
+                )
+                .await;
+            assert_eq!(responses.recv().await.unwrap()["error"]["code"], -32_602);
+            assert_eq!(
+                broker.agents["queue-agent"].pending_contexts,
+                vec![context.clone()]
+            );
+            for position in 1..=33 {
+                let mut params = fixture["params"].clone();
+                params["input"]["text"] = json!(format!("prompt {position}"));
+                broker
+                    .send_agent_input(
+                        super::RequestId::Integer(42),
+                        params,
+                        super::InputKind::Prompt,
+                    )
+                    .await;
+                let response = responses.recv().await.unwrap();
+                if position <= 32 {
+                    assert_eq!(response["result"]["queued"], true);
+                    assert_eq!(response["result"]["position"], position);
+                    if position == 1 {
+                        let expected: serde_json::Value = serde_json::from_str(include_str!(
+                            "../../../protocol/broker/v1/fixtures/queued-prompt.response.json"
+                        ))
+                        .expect("queued prompt response fixture");
+                        assert_eq!(response, expected);
+                    }
+                } else {
+                    assert_eq!(response["error"]["code"], -32_013);
+                }
+            }
+            assert!(
+                received.try_recv().is_err(),
+                "nothing sent during active turn"
+            );
+            assert!(broker.agents["queue-agent"].pending_contexts.is_empty());
+            for position in 1..=2 {
+                broker.handle_provider_event(EventEnvelope::new(
+                    "2026-09-08T00:00:00Z".to_owned(),
+                    "queue-agent".to_owned(),
+                    provider,
+                    "turn.completed".to_owned(),
+                    json!({}),
+                    json!({}),
+                ));
+                let super::AgentCommand::Prompt {
+                    request_id,
+                    text,
+                    attachments,
+                    ..
+                } = received.recv().await.unwrap()
+                else {
+                    panic!("expected queued prompt");
+                };
+                assert_eq!(text, format!("prompt {position}"));
+                assert_eq!(
+                    attachments,
+                    if position == 1 {
+                        vec![context.clone()]
+                    } else {
+                        vec![]
+                    }
+                );
+                broker.handle_runtime_event(super::RuntimeEvent::Response {
+                    request_id,
+                    result: json!({"accepted": true}),
+                });
+                assert_eq!(
+                    broker.agents["queue-agent"].summary.state,
+                    super::AgentState::Running
+                );
+            }
+            broker.handle_provider_event(EventEnvelope::new(
+                "2026-09-08T00:00:00Z".to_owned(),
+                "queue-agent".to_owned(),
+                provider,
+                "turn.failed".to_owned(),
+                json!({}),
+                json!({}),
+            ));
+            assert!(broker.agents["queue-agent"].queued_prompts.is_empty());
+            assert!(
+                received.try_recv().is_err(),
+                "failure must not start next queued prompt"
+            );
+            assert!(broker.queued_runtime_requests.is_empty());
+            // An asynchronous provider rejection must surface instead of silently
+            // consuming an already acknowledged queued prompt.
+            broker.agents.get_mut("queue-agent").unwrap().summary.state =
+                super::AgentState::Running;
+            broker
+                .send_agent_input(
+                    super::RequestId::Integer(44),
+                    fixture["params"].clone(),
+                    super::InputKind::Prompt,
+                )
+                .await;
+            broker.dispatch_queued_prompt("queue-agent");
+            let super::AgentCommand::Prompt { request_id, .. } = received.recv().await.unwrap()
+            else {
+                panic!("expected queued prompt");
+            };
+            broker.handle_runtime_event(super::RuntimeEvent::RequestFailed {
+                request_id,
+                agent_id: "queue-agent".to_owned(),
+                code: -32_013,
+                message: "fixture rejection".to_owned(),
+                fail_agent: false,
+            });
+            assert_eq!(
+                broker.agents["queue-agent"].summary.state,
+                super::AgentState::Disconnected
+            );
+            assert!(broker.queued_runtime_requests.is_empty());
+            assert!(broker.agents["queue-agent"].queued_prompts.is_empty());
+            let mut saw_error = false;
+            while let Ok(response) = responses.try_recv() {
+                saw_error |= response["params"]["type"] == "broker.error";
+            }
+            assert!(
+                saw_error,
+                "queued provider rejection is visible to the client"
+            );
+        }
     }
 
     #[tokio::test]

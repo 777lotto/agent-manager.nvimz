@@ -364,7 +364,8 @@
       "properties": {
         "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "input": { "$ref": "#/$defs/input" },
-        "provider_options": { "$ref": "#/$defs/providerOptions" }
+        "provider_options": { "$ref": "#/$defs/providerOptions" },
+        "queue": { "type": "boolean", "default": false, "description": "For agent/prompt, accept input into the session FIFO while running or waiting for a human request. Queued acceptance returns accepted: true, queued: true, and a one-based position. Interrupt/failure cancels pending prompts. In-memory only; maximum 32 pending prompts. Ignored for agent/steer." }
       }
     },
     "resumeParams": {

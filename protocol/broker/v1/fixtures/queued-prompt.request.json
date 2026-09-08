@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "agent/prompt",
+  "params": {
+    "agent_id": "queue-agent",
+    "input": {
+      "text": "queued follow-up",
+      "attachments": []
+    },
+    "queue": true
+  }
+}

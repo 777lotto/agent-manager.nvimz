@@ -468,6 +468,21 @@ async fn prove_embedded_flow(provider: Provider) {
     );
     harness
         .send(request(
+            4,
+            "agent/prompt",
+            json!({
+                "agent_id": agent_id,
+                "input": { "text": "follow-up prompt", "attachments": [] },
+                "queue": true,
+            }),
+        ))
+        .await;
+    assert_eq!(
+        harness.response(4).await["result"],
+        json!({ "accepted": true, "queued": true, "position": 1 })
+    );
+    harness
+        .send(request(
             27,
             "agent/approval/respond",
             json!({
@@ -519,6 +534,9 @@ async fn prove_embedded_flow(provider: Provider) {
     harness.event("file.changed").await;
     harness.event("message.delta").await;
     harness.event("turn.completed").await;
+    // The queued follow-up starts automatically after the first turn completes.
+    harness.event("message.delta").await;
+    harness.event("turn.completed").await;
     harness.state("completed").await;
 
     harness
@@ -531,19 +549,6 @@ async fn prove_embedded_flow(provider: Provider) {
     let history = harness.response(24).await;
     assert_eq!(history["result"]["messages"][0]["role"], "user");
     assert_eq!(history["result"]["messages"][1]["text"], "historic answer");
-
-    send_input(
-        &mut harness,
-        4,
-        "agent/prompt",
-        &agent_id,
-        "follow-up prompt",
-    )
-    .await;
-    assert_eq!(harness.response(4).await["result"]["accepted"], true);
-    harness.event("message.delta").await;
-    harness.event("turn.completed").await;
-    harness.state("completed").await;
 
     send_input(
         &mut harness,
@@ -569,6 +574,11 @@ async fn prove_embedded_flow(provider: Provider) {
         .await;
     assert_eq!(harness.response(29).await["error"]["code"], -32_013);
 
+    harness.send(request(30, "agent/prompt", json!({
+        "agent_id": agent_id, "input": { "text": "cancel this queued prompt", "attachments": [] }, "queue": true,
+    }))).await;
+    assert_eq!(harness.response(30).await["result"]["queued"], true);
+
     send_input(&mut harness, 6, "agent/steer", &agent_id, "steering input").await;
     assert_eq!(harness.response(6).await["result"]["accepted"], true);
     harness.event("message.delta").await;
@@ -588,6 +598,11 @@ async fn prove_embedded_flow(provider: Provider) {
             || interrupted_payload["subtype"] == "interrupted"
     );
     harness.state("interrupted").await;
+    assert!(
+        harness.transcript.iter().any(
+            |message| message["params"]["payload"]["message"] == "Cancelled 1 queued prompt(s)"
+        )
+    );
 
     harness.send(request(8, "agent/list", json!({}))).await;
     let listed = harness.response(8).await;

@@ -196,6 +196,9 @@ local function pure_model_test()
     payload = { input_tokens = 4, output_tokens = 2 },
   }))
   assert_equal(model:usage_for().input_tokens, 4, "usage projection")
+  for _, activity in ipairs(model:activity()) do
+    assert(activity.type ~= "usage.updated", "usage updates do not enter the Activity log")
+  end
   assert(model:apply_history("agent-1", {
     { id = "u", role = "user", text = "historic" },
     { id = "a", role = "assistant", text = "reply" },
@@ -1050,6 +1053,7 @@ local function integration_test()
   assert_equal(manager.pending_approval_count(), 0, "resolved approval count")
   assert(buffer_contains(completed.view.buffers.conversation, "interactive answer"), "conversation response")
   assert(buffer_contains(completed.view.buffers.activity, "input_tokens: 12"), "usage presentation")
+  assert(not buffer_contains(completed.view.buffers.activity, "usage.updated"), "usage event log is hidden")
   assert(buffer_contains(completed.view.buffers.agents, "dirty buffer conflict"), "conflict presentation")
 
   local conflict = manager.status().model.file_conflicts[agent_id][test_file]
@@ -1092,6 +1096,16 @@ local function integration_test()
   await("second active turn", function()
     return manager.list()[1].state == "running"
   end)
+  local queued_prompt = nil
+  assert(manager.prompt(agent_id, "queued follow-up", function(result, err)
+    assert_equal(err, nil, "active prompt queues without a state error")
+    queued_prompt = result
+  end))
+  await("queued prompt accepted", function()
+    return queued_prompt ~= nil
+  end)
+  assert_equal(queued_prompt.queued, true, "prompt client opts into broker queue")
+  assert_equal(queued_prompt.position, 1, "queued prompt position")
   assert(manager.steer(agent_id, "more detail"))
   await("steering delta", function()
     local conversation = manager.status().model.conversations[agent_id]

@@ -62,6 +62,9 @@ local function activity_detail(event)
 end
 
 local function is_activity(event_type)
+  if event_type == "usage.updated" then
+    return false
+  end
   return event_type:match("^tool%.")
     or event_type:match("^file%.")
     or event_type:match("^diff%.")

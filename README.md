@@ -194,6 +194,16 @@ Press `<Esc>` first when typing in the prompt; use `i` to type in expanded
 Conversation. The prompt's Up/Down arrows move
 one visible wrapped line at a time in both Normal and Insert modes.
 
+Prompts submitted during a running turn are queued for that session and run in
+order after successful completion. The prompt box clears once queued, and a
+notification shows its queue position. Interrupting or failing the turn cancels
+pending follow-ups and reports the cancellation in Activity. Queues are held in
+broker memory (up to 32 pending prompts per session) and do not survive a broker
+restart. Explicit steering (`ts`) still sends input to the current turn.
+
+Token totals remain visible, but `usage.updated` events are omitted from the
+Activity log.
+
 Activity displays provider-supplied file patches with diff highlighting. `df`
 shows a workspace diff in Activity, including when the provider does not supply
 patch events. The inspected diff is a snapshot; press `df` again to refresh it.

@@ -146,6 +146,12 @@ split sizes. Expanded Conversation keeps its prompt box. Press <Esc> to leave
 Insert mode before using we or w1/w2/w3. Prompt Up/Down move by visible wrapped
 lines in both Normal and Insert modes.
 
+Prompts submitted while running are queued per session and run in order after
+successful completion. Interrupt/failure cancels queued follow-ups with an
+Activity notice. Up to 32 prompts can wait in broker memory; they do not survive
+a broker restart. ts still steers the current turn. Token totals remain visible,
+but usage.updated events do not appear in the Activity log.
+
 Activity shows file patches supplied by the provider with diff highlighting.
 The df command opens a workspace diff snapshot in Activity; repeat df to refresh.
 

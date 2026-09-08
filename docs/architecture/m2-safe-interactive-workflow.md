@@ -193,3 +193,17 @@ Activity renders provider-supplied diff and file-change patches with addition,
 deletion, and hunk highlighting. Explicit `df` inspection displays a workspace
 diff snapshot in Activity; repeating `df` refreshes that snapshot. Providers that
 only report changed paths still require explicit workspace diff inspection.
+
+### Prompt submission during active turns
+
+The Neovim client opts into `agent/prompt` queueing with `queue: true`. The broker
+accepts up to 32 pending prompts per agent while running or waiting for human
+input/approval. Each entry captures validated attachments, pending editor
+context, and provider options at submission. Successful completion dispatches
+one queued prompt in FIFO order. Interrupt, failed turns, and provider failure
+cancel pending follow-ups with a redacted Activity notice. Queues live only in
+broker memory; they are not persisted across broker restarts. Explicit steering
+continues to target the current turn.
+
+`usage.updated` still updates usage totals and event sequence tracking, but is
+excluded from the Activity log projection.

@@ -119,6 +119,7 @@ class Broker:
         self.current: dict[str, Any] = {}
         self.events = Events(self)
         self.prompt_number = 0
+        self.queued_prompt_count = 0
         self.queued_context: list[dict[str, Any]] = []
         self.test_file = os.environ.get("AGENT_MANAGER_TEST_FILE")
         self.deleted_sessions: set[tuple[str, str]] = set()
@@ -478,6 +479,17 @@ class Broker:
             if not isinstance(params.get("provider_options"), dict):
                 reject(request, "provider_options must be an object")
                 return True
+            if self.current["state"] == "running":
+                if params.get("queue") is not True:
+                    reject(request, "active prompt requires queue: true")
+                    return True
+                self.queued_prompt_count += 1
+                respond(request, {
+                    "accepted": True,
+                    "queued": True,
+                    "position": self.queued_prompt_count,
+                })
+                return True
             self.prompt_number += 1
             self.current["provider_options"] = params.get(
                 "provider_options", self.current.get("provider_options", {})
@@ -547,6 +559,11 @@ class Broker:
             respond(request, {"accepted": True})
             self.events.send("message.delta", {"delta": " steered"})
         elif method == "agent/interrupt":
+            if self.queued_prompt_count:
+                self.events.send("broker.notice", {
+                    "message": f"Cancelled {self.queued_prompt_count} queued prompt(s)",
+                })
+                self.queued_prompt_count = 0
             respond(request, {"interrupted": True})
             self.events.send(
                 "turn.completed",

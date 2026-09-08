@@ -29,6 +29,15 @@ generated bundle is a review baseline, not a required installed CLI version.
 
 - Breaking method, field, enum, or semantic changes require a new protocol
   directory. Do not silently reinterpret v1.
+- `agent/prompt` accepts optional `queue: true` (default false). While running
+  or waiting for approval/input, acceptance returns
+  `{ "accepted": true, "queued": true, "position": 1 }`, with the current
+  one-based FIFO position. At most 32 prompts wait per agent. Input, validated
+  context, and provider options are captured at acceptance; the next prompt
+  starts only after successful completion. Interrupt/failure cancels pending
+  prompts with a redacted `broker.notice`. Queues are in-memory and do not
+  survive broker restarts. Without the flag, active-turn prompts retain the v1
+  state error. `agent/steer` ignores the flag and retains its existing semantics.
 - Optional additive fields require an explicit schema change and fixtures in
   every consuming language.
 - Unknown provider events become `provider.notice`; they do not expand the
