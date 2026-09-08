@@ -1959,11 +1959,6 @@ local function input_ui(prompt, callback)
   end)
 end
 
-local function draft_task_id()
-  local suffix = math.floor(vim.uv.hrtime() % 1000000)
-  return string.format("session-%s-%06d", os.date("!%Y%m%d-%H%M%S"), suffix)
-end
-
 local function start_draft_with_prompt(text, callback)
   local draft = runtime and runtime.draft
   if not draft then
@@ -1992,7 +1987,7 @@ local function start_draft_with_prompt(text, callback)
   if draft.repository then
     start_options.managed_workspace = {
       repository = draft.repository,
-      task_id = draft_task_id(),
+      task_id = SessionWorkspace.new_task_id(),
       resume = false,
     }
   else

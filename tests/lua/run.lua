@@ -1210,6 +1210,27 @@ local function integration_test()
   vim.fn.delete(test_file)
 end
 
+local function new_task_identity_test()
+  local mappings = require("agent_manager.session_workspace")
+  local original_hrtime = vim.uv.hrtime
+  local original_date = os.date
+  vim.uv.hrtime = function() return 123456789 end
+  os.date = function() return "20260908-180300" end
+  local ids = {}
+  for _ = 1, 100 do
+    local id = mappings.new_task_id()
+    assert(not ids[id], "distinct new tasks even with identical clock readings")
+    assert(id:match("^session%-20260908%-180300%-s%x+$"), "lifecycle-safe task ID")
+    -- A letter-prefixed final segment survives the lifecycle's repeated
+    -- removal of numeric/current/retry suffixes, unlike legacy session IDs.
+    assert(not id:match("%-%d+$"), "task must not look like a numbered retry")
+    assert(not id:match("%-current$") and not id:match("%-retry$"), "task is not a retry sibling")
+    ids[id] = true
+  end
+  vim.uv.hrtime = original_hrtime
+  os.date = original_date
+end
+
 local function managed_workspace_ui_test()
   local manager = require("agent_manager")
   configure_fake(manager)
@@ -1310,7 +1331,7 @@ local function managed_workspace_ui_test()
   assert_equal(select_count, 2, "new session asks for provider and model")
   assert_equal(agent.workspace_strategy, "worktree", "managed strategy")
   assert_equal(agent.managed_workspace.repository, "agent-manager", "managed repository")
-  assert(agent.managed_workspace.task_id:match("^session%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-%d%d%d%d%d%d$"), "generated managed task ID")
+  assert(agent.managed_workspace.task_id:match("^session%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d%-s%x+$"), "generated managed task ID")
   assert_equal(agent.managed_workspace.base_branch, "bluff", "managed task base")
   assert_equal(agent.provider_options.model, nil, "provider default reaches the broker")
   assert_equal(agent.runtime.provider_version, "0.153.0", "actual runtime version")
@@ -1638,6 +1659,7 @@ local function run()
   public_input_validation_test()
   real_broker_handshake_test()
   durable_reconnect_test()
+  new_task_identity_test()
   managed_workspace_ui_test()
   managed_start_uses_focused_layout_without_inventory_test()
   managed_decision_render_test()

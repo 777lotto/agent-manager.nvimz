@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,9 @@ class Broker:
         self.queued_context: list[dict[str, Any]] = []
         self.test_file = os.environ.get("AGENT_MANAGER_TEST_FILE")
         self.deleted_sessions: set[tuple[str, str]] = set()
+        # Mirror the lifecycle's retry-sibling policy with an older numeric
+        # session task already present in the repository.
+        self.logical_tasks = {("agent-manager", "session")}
 
     def publish_state(self) -> None:
         send(
@@ -402,10 +406,16 @@ class Broker:
             managed = params.get("managed_workspace")
             if managed:
                 task_id = managed["task_id"]
+                logical_task = re.sub(r"(?:-(?:current|retry|[0-9]+))+$", "", task_id)
+                logical_key = (managed["repository"], logical_task)
+                if not managed.get("resume") and logical_key in self.logical_tasks:
+                    reject(request, "task mapping already exists; resume the existing task")
+                    return True
+                self.logical_tasks.add(logical_key)
                 path = f"/workspace/worktrees/{managed['repository']}/{task_id}"
                 self.launch(
                     request,
-                    "thread-lua-managed",
+                    f"thread-lua-managed-{len(self.records) + 1}",
                     params["provider"],
                     path,
                     task_id,

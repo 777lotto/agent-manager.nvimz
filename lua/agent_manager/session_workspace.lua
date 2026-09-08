@@ -96,4 +96,14 @@ function M.task_id(session)
   return "session-" .. key(session):sub(1, 32)
 end
 
+local draft_task_sequence = 0
+function M.new_task_id()
+  draft_task_sequence = draft_task_sequence + 1
+  local entropy = table.concat({ vim.fn.getpid(), vim.uv.hrtime(), draft_task_sequence }, ":")
+  local suffix = vim.fn.sha256(entropy):sub(1, 24)
+  -- The lifecycle strips trailing numeric segments as retry siblings. Keep a
+  -- letter in the final segment so independent sessions retain their identity.
+  return string.format("session-%s-s%s", os.date("!%Y%m%d-%H%M%S"), suffix)
+end
+
 return M
