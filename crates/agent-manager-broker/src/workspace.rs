@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::protocol::ManagedWorkspace;
@@ -75,6 +76,8 @@ pub enum WorkspaceError {
     Timeout,
     #[error("workspace lifecycle command refused the request")]
     Refused,
+    #[error("workspace lifecycle refused: {0}")]
+    RefusedReason(&'static str),
     #[error("workspace lifecycle audit exceeded the size limit")]
     TooLarge,
     #[error("workspace lifecycle audit returned invalid JSON")]
@@ -246,17 +249,93 @@ impl WorkspaceLifecycle {
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
-            .await
-            .map_err(|_| WorkspaceError::Timeout)?
-            .map_err(|_| WorkspaceError::Spawn)?;
+        let mut child = command.spawn().map_err(|_| WorkspaceError::Spawn)?;
+        let mut stderr = child.stderr.take().ok_or(WorkspaceError::Spawn)?;
+        let diagnostics = async move {
+            // Drain stderr so a verbose helper cannot block, retaining only a
+            // small prefix. Raw diagnostics never enter protocol output or logs.
+            let mut retained = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stderr.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min(8192 - retained.len());
+                retained.extend_from_slice(&buffer[..keep]);
+            }
+            Ok::<_, std::io::Error>(retained)
+        };
+        let (output, stderr) = tokio::time::timeout(COMMAND_TIMEOUT, async {
+            tokio::try_join!(child.wait_with_output(), diagnostics)
+        })
+        .await
+        .map_err(|_| WorkspaceError::Timeout)?
+        .map_err(|_| WorkspaceError::Spawn)?;
         if !output.status.success() {
-            return Err(WorkspaceError::Refused);
+            return Err(refusal_error(&stderr));
         }
         Ok(output.stdout)
     }
+}
+
+fn refusal_error(stderr: &[u8]) -> WorkspaceError {
+    // Only translate exact, known lifecycle reason codes. The detail may
+    // contain credentials from a failed Git command and must stay private.
+    let Ok(stderr) = std::str::from_utf8(stderr) else {
+        return WorkspaceError::Refused;
+    };
+    for line in stderr.lines() {
+        let Some((code, _)) = line
+            .strip_prefix("REFUSE ")
+            .and_then(|line| line.split_once(": "))
+        else {
+            continue;
+        };
+        let message = match code {
+            "dirty_canonical" => {
+                "canonical checkout has uncommitted changes; preserve or commit them before starting"
+            }
+            "canonical_wrong_branch" => "canonical checkout is not on its registered base branch",
+            "canonical_base_diverged" => {
+                "canonical checkout has diverged from the broker base; reconcile it before starting"
+            }
+            "canonical_missing" => "registered canonical checkout is unavailable",
+            "unapproved_transport" => {
+                "repository remote does not use its approved broker transport"
+            }
+            "lock_busy" => {
+                "workspace lifecycle is busy; retry after the current operation finishes"
+            }
+            "duplicate_task" | "parallel_retry" => {
+                "task mapping already exists; resume the existing task"
+            }
+            "lease_owned" | "not_claim_owner" => {
+                "task lease is held by another session or keep; release it through the lifecycle owner"
+            }
+            "ambiguous_resume" => {
+                "saved task mapping does not match its worktree; lifecycle recovery is required"
+            }
+            "mise_untrusted" => {
+                "project Mise configuration requires reviewed trust; the worktree has been preserved"
+            }
+            "broker_unavailable" => {
+                "Git broker is unavailable; check broker access before retrying"
+            }
+            "command_failed" => {
+                "a lifecycle dependency command failed; inspect the lifecycle command directly for details"
+            }
+            "command_unavailable" => "a lifecycle dependency command could not start or timed out",
+            "worktree_create_failed" => {
+                "Git could not create the worktree; the task mapping has been preserved"
+            }
+            _ => return WorkspaceError::Refused,
+        };
+        return WorkspaceError::RefusedReason(message);
+    }
+    WorkspaceError::Refused
 }
 
 fn parse_claim_receipt(
@@ -473,6 +552,39 @@ fn valid_identifier(value: &str, allow_dot: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AuditDocument, ClaimReceipt, parse_claim_receipt, project_inventory};
+
+    #[test]
+    fn refusal_details_are_never_exposed() {
+        for (input, expected) in [
+            (
+                b"REFUSE dirty_canonical: private payload\n".as_slice(),
+                "canonical checkout has uncommitted changes",
+            ),
+            (
+                b"noise\nREFUSE lease_owned: private payload\n",
+                "task lease is held",
+            ),
+            (
+                b"REFUSE mise_untrusted: private payload\n",
+                "project Mise configuration requires reviewed trust",
+            ),
+        ] {
+            let error = super::refusal_error(input).to_string();
+            assert!(error.contains(expected));
+            assert!(!error.contains("private payload"));
+        }
+        for input in [
+            b"REFUSE secret_unknown_code: private payload".as_slice(),
+            b"REFUSE dirty_canonical private payload",
+            b"private payload",
+            b"REFUSE dirty_canonical: \xff",
+        ] {
+            assert!(matches!(
+                super::refusal_error(input),
+                super::WorkspaceError::Refused
+            ));
+        }
+    }
 
     #[test]
     fn parses_only_the_exact_claim_receipt() {
