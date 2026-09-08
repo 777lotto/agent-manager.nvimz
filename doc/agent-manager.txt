@@ -189,6 +189,13 @@ ID, which becomes the session title. Submitted text stays in the prompt until
 the broker accepts it; accepted text clears and returns the box to its minimum
 height, while failed submissions remain available to edit and retry.
 
+Opening a saved session reuses its workspace without asking for a name. The
+provider/session association is saved in stdpath('state') under
+agent-manager/session-workspaces/ so an editor restart or stale provider cwd
+cannot assign another workspace. Older canonical-only sessions receive a stable
+automatic task ID. Missing worktrees or conflicting/unreadable associations
+require recovery; resume never creates a replacement for a saved mapping.
+
 The key at the top maps `● Codex` and `◆ Claude` plus `● active`, `○ resume`,
 `? check`, and `× ended` to their semantic colors. Session rows show only the
 two symbols and title. Active external rows remain read-only while the

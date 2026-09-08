@@ -360,9 +360,14 @@ first prompt generates a collision-resistant lowercase task ID. The broker
 then asks the lifecycle authority to atomically claim the resulting
 `agent/<task-id>` branch, lease, and `~/worktrees/<repo>/<task-id>` checkout
 before it starts a provider. Continuing a
-saved row reuses its mapped workspace; if its history came from a canonical
-checkout, Agent Manager asks for a workspace name and safely moves the resumed
-provider into that worktree. No raw worktree path is requested.
+saved row reuses its mapped workspace, including after editor restarts. Local
+associations are stored under Neovim's state directory in
+`agent-manager/session-workspaces/`, keyed by provider and session ID. If an older
+session has only a canonical checkout, Agent Manager automatically assigns a
+stable task ID and saves the resulting association. It never asks for a new
+workspace name during resume. Unreadable or conflicting associations stop resume
+for recovery; an unavailable mapped worktree is reported by the lifecycle
+authority without creating a replacement.
 
 The lifecycle command remains the authority for Git fetches, branches, leases,
 handoff, and cleanup. Agent Manager exposes inventory, claim/resume, and
